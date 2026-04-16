@@ -19,6 +19,7 @@ use smart_home_core::event::Event;
 use smart_home_core::model::{DeviceId, Room, RoomId};
 use smart_home_core::runtime::Runtime;
 use smart_home_core::store::DeviceStore;
+use smart_home_scenes::{SceneCatalog, SceneExecutionResult, SceneSummary};
 use store_sql::SqliteDeviceStore;
 use tracing::Level;
 
@@ -49,6 +50,18 @@ struct RoomCommandResult {
     device_id: String,
     status: &'static str,
     message: Option<String>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    runtime: Arc<Runtime>,
+    scenes: Arc<SceneCatalog>,
+}
+
+#[derive(Debug, Serialize)]
+struct SceneExecuteResponse {
+    status: &'static str,
+    results: Vec<SceneExecutionResult>,
 }
 
 type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<AdapterSummary>);
@@ -98,6 +111,15 @@ async fn main() -> Result<()> {
         build_adapters(&config).context("failed to build adapters")?;
 
     let runtime = Arc::new(Runtime::new(adapters, config.runtime));
+    let scenes = if config.scenes.enabled {
+        Arc::new(
+            SceneCatalog::load_from_directory(&config.scenes.directory).with_context(|| {
+                format!("failed to load scenes from {}", config.scenes.directory)
+            })?,
+        )
+    } else {
+        Arc::new(SceneCatalog::empty())
+    };
 
     if let Some(store) = &device_store {
         let rooms = store
@@ -115,7 +137,13 @@ async fn main() -> Result<()> {
             .context("failed to restore persisted devices into registry")?;
     }
 
-    let app = app(runtime.clone(), adapter_summaries);
+    let app = app(
+        AppState {
+            runtime: runtime.clone(),
+            scenes,
+        },
+        adapter_summaries,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .context("failed to bind API listener")?;
@@ -355,10 +383,12 @@ async fn reconcile_device_store(
     Ok(())
 }
 
-fn app(runtime: Arc<Runtime>, adapter_summaries: Vec<AdapterSummary>) -> Router {
+fn app(state: AppState, adapter_summaries: Vec<AdapterSummary>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/adapters", get(adapters))
+        .route("/scenes", get(list_scenes))
+        .route("/scenes/{id}/execute", post(execute_scene))
         .route("/rooms", get(list_rooms).post(create_room))
         .route("/rooms/{id}", get(get_room))
         .route("/rooms/{id}/devices", get(list_room_devices))
@@ -369,7 +399,7 @@ fn app(runtime: Arc<Runtime>, adapter_summaries: Vec<AdapterSummary>) -> Router 
         .route("/devices/{id}/command", post(command_device))
         .route("/events", get(events))
         .layer(Extension(Arc::new(adapter_summaries)))
-        .with_state(runtime)
+        .with_state(state)
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -382,12 +412,35 @@ async fn adapters(
     Json((*adapter_summaries).clone())
 }
 
-async fn list_rooms(State(runtime): State<Arc<Runtime>>) -> Json<Vec<Room>> {
-    Json(runtime.registry().list_rooms())
+async fn list_scenes(State(state): State<AppState>) -> Json<Vec<SceneSummary>> {
+    Json(state.scenes.summaries())
+}
+
+async fn execute_scene(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SceneExecuteResponse>, ApiError> {
+    let Some(results) = state
+        .scenes
+        .execute(&id, state.runtime.clone())
+        .await
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?
+    else {
+        return Err(ApiError::not_found(format!("scene '{id}' not found")));
+    };
+
+    Ok(Json(SceneExecuteResponse {
+        status: "ok",
+        results,
+    }))
+}
+
+async fn list_rooms(State(state): State<AppState>) -> Json<Vec<Room>> {
+    Json(state.runtime.registry().list_rooms())
 }
 
 async fn create_room(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Json(request): Json<CreateRoomRequest>,
 ) -> Result<Json<Room>, ApiError> {
     let id = request.id.trim();
@@ -410,15 +463,16 @@ async fn create_room(
         id: RoomId(id.to_string()),
         name: name.to_string(),
     };
-    runtime.registry().upsert_room(room.clone()).await;
+    state.runtime.registry().upsert_room(room.clone()).await;
     Ok(Json(room))
 }
 
 async fn get_room(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Room>, ApiError> {
-    runtime
+    state
+        .runtime
         .registry()
         .get_room(&RoomId(id.clone()))
         .map(Json)
@@ -426,28 +480,29 @@ async fn get_room(
 }
 
 async fn list_room_devices(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<smart_home_core::model::Device>>, ApiError> {
     let room_id = RoomId(id.clone());
-    if runtime.registry().get_room(&room_id).is_none() {
+    if state.runtime.registry().get_room(&room_id).is_none() {
         return Err(ApiError::not_found(format!("room '{id}' not found")));
     }
 
-    Ok(Json(runtime.registry().list_devices_in_room(&room_id)))
+    Ok(Json(
+        state.runtime.registry().list_devices_in_room(&room_id),
+    ))
 }
 
-async fn list_devices(
-    State(runtime): State<Arc<Runtime>>,
-) -> Json<Vec<smart_home_core::model::Device>> {
-    Json(runtime.registry().list())
+async fn list_devices(State(state): State<AppState>) -> Json<Vec<smart_home_core::model::Device>> {
+    Json(state.runtime.registry().list())
 }
 
 async fn get_device(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<smart_home_core::model::Device>, ApiError> {
-    runtime
+    state
+        .runtime
         .registry()
         .get(&DeviceId(id.clone()))
         .map(Json)
@@ -455,24 +510,26 @@ async fn get_device(
 }
 
 async fn assign_device_room(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<AssignRoomRequest>,
 ) -> Result<Json<smart_home_core::model::Device>, ApiError> {
     let device_id = DeviceId(id.clone());
 
-    if runtime.registry().get(&device_id).is_none() {
+    if state.runtime.registry().get(&device_id).is_none() {
         return Err(ApiError::not_found(format!("device '{id}' not found")));
     }
 
     let room_id = request.room_id.map(RoomId);
-    runtime
+    state
+        .runtime
         .registry()
         .assign_device_to_room(&device_id, room_id)
         .await
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
 
-    runtime
+    state
+        .runtime
         .registry()
         .get(&device_id)
         .map(Json)
@@ -480,13 +537,13 @@ async fn assign_device_room(
 }
 
 async fn command_device(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(command): Json<DeviceCommand>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let device_id = DeviceId(id.clone());
 
-    if runtime.registry().get(&device_id).is_none() {
+    if state.runtime.registry().get(&device_id).is_none() {
         return Err(ApiError::not_found(format!("device '{id}' not found")));
     }
 
@@ -494,7 +551,7 @@ async fn command_device(
         .validate()
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
 
-    match runtime.command_device(&device_id, command).await {
+    match state.runtime.command_device(&device_id, command).await {
         Ok(true) => Ok(Json(json!({ "status": "ok" }))),
         Ok(false) => Err(ApiError::not_implemented(format!(
             "device commands are not implemented for '{id}'"
@@ -504,12 +561,12 @@ async fn command_device(
 }
 
 async fn command_room_devices(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(command): Json<DeviceCommand>,
 ) -> Result<Json<Vec<RoomCommandResult>>, ApiError> {
     let room_id = RoomId(id.clone());
-    if runtime.registry().get_room(&room_id).is_none() {
+    if state.runtime.registry().get_room(&room_id).is_none() {
         return Err(ApiError::not_found(format!("room '{id}' not found")));
     }
 
@@ -517,12 +574,16 @@ async fn command_room_devices(
         .validate()
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
 
-    let devices = runtime.registry().list_devices_in_room(&room_id);
+    let devices = state.runtime.registry().list_devices_in_room(&room_id);
     let mut results = Vec::with_capacity(devices.len());
 
     for device in devices {
         let device_id = device.id.clone();
-        match runtime.command_device(&device_id, command.clone()).await {
+        match state
+            .runtime
+            .command_device(&device_id, command.clone())
+            .await
+        {
             Ok(true) => results.push(RoomCommandResult {
                 device_id: device_id.0,
                 status: "ok",
@@ -544,8 +605,8 @@ async fn command_room_devices(
     Ok(Json(results))
 }
 
-async fn events(ws: WebSocketUpgrade, State(runtime): State<Arc<Runtime>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_events_socket(socket, runtime))
+async fn events(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_events_socket(socket, state.runtime))
 }
 
 async fn handle_events_socket(mut socket: WebSocket, runtime: Arc<Runtime>) {
@@ -647,6 +708,7 @@ mod tests {
         AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
     };
     use smart_home_core::runtime::RuntimeConfig;
+    use smart_home_scenes::SceneCatalog;
     use store_sql::SqliteDeviceStore;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -817,9 +879,14 @@ mod tests {
                 database_url: Some(temp_sqlite_url()),
                 auto_create: true,
             },
+            scenes: smart_home_core::config::ScenesConfig::default(),
             telemetry: smart_home_core::config::TelemetryConfig::default(),
             adapters: adapters.into_iter().collect(),
         }
+    }
+
+    fn empty_scenes() -> Arc<SceneCatalog> {
+        Arc::new(SceneCatalog::empty())
     }
 
     async fn create_runtime_with_hydrated_store(device: Device) -> Arc<Runtime> {
@@ -868,7 +935,10 @@ mod tests {
         runtime: Arc<Runtime>,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
         let app = app(
-            runtime,
+            AppState {
+                runtime,
+                scenes: empty_scenes(),
+            },
             vec![AdapterSummary {
                 name: "open_meteo".to_string(),
                 status: "running",
@@ -890,6 +960,50 @@ mod tests {
         });
 
         (addr, shutdown_tx, handle)
+    }
+
+    async fn spawn_test_server_with_scenes(
+        runtime: Arc<Runtime>,
+        scenes: Arc<SceneCatalog>,
+    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let app = app(
+            AppState { runtime, scenes },
+            vec![AdapterSummary {
+                name: "open_meteo".to_string(),
+                status: "running",
+            }],
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        (addr, shutdown_tx, handle)
+    }
+
+    fn write_temp_scene_dir(files: &[(&str, &str)]) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("smart-home-api-scenes-{unique}"));
+        fs::create_dir_all(&path).expect("create temp scene dir");
+
+        for (name, source) in files {
+            fs::write(path.join(name), source).expect("write temp scene file");
+        }
+
+        path
     }
 
     #[tokio::test]
@@ -1073,6 +1187,104 @@ mod tests {
         assert_eq!(
             body.as_array().expect("room command results array").len(),
             2
+        );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn scenes_endpoint_lists_loaded_scenes() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let scene_dir = write_temp_scene_dir(&[(
+            "video.lua",
+            r#"return {
+                id = "video",
+                name = "Video",
+                description = "Prepare devices for a video call",
+                execute = function(ctx)
+                end
+            }"#,
+        )]);
+        let scenes = Arc::new(SceneCatalog::load_from_directory(&scene_dir).expect("scenes load"));
+        let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime, scenes).await;
+
+        let response = reqwest::get(format!("http://{addr}/scenes"))
+            .await
+            .expect("scenes request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<Value>().await.expect("scenes JSON body");
+        assert_eq!(body.as_array().expect("scenes array").len(), 1);
+        assert_eq!(body[0]["id"], "video");
+        assert_eq!(body[0]["name"], "Video");
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn execute_scene_endpoint_runs_scene_commands() {
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("test device exists");
+
+        let scene_dir = write_temp_scene_dir(&[(
+            "set-brightness.lua",
+            r#"return {
+                id = "set_brightness",
+                name = "Set Brightness",
+                execute = function(ctx)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 42,
+                    })
+                end
+            }"#,
+        )]);
+        let scenes = Arc::new(SceneCatalog::load_from_directory(&scene_dir).expect("scenes load"));
+        let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime.clone(), scenes).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/scenes/set_brightness/execute"))
+            .send()
+            .await
+            .expect("scene execute request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("scene execute json body");
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["results"][0]["target"], "test:device");
+        assert_eq!(body["results"][0]["status"], "ok");
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("updated device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(42))
         );
 
         let _ = shutdown.send(());
@@ -1526,6 +1738,7 @@ mod tests {
                 database_url: Some("postgres://localhost/smart-home".to_string()),
                 auto_create: true,
             },
+            scenes: smart_home_core::config::ScenesConfig::default(),
             telemetry: smart_home_core::config::TelemetryConfig::default(),
             adapters: HashMap::new(),
         };

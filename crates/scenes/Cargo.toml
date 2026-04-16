@@ -1,0 +1,16 @@
+[package]
+name = "smart-home-scenes"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+serde = { version = "1", features = ["derive"] }
+smart-home-core = { path = "../core" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -52,6 +52,65 @@ Response shape:
 ]
 ```
 
+## Scenes
+
+### `GET /scenes`
+
+Returns all scenes loaded from the configured scene directory.
+
+Example:
+
+```bash
+curl http://127.0.0.1:3000/scenes
+```
+
+Response shape:
+
+```json
+[
+  {
+    "id": "video",
+    "name": "Video",
+    "description": "Prepare devices for a video call"
+  }
+]
+```
+
+### `POST /scenes/{id}/execute`
+
+Executes one loaded scene by ID.
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:3000/scenes/video/execute
+```
+
+Success response:
+
+```json
+{
+  "status": "ok",
+  "results": [
+    { "target": "roku_tv:tv", "status": "ok", "message": null },
+    { "target": "elgato_lights:light:0", "status": "ok", "message": null }
+  ]
+}
+```
+
+Per-target statuses:
+
+- `ok`
+- `unsupported`
+- `error`
+
+Error behavior:
+
+- `404` if the scene does not exist
+- `400` if the scene fails to execute or emits an invalid canonical command
+
+Scene execution currently runs commands sequentially in the order the Lua scene emits them.
+
 ## Devices
 
 ### `GET /devices`
@@ -320,12 +379,52 @@ Examples:
 }
 ```
 
+## Scene Asset Contract
+
+Scenes are structured Lua modules loaded from the configured scene directory.
+
+Each scene file must return a table with:
+
+- `id`
+- `name`
+- optional `description`
+- `execute = function(ctx) ... end`
+
+Current host API exposed to scenes:
+
+- `ctx:command(device_id, command_table)`
+
+Example:
+
+```lua
+return {
+  id = "video",
+  name = "Video",
+  description = "Prepare devices for a video call",
+  execute = function(ctx)
+    ctx:command("roku_tv:tv", {
+      capability = "power",
+      action = "off",
+    })
+
+    ctx:command("elgato_lights:light:0", {
+      capability = "power",
+      action = "on",
+    })
+  end
+}
+```
+
+`command_table` maps to the same canonical command shape used by `POST /devices/{id}/command`.
+
 ## Agent Usage Notes
 
 For MCP-style tools or agents working against the running system:
 
+- use `GET /scenes` to discover available scene assets
 - use `GET /devices` to discover the live canonical device graph
 - use `GET /rooms` to discover the room model
+- use `POST /scenes/{id}/execute` for scene-driven orchestration
 - use `POST /devices/{id}/room` to attach devices to user-defined rooms
 - use `POST /devices/{id}/command` for direct device control
 - use `POST /rooms/{id}/command` for room-wide control fanout

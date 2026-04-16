@@ -10,6 +10,10 @@ backend = "sqlite"
 database_url = "sqlite://data/smart-home.db"
 auto_create = true
 
+[scenes]
+enabled = true
+directory = "config/scenes"
+
 [telemetry]
 enabled = false
 

@@ -13,6 +13,8 @@ pub struct Config {
     #[serde(default)]
     pub persistence: PersistenceConfig,
     #[serde(default)]
+    pub scenes: ScenesConfig,
+    #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub adapters: AdaptersConfig,
@@ -32,6 +34,21 @@ pub struct PersistenceConfig {
     pub backend: PersistenceBackend,
     pub database_url: Option<String>,
     pub auto_create: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScenesConfig {
+    pub enabled: bool,
+    pub directory: String,
+}
+
+impl Default for ScenesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: "config/scenes".to_string(),
+        }
+    }
 }
 
 impl Default for PersistenceConfig {
@@ -100,6 +117,10 @@ impl Config {
                 .is_none()
         {
             bail!("persistence.database_url is required when persistence is enabled");
+        }
+
+        if self.scenes.enabled && self.scenes.directory.trim().is_empty() {
+            bail!("scenes.directory is required when scenes are enabled");
         }
 
         Ok(())

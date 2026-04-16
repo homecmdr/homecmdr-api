@@ -20,6 +20,7 @@ Start here depending on your goal:
 - build a new adapter: `config/docs/adapter_authoring_guide.md`
 - operate as an agent in this repo: `config/docs/agent_workflows.md`
 - understand why the factory model exists: `config/docs/adapter_factory_refactor_plan.md`
+- implement Lua-backed scenes: `config/docs/lua_scenes_implementation_plan.md`
 
 Adapter-specific docs:
 
@@ -33,6 +34,9 @@ Adapter-specific docs:
 smart-home/
 ├── config/
 │   ├── default.toml
+│   ├── scenes/
+│   ├── automations/
+│   ├── scripts/
 │   └── docs/
 ├── crates/
 │   ├── adapters/
@@ -41,6 +45,7 @@ smart-home/
 │   ├── adapter-roku-tv/
 │   ├── api/
 │   ├── core/
+│   ├── scenes/
 │   └── store-sql/
 └── README.md
 ```
@@ -136,9 +141,16 @@ Default config lives at:
 
 Current default config includes:
 
+- `scenes`
 - `open_meteo`
 - `elgato_lights`
 - `roku_tv`
+
+The default asset layout is:
+
+- `config/scenes/` for structured Lua scenes
+- `config/automations/` reserved for future automation assets
+- `config/scripts/` reserved for future free-form Lua scripts
 
 ## Running The API
 
@@ -206,6 +218,18 @@ curl -X POST http://127.0.0.1:3000/rooms/living_room/command \
   -d '{"capability":"power","action":"off"}'
 ```
 
+### List scenes
+
+```bash
+curl http://127.0.0.1:3000/scenes
+```
+
+### Execute a scene
+
+```bash
+curl -X POST http://127.0.0.1:3000/scenes/video/execute
+```
+
 ### Subscribe to live events
 
 ```bash
@@ -246,6 +270,44 @@ Examples already used in the repo:
 
 Validation happens in `core` before the adapter sees the command.
 Adapters are responsible for translating canonical commands into vendor-specific operations.
+
+## Lua Scenes
+
+Scenes are file-backed Lua assets loaded at startup from `config/scenes/`.
+
+Each scene file must return a table with:
+
+- `id`
+- `name`
+- optional `description`
+- `execute = function(ctx) ... end`
+
+Example:
+
+```lua
+return {
+  id = "video",
+  name = "Video",
+  description = "Prepare devices for a video call",
+  execute = function(ctx)
+    ctx:command("roku_tv:tv", {
+      capability = "power",
+      action = "off",
+    })
+
+    ctx:command("elgato_lights:light:0", {
+      capability = "power",
+      action = "on",
+    })
+  end
+}
+```
+
+Current scene host API:
+
+- `ctx:command(device_id, command_table)`
+
+Scene execution uses the same canonical command validation and adapter dispatch path as `POST /devices/{id}/command`.
 
 ## Event Model
 
