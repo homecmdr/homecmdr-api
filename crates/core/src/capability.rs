@@ -25,6 +25,7 @@ pub struct CapabilityDefinition {
     pub key: &'static str,
     pub schema: CapabilitySchema,
     pub read_only: bool,
+    pub actions: &'static [&'static str],
     pub description: &'static str,
 }
 
@@ -51,150 +52,199 @@ pub const EFFECT: &str = "effect";
 pub const TRANSITION: &str = "transition";
 pub const ILLUMINANCE: &str = "illuminance";
 pub const LED_INDICATION: &str = "led_indication";
+pub const POWER: &str = "power";
+pub const STATE: &str = "state";
 
 pub const COLOR_MODE_VALUES: [&str; 5] = ["color_temp", "rgb", "xy", "hs", "white"];
 pub const LIGHT_EFFECT_VALUES: [&str; 5] = ["none", "flash", "strobe", "colorloop", "random"];
+pub const POWER_VALUES: [&str; 2] = ["on", "off"];
+pub const AVAILABILITY_VALUES: [&str; 4] = ["online", "offline", "unavailable", "unknown"];
+
+pub const ACTION_GET: [&str; 1] = ["get"];
+pub const ACTION_SET: [&str; 1] = ["set"];
+pub const ACTION_POWER: [&str; 3] = ["on", "off", "toggle"];
+pub const ACTION_BRIGHTNESS: [&str; 3] = ["set", "increase", "decrease"];
+pub const ACTION_COLOR_TEMPERATURE: [&str; 3] = ["set", "increase", "decrease"];
+pub const ACTION_EFFECT: [&str; 2] = ["set", "stop"];
+pub const ACTION_LED_INDICATION: [&str; 2] = ["get", "set"];
 
 pub const WEATHER_CAPABILITIES: [CapabilityDefinition; 12] = [
     CapabilityDefinition {
         key: TEMPERATURE_OUTDOOR,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Outdoor ambient temperature; unit is celsius or fahrenheit.",
     },
     CapabilityDefinition {
         key: TEMPERATURE_APPARENT,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Outdoor feels-like temperature.",
     },
     CapabilityDefinition {
         key: TEMPERATURE_HIGH,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Forecast or observed daily high temperature.",
     },
     CapabilityDefinition {
         key: TEMPERATURE_LOW,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Forecast or observed daily low temperature.",
     },
     CapabilityDefinition {
         key: WIND_SPEED,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Wind speed; unit is km/h, mph, m/s, or knots.",
     },
     CapabilityDefinition {
         key: WIND_DIRECTION,
         schema: CapabilitySchema::IntegerOrString,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Wind direction in degrees or compass point.",
     },
     CapabilityDefinition {
         key: WIND_GUST,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Wind gust speed.",
     },
     CapabilityDefinition {
         key: RAINFALL,
         schema: CapabilitySchema::Accumulation,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Rainfall accumulation with period.",
     },
     CapabilityDefinition {
         key: UV_INDEX,
         schema: CapabilitySchema::Number,
         read_only: true,
+        actions: &ACTION_GET,
         description: "UV index.",
     },
     CapabilityDefinition {
         key: WEATHER_CONDITION,
         schema: CapabilitySchema::String,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Weather condition identifier.",
     },
     CapabilityDefinition {
         key: CLOUD_COVERAGE,
         schema: CapabilitySchema::Integer,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Cloud coverage percentage.",
     },
     CapabilityDefinition {
         key: VISIBILITY,
         schema: CapabilitySchema::Measurement,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Atmospheric visibility.",
     },
 ];
 
-pub const LIGHT_CAPABILITIES: [CapabilityDefinition; 11] = [
+pub const LIGHT_CAPABILITIES: [CapabilityDefinition; 13] = [
+    CapabilityDefinition {
+        key: POWER,
+        schema: CapabilitySchema::Enum(&POWER_VALUES),
+        read_only: false,
+        actions: &ACTION_POWER,
+        description: "On/off power control.",
+    },
+    CapabilityDefinition {
+        key: STATE,
+        schema: CapabilitySchema::Enum(&AVAILABILITY_VALUES),
+        read_only: true,
+        actions: &ACTION_GET,
+        description: "Connectivity / availability state.",
+    },
     CapabilityDefinition {
         key: BRIGHTNESS,
         schema: CapabilitySchema::Percentage,
         read_only: false,
+        actions: &ACTION_BRIGHTNESS,
         description: "Brightness level as a percentage (0-100).",
     },
     CapabilityDefinition {
         key: COLOR_RGB,
         schema: CapabilitySchema::RgbColor,
         read_only: false,
+        actions: &ACTION_SET,
         description: "RGB colour control.",
     },
     CapabilityDefinition {
         key: COLOR_HEX,
         schema: CapabilitySchema::HexColor,
         read_only: false,
+        actions: &ACTION_SET,
         description: "Hex colour control (#000000-#ffffff).",
     },
     CapabilityDefinition {
         key: COLOR_XY,
         schema: CapabilitySchema::XyColor,
         read_only: false,
+        actions: &ACTION_SET,
         description: "CIE xy chromaticity colour control.",
     },
     CapabilityDefinition {
         key: COLOR_HS,
         schema: CapabilitySchema::HsColor,
         read_only: false,
+        actions: &ACTION_SET,
         description: "Hue/saturation colour control.",
     },
     CapabilityDefinition {
         key: COLOR_TEMPERATURE,
         schema: CapabilitySchema::ColorTemperature,
         read_only: false,
+        actions: &ACTION_COLOR_TEMPERATURE,
         description: "Colour temperature in mireds or kelvin.",
     },
     CapabilityDefinition {
         key: COLOR_MODE,
         schema: CapabilitySchema::Enum(&COLOR_MODE_VALUES),
         read_only: false,
+        actions: &ACTION_SET,
         description: "Active colour mode of the light.",
     },
     CapabilityDefinition {
         key: EFFECT,
         schema: CapabilitySchema::Enum(&LIGHT_EFFECT_VALUES),
         read_only: false,
+        actions: &ACTION_EFFECT,
         description: "Light effect control.",
     },
     CapabilityDefinition {
         key: TRANSITION,
         schema: CapabilitySchema::Number,
         read_only: false,
+        actions: &ACTION_SET,
         description: "Transition duration in seconds.",
     },
     CapabilityDefinition {
         key: ILLUMINANCE,
         schema: CapabilitySchema::Integer,
         read_only: true,
+        actions: &ACTION_GET,
         description: "Ambient light / illuminance sensor in lux.",
     },
     CapabilityDefinition {
         key: LED_INDICATION,
         schema: CapabilitySchema::Boolean,
         read_only: false,
+        actions: &ACTION_LED_INDICATION,
         description: "LED status indicator on the device.",
     },
 ];
@@ -219,6 +269,10 @@ pub fn capability_definition(key: &str) -> Option<&'static CapabilityDefinition>
         .iter()
         .flat_map(|capabilities| capabilities.iter())
         .find(|capability| capability.key == key)
+}
+
+pub fn action_requires_value(action: &str) -> bool {
+    matches!(action, "set" | "increase" | "decrease")
 }
 
 pub fn measurement_value(value: f64, unit: &str) -> AttributeValue {

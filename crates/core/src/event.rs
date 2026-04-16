@@ -15,6 +15,10 @@ pub enum Event {
     DeviceRemoved {
         id: DeviceId,
     },
+    DeviceSeen {
+        id: DeviceId,
+        last_seen: chrono::DateTime<chrono::Utc>,
+    },
     AdapterStarted {
         adapter: String,
     },

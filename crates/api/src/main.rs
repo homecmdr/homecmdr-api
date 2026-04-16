@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::json;
 use smart_home_adapters as _;
 use smart_home_core::adapter::{Adapter, registered_adapter_factories};
+use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend};
 use smart_home_core::event::Event;
 use smart_home_core::model::DeviceId;
@@ -207,6 +208,13 @@ async fn run_persistence_worker(runtime: Arc<Runtime>, store: Arc<dyn DeviceStor
                     tracing::error!(device_id = %id.0, error = %error, "failed to delete persisted device");
                 }
             }
+            Ok(Event::DeviceSeen { id, .. }) => {
+                if let Some(device) = runtime.registry().get(&id) {
+                    if let Err(error) = store.save_device(&device).await {
+                        tracing::error!(device_id = %id.0, error = %error, "failed to persist device last_seen update");
+                    }
+                }
+            }
             Ok(Event::AdapterStarted { .. } | Event::SystemError { .. }) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "persistence subscriber lagged; reconciling registry state");
@@ -287,10 +295,28 @@ async fn get_device(
         .ok_or_else(|| ApiError::not_found(format!("device '{id}' not found")))
 }
 
-async fn command_device(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
-    Err(ApiError::not_implemented(format!(
-        "device commands are not implemented for '{id}'"
-    )))
+async fn command_device(
+    State(runtime): State<Arc<Runtime>>,
+    Path(id): Path<String>,
+    Json(command): Json<DeviceCommand>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let device_id = DeviceId(id.clone());
+
+    if runtime.registry().get(&device_id).is_none() {
+        return Err(ApiError::not_found(format!("device '{id}' not found")));
+    }
+
+    command
+        .validate()
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+
+    match runtime.command_device(&device_id, command).await {
+        Ok(true) => Ok(Json(json!({ "status": "ok" }))),
+        Ok(false) => Err(ApiError::not_implemented(format!(
+            "device commands are not implemented for '{id}'"
+        ))),
+        Err(error) => Err(ApiError::new(StatusCode::BAD_REQUEST, error.to_string())),
+    }
 }
 
 async fn events(ws: WebSocketUpgrade, State(runtime): State<Arc<Runtime>>) -> impl IntoResponse {
@@ -302,6 +328,7 @@ async fn handle_events_socket(mut socket: WebSocket, runtime: Arc<Runtime>) {
 
     loop {
         let frame = match receiver.recv().await {
+            Ok(Event::DeviceSeen { .. }) => continue,
             Ok(event) => event_to_frame(event),
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 json!({
@@ -331,6 +358,7 @@ fn event_to_frame(event: Event) -> serde_json::Value {
             json!({ "type": "device.state_changed", "id": device.id.0, "state": device.attributes })
         }
         Event::DeviceRemoved { id } => json!({ "type": "device.removed", "id": id.0 }),
+        Event::DeviceSeen { .. } => json!({ "type": "internal.device_seen" }),
         Event::AdapterStarted { adapter } => {
             json!({ "type": "adapter.started", "adapter": adapter })
         }
@@ -377,6 +405,7 @@ mod tests {
     use futures_util::StreamExt;
     use reqwest::StatusCode;
     use serde_json::Value;
+    use smart_home_core::command::DeviceCommand;
     use smart_home_core::capability::{TEMPERATURE_OUTDOOR, measurement_value};
     use smart_home_core::config::{Config, PersistenceBackend};
     use smart_home_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
@@ -393,6 +422,43 @@ mod tests {
     struct MockResponse {
         status_line: &'static str,
         body: &'static str,
+    }
+
+    struct CommandAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for CommandAdapter {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn run(
+            &self,
+            _registry: smart_home_core::registry::DeviceRegistry,
+            _bus: smart_home_core::bus::EventBus,
+        ) -> Result<()> {
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+
+        async fn command(
+            &self,
+            device_id: &DeviceId,
+            command: DeviceCommand,
+            registry: smart_home_core::registry::DeviceRegistry,
+        ) -> Result<bool> {
+            if device_id.0 != "test:device" {
+                return Ok(false);
+            }
+
+            let mut device = registry.get(device_id).expect("test device exists");
+            device.attributes.insert(
+                command.capability,
+                command.value.expect("test command must include value"),
+            );
+            registry.upsert(device).await.expect("registry update succeeds");
+            Ok(true)
+        }
     }
 
     struct MockServer {
@@ -484,6 +550,7 @@ mod tests {
                 vendor_specific: HashMap::new(),
             },
             updated_at: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
         }
     }
 
@@ -658,6 +725,90 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(response.json::<Value>().await.expect("error JSON body")["error"], "device 'nonexistent' not found");
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_validates_and_dispatches_typed_commands() {
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("test device exists");
+        let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/devices/test:device/command"))
+            .json(&json!({
+                "capability": "brightness",
+                "action": "set",
+                "value": 42
+            }))
+            .send()
+            .await
+            .expect("command request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("updated device exists")
+                .attributes
+                .get("brightness"),
+            Some(&smart_home_core::model::AttributeValue::Integer(42))
+        );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_rejects_invalid_typed_command() {
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("test device exists");
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/devices/test:device/command"))
+            .json(&json!({
+                "capability": "brightness",
+                "action": "set"
+            }))
+            .send()
+            .await
+            .expect("invalid command request succeeds");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<Value>().await.expect("error response json")["error"],
+            "command action 'set' for capability 'brightness' requires a value"
+        );
 
         let _ = shutdown.send(());
         handle.await.expect("server task completes");

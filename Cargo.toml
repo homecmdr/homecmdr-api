@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/adapters",
     "crates/api",
+    "crates/adapter-elgato-lights",
     "crates/adapter-open-meteo",
     "crates/store-sql",
 ]

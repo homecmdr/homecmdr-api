@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS devices (
     kind TEXT NOT NULL,
     attributes_json TEXT NOT NULL,
     metadata_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL
 )
 "#;
 
@@ -56,7 +57,7 @@ impl DeviceStore for SqliteDeviceStore {
     async fn load_all_devices(&self) -> Result<Vec<Device>> {
         let rows = sqlx::query(
             r#"
-            SELECT device_id, kind, attributes_json, metadata_json, updated_at
+            SELECT device_id, kind, attributes_json, metadata_json, updated_at, last_seen
             FROM devices
             ORDER BY device_id
             "#,
@@ -76,13 +77,14 @@ impl DeviceStore for SqliteDeviceStore {
 
         sqlx::query(
             r#"
-            INSERT INTO devices (device_id, kind, attributes_json, metadata_json, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO devices (device_id, kind, attributes_json, metadata_json, updated_at, last_seen)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(device_id) DO UPDATE SET
                 kind = excluded.kind,
                 attributes_json = excluded.attributes_json,
                 metadata_json = excluded.metadata_json,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                last_seen = excluded.last_seen
             "#,
         )
         .bind(&device.id.0)
@@ -90,6 +92,7 @@ impl DeviceStore for SqliteDeviceStore {
         .bind(attributes_json)
         .bind(metadata_json)
         .bind(device.updated_at.to_rfc3339())
+        .bind(device.last_seen.to_rfc3339())
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to save device '{}' to SQLite", device.id.0))?;
@@ -148,6 +151,9 @@ fn device_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Device> {
     let updated_at = DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))
         .with_context(|| format!("invalid updated_at for '{id}'"))?
         .with_timezone(&Utc);
+    let last_seen = DateTime::parse_from_rfc3339(&row.get::<String, _>("last_seen"))
+        .with_context(|| format!("invalid last_seen for '{id}'"))?
+        .with_timezone(&Utc);
 
     Ok(Device {
         id: DeviceId(id),
@@ -155,6 +161,7 @@ fn device_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Device> {
         attributes,
         metadata,
         updated_at,
+        last_seen,
     })
 }
 
@@ -209,6 +216,7 @@ mod tests {
                 vendor_specific,
             },
             updated_at: Utc::now(),
+            last_seen: Utc::now(),
         }
     }
 

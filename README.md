@@ -18,6 +18,7 @@ smart-home/
 ├── crates/
 │   ├── adapters/
 │   ├── api/
+│   ├── adapter-elgato-lights/
 │   ├── core/
 │   ├── adapter-open-meteo/
 │   └── store-sql/
@@ -86,6 +87,127 @@ Startup fails clearly when:
 
 - config references an adapter name that has no registered factory
 - two linked adapter crates register the same adapter name
+
+## Device Commands
+
+The API accepts canonical device commands at:
+
+- `POST /devices/{id}/command`
+
+Command payloads are normalized across adapters:
+
+```json
+{
+  "capability": "brightness",
+  "action": "set",
+  "value": 50
+}
+```
+
+Examples:
+
+```json
+{ "capability": "power", "action": "on" }
+```
+
+```json
+{ "capability": "power", "action": "toggle" }
+```
+
+```json
+{
+  "capability": "color_temperature",
+  "action": "set",
+  "value": { "value": 3000, "unit": "kelvin" }
+}
+```
+
+Validation happens in `core` before an adapter sees the command.
+Adapters translate canonical commands into vendor-specific payloads.
+
+## Elgato Lights Adapter
+
+`adapter-elgato-lights` polls the Elgato Light HTTP API and exposes one `DeviceKind::Light` per light index.
+
+Canonical state exposed for each Elgato light:
+
+- `power`
+- `state`
+- `brightness`
+- `color_temperature`
+
+`color_temperature` is canonicalized to `kelvin` in the public API.
+The adapter converts between canonical kelvin values and the Elgato API temperature scale internally.
+
+Default config entry:
+
+```toml
+[adapters.elgato_lights]
+enabled = false
+base_url = "http://127.0.0.1:9123"
+poll_interval_secs = 30
+```
+
+Enable it by changing:
+
+```toml
+[adapters.elgato_lights]
+enabled = true
+base_url = "http://127.0.0.1:9123"
+poll_interval_secs = 30
+```
+
+## Elgato Command Examples
+
+Assuming the adapter is enabled and the first light appears as `elgato_lights:light:0`:
+
+Turn the light on:
+
+```bash
+curl -X POST http://127.0.0.1:3000/devices/elgato_lights:light:0/command \
+  -H 'Content-Type: application/json' \
+  -d '{"capability":"power","action":"on"}'
+```
+
+Set brightness to 50%:
+
+```bash
+curl -X POST http://127.0.0.1:3000/devices/elgato_lights:light:0/command \
+  -H 'Content-Type: application/json' \
+  -d '{"capability":"brightness","action":"set","value":50}'
+```
+
+Set color temperature to 7000K:
+
+```bash
+curl -X POST http://127.0.0.1:3000/devices/elgato_lights:light:0/command \
+  -H 'Content-Type: application/json' \
+  -d '{"capability":"color_temperature","action":"set","value":{"value":7000,"unit":"kelvin"}}'
+```
+
+Read the normalized device state:
+
+```bash
+curl http://127.0.0.1:3000/devices/elgato_lights:light:0
+```
+
+The returned state will use canonical values such as:
+
+```json
+{
+  "id": "elgato_lights:light:0",
+  "kind": "light",
+  "attributes": {
+    "power": "on",
+    "state": "online",
+    "brightness": 50,
+    "color_temperature": {
+      "value": 7000,
+      "unit": "kelvin"
+    }
+  }
+}
+```
 
 ## Requirements
 
@@ -192,7 +314,11 @@ Persistence config validation currently enforces:
 - unsupported or unimplemented backends fail clearly
 
 Adapter-specific validation is owned by each adapter crate.
-For example, Open-Meteo still enforces `poll_interval_secs >= 60`, but that validation now lives in `adapter-open-meteo` rather than `core`.
+For example:
+
+- Open-Meteo enforces `poll_interval_secs >= 60`
+- Elgato Lights requires a non-empty `base_url`
+- Elgato Lights accepts canonical `color_temperature` commands in `kelvin` and currently supports `2900..=7000`
 
 `postgres` is reserved for future support and is not implemented yet.
 

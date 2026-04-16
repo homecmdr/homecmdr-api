@@ -28,19 +28,38 @@ impl DeviceRegistry {
         let event = {
             let mut devices = write_guard(&self.devices);
             let id = device.id.clone();
-            let is_new = devices.insert(id.clone(), device.clone()).is_none();
+            match devices.get_mut(&id) {
+                None => {
+                    devices.insert(id, device.clone());
+                    Some(Event::DeviceAdded { device })
+                }
+                Some(existing) => {
+                    let state_changed = device.kind != existing.kind
+                        || device.attributes != existing.attributes
+                        || device.metadata != existing.metadata;
 
-            if is_new {
-                Event::DeviceAdded { device }
-            } else {
-                Event::DeviceStateChanged {
-                    id,
-                    attributes: device.attributes.clone(),
+                    if state_changed {
+                        *existing = device.clone();
+                        Some(Event::DeviceStateChanged {
+                            id,
+                            attributes: device.attributes.clone(),
+                        })
+                    } else if device.last_seen != existing.last_seen {
+                        existing.last_seen = device.last_seen;
+                        Some(Event::DeviceSeen {
+                            id,
+                            last_seen: existing.last_seen,
+                        })
+                    } else {
+                        None
+                    }
                 }
             }
         };
 
-        self.bus.publish(event);
+        if let Some(event) = event {
+            self.bus.publish(event);
+        }
         Ok(())
     }
 
@@ -85,7 +104,7 @@ impl DeviceRegistry {
 fn validate_attributes(device: &Device) -> Result<()> {
     for (key, value) in &device.attributes {
         if let Some(capability) = capability_definition(key) {
-            validate_capability_value(capability.schema, value)
+            validate_capability_attribute_value(capability.schema, value)
                 .map_err(|message| anyhow::anyhow!("invalid value for capability '{key}' on '{}': {message}", device.id.0))?;
         }
     }
@@ -97,7 +116,10 @@ pub fn validate_device(device: &Device) -> Result<()> {
     validate_attributes(device)
 }
 
-fn validate_capability_value(schema: CapabilitySchema, value: &AttributeValue) -> std::result::Result<(), &'static str> {
+pub fn validate_capability_attribute_value(
+    schema: CapabilitySchema,
+    value: &AttributeValue,
+) -> std::result::Result<(), &'static str> {
     match schema {
         CapabilitySchema::Measurement => validate_measurement(value),
         CapabilitySchema::Accumulation => validate_accumulation(value),
@@ -196,9 +218,9 @@ fn validate_color_temperature(value: &AttributeValue) -> std::result::Result<(),
 
     match unit {
         "mireds" if (153..=500).contains(&temp_value) => Ok(()),
-        "kelvin" if (2200..=6500).contains(&temp_value) => Ok(()),
+        "kelvin" if (2200..=7000).contains(&temp_value) => Ok(()),
         "mireds" => Err("color temperature in mireds must be between 153 and 500"),
-        "kelvin" => Err("color temperature in kelvin must be between 2200 and 6500"),
+        "kelvin" => Err("color temperature in kelvin must be between 2200 and 7000"),
         _ => Err("color temperature requires string 'unit' of 'mireds' or 'kelvin'"),
     }
 }

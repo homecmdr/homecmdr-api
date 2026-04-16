@@ -14,12 +14,14 @@ use tokio::time::{sleep, Duration};
 use crate::adapter::Adapter;
 use crate::bus::EventBus;
 use crate::capability::{
-    BRIGHTNESS, COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB,
-    COLOR_TEMPERATURE, COLOR_XY, CapabilitySchema, CLOUD_COVERAGE, EFFECT, ILLUMINANCE,
-    LED_INDICATION, LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, TEMPERATURE_OUTDOOR, TRANSITION,
-    WEATHER_CAPABILITIES, WIND_DIRECTION, WIND_SPEED, accumulation_value, capability_definition,
-    light_capability, measurement_value, weather_capability,
+    AVAILABILITY_VALUES, BRIGHTNESS, COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES,
+    COLOR_RGB, COLOR_TEMPERATURE, COLOR_XY, CapabilitySchema, CLOUD_COVERAGE, EFFECT,
+    ILLUMINANCE, LED_INDICATION, LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, POWER, POWER_VALUES,
+    STATE, TEMPERATURE_OUTDOOR, TRANSITION, WEATHER_CAPABILITIES, WIND_DIRECTION, WIND_SPEED,
+    accumulation_value, capability_definition, light_capability, measurement_value,
+    weather_capability,
 };
+use crate::command::DeviceCommand;
 use crate::event::Event;
 use crate::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
 use crate::registry::DeviceRegistry;
@@ -106,6 +108,7 @@ fn sample_device(id: &str, attribute_name: &str, value: AttributeValue) -> Devic
             vendor_specific: HashMap::new(),
         },
         updated_at: Utc::now(),
+        last_seen: Utc::now(),
     }
 }
 
@@ -149,6 +152,7 @@ fn device_round_trips_through_json() {
             vendor_specific,
         },
         updated_at: Utc::now(),
+        last_seen: Utc::now(),
     };
 
     let json = serde_json::to_string(&device).expect("serialize device");
@@ -270,6 +274,40 @@ async fn upserting_existing_device_publishes_state_changed() {
             id: updated.id.clone(),
             attributes: updated.attributes.clone(),
         }
+    );
+}
+
+#[tokio::test]
+async fn upserting_identical_state_only_updates_last_seen_without_state_changed_event() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus.clone());
+    let mut subscriber = bus.subscribe();
+    let original = sample_device(
+        "test:1",
+        TEMPERATURE_OUTDOOR,
+        measurement_value(20.0, "celsius"),
+    );
+
+    registry.upsert(original.clone()).await.expect("initial device insert succeeds");
+    subscriber.recv().await.expect("device added event received");
+
+    let mut seen_again = original.clone();
+    seen_again.last_seen = seen_again.last_seen + chrono::TimeDelta::seconds(30);
+    registry
+        .upsert(seen_again.clone())
+        .await
+        .expect("seen-again device upsert succeeds");
+
+    assert_eq!(
+        subscriber.recv().await.expect("device seen event received"),
+        Event::DeviceSeen {
+            id: seen_again.id.clone(),
+            last_seen: seen_again.last_seen,
+        }
+    );
+    assert_eq!(
+        registry.get(&seen_again.id).expect("device still exists").updated_at,
+        original.updated_at
     );
 }
 
@@ -452,6 +490,14 @@ fn light_capabilities_are_unique_and_typed() {
         capability_definition(EFFECT).map(|capability| capability.schema),
         Some(CapabilitySchema::Enum(&LIGHT_EFFECT_VALUES))
     );
+    assert_eq!(
+        capability_definition(POWER).map(|capability| capability.schema),
+        Some(CapabilitySchema::Enum(&POWER_VALUES))
+    );
+    assert_eq!(
+        capability_definition(STATE).map(|capability| capability.schema),
+        Some(CapabilitySchema::Enum(&AVAILABILITY_VALUES))
+    );
 }
 
 #[test]
@@ -509,10 +555,12 @@ async fn registry_accepts_valid_light_capabilities() {
             (
                 COLOR_TEMPERATURE.to_string(),
                 AttributeValue::Object(HashMap::from([
-                    ("value".to_string(), AttributeValue::Integer(3000)),
-                    ("unit".to_string(), AttributeValue::Text("kelvin".to_string())),
-                ])),
-            ),
+                ("value".to_string(), AttributeValue::Integer(3000)),
+                ("unit".to_string(), AttributeValue::Text("kelvin".to_string())),
+            ])),
+        ),
+            (POWER.to_string(), AttributeValue::Text("on".to_string())),
+            (STATE.to_string(), AttributeValue::Text("online".to_string())),
             (COLOR_MODE.to_string(), AttributeValue::Text("rgb".to_string())),
             (EFFECT.to_string(), AttributeValue::Text("none".to_string())),
             (TRANSITION.to_string(), AttributeValue::Float(1.5)),
@@ -526,6 +574,7 @@ async fn registry_accepts_valid_light_capabilities() {
             vendor_specific: HashMap::new(),
         },
         updated_at: Utc::now(),
+        last_seen: Utc::now(),
     };
 
     registry.upsert(device.clone()).await.expect("valid light device should succeed");
@@ -548,6 +597,7 @@ async fn registry_rejects_invalid_brightness_percentage() {
             vendor_specific: HashMap::new(),
         },
         updated_at: Utc::now(),
+        last_seen: Utc::now(),
     };
 
     let error = registry.upsert(invalid).await.expect_err("invalid brightness should fail");
@@ -576,6 +626,7 @@ async fn registry_rejects_invalid_color_temperature_unit_or_range() {
             vendor_specific: HashMap::new(),
         },
         updated_at: Utc::now(),
+        last_seen: Utc::now(),
     };
 
     let error = registry
@@ -583,7 +634,7 @@ async fn registry_rejects_invalid_color_temperature_unit_or_range() {
         .await
         .expect_err("invalid color temperature should fail");
 
-    assert!(error.to_string().contains("color temperature in kelvin must be between 2200 and 6500"));
+    assert!(error.to_string().contains("color temperature in kelvin must be between 2200 and 7000"));
 }
 
 #[tokio::test]
@@ -601,11 +652,71 @@ async fn registry_rejects_invalid_hex_color_shape() {
             vendor_specific: HashMap::new(),
         },
         updated_at: Utc::now(),
+        last_seen: Utc::now(),
     };
 
     let error = registry.upsert(invalid).await.expect_err("invalid hex color should fail");
 
     assert!(error.to_string().contains("expected hex color string like '#ff8800'"));
+}
+
+#[test]
+fn device_command_validates_power_toggle_without_value() {
+    DeviceCommand {
+        capability: POWER.to_string(),
+        action: "toggle".to_string(),
+        value: None,
+    }
+    .validate()
+    .expect("power toggle command should validate");
+}
+
+#[test]
+fn device_command_rejects_set_without_value() {
+    let error = DeviceCommand {
+        capability: BRIGHTNESS.to_string(),
+        action: "set".to_string(),
+        value: None,
+    }
+    .validate()
+    .err()
+    .expect("missing set value should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "command action 'set' for capability 'brightness' requires a value"
+    );
+}
+
+#[test]
+fn device_command_rejects_value_for_power_on() {
+    let error = DeviceCommand {
+        capability: POWER.to_string(),
+        action: "on".to_string(),
+        value: Some(AttributeValue::Text("on".to_string())),
+    }
+    .validate()
+    .err()
+    .expect("power on should not accept a value");
+
+    assert_eq!(
+        error.to_string(),
+        "command action 'on' for capability 'power' does not accept a value"
+    );
+}
+
+#[test]
+fn device_command_accepts_kelvin_7000() {
+    DeviceCommand {
+        capability: COLOR_TEMPERATURE.to_string(),
+        action: "set".to_string(),
+        value: Some(AttributeValue::Object(HashMap::from([
+            ("value".to_string(), AttributeValue::Integer(7000)),
+            ("unit".to_string(), AttributeValue::Text("kelvin".to_string())),
+        ]))),
+    }
+    .validate()
+    .expect("7000 kelvin should validate");
 }
 
 #[tokio::test]
@@ -709,6 +820,13 @@ fn config_loads_default_toml() {
     assert_eq!(open_meteo["latitude"], serde_json::json!(51.5));
     assert_eq!(open_meteo["longitude"], serde_json::json!(-0.1));
     assert_eq!(open_meteo["poll_interval_secs"], serde_json::json!(90));
+    let elgato = config
+        .adapters
+        .get("elgato_lights")
+        .expect("elgato_lights adapter config exists");
+    assert!(elgato["enabled"].is_boolean());
+    assert_eq!(elgato["base_url"], serde_json::json!("http://127.0.0.1:9123"));
+    assert_eq!(elgato["poll_interval_secs"], serde_json::json!(30));
 }
 
 #[test]

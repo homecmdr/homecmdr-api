@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -45,7 +43,6 @@ pub struct OpenMeteoAdapter {
     config: OpenMeteoConfig,
     base_url: String,
     poll_interval: Duration,
-    last_attributes: RwLock<HashMap<String, Attributes>>,
 }
 
 impl OpenMeteoAdapter {
@@ -70,7 +67,6 @@ impl OpenMeteoAdapter {
             poll_interval: poll_interval.unwrap_or_else(|| Duration::from_secs(config.poll_interval_secs)),
             config,
             base_url: base_url.into(),
-            last_attributes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -103,27 +99,11 @@ impl OpenMeteoAdapter {
                 single_attribute(WIND_DIRECTION, AttributeValue::Integer(weather.wind_direction as i64)),
             ),
         ] {
-            let changed = {
-                let mut last_attributes = self
-                    .last_attributes
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                match last_attributes.get(vendor_id) {
-                    Some(previous) if previous == &attributes => false,
-                    _ => {
-                        last_attributes.insert(vendor_id.to_string(), attributes.clone());
-                        true
-                    }
-                }
-            };
-
-            if changed {
-                registry
-                    .upsert(build_device(vendor_id, attributes, Utc::now()))
-                    .await
-                    .with_context(|| format!("failed to upsert Open-Meteo device '{vendor_id}'"))?;
-            }
+            let previous = registry.get(&DeviceId(format!("{ADAPTER_NAME}:{vendor_id}")));
+            registry
+                .upsert(build_device(vendor_id, attributes, previous.as_ref()))
+                .await
+                .with_context(|| format!("failed to upsert Open-Meteo device '{vendor_id}'"))?;
         }
 
         Ok(())
@@ -226,18 +206,30 @@ fn single_attribute(name: &str, value: AttributeValue) -> Attributes {
     attributes
 }
 
-fn build_device(vendor_id: &str, attributes: Attributes, updated_at: chrono::DateTime<Utc>) -> Device {
+fn build_device(vendor_id: &str, attributes: Attributes, previous: Option<&Device>) -> Device {
+    let now = Utc::now();
+    let metadata = Metadata {
+        source: ADAPTER_NAME.to_string(),
+        location: Some("outdoor".to_string()),
+        accuracy: None,
+        vendor_specific: HashMap::new(),
+    };
+    let updated_at = previous
+        .filter(|device| {
+            device.kind == DeviceKind::Sensor
+                && device.attributes == attributes
+                && device.metadata == metadata
+        })
+        .map(|device| device.updated_at)
+        .unwrap_or(now);
+
     Device {
         id: DeviceId(format!("{ADAPTER_NAME}:{vendor_id}")),
         kind: DeviceKind::Sensor,
         attributes,
-        metadata: Metadata {
-            source: ADAPTER_NAME.to_string(),
-            location: Some("outdoor".to_string()),
-            accuracy: None,
-            vendor_specific: HashMap::new(),
-        },
+        metadata,
         updated_at,
+        last_seen: now,
     }
 }
 
@@ -454,6 +446,42 @@ mod tests {
 
         adapter_task.abort();
         let _ = adapter_task.await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adapter_refreshes_last_seen_without_bumping_updated_at_for_identical_poll() -> Result<()> {
+        let server = MockServer::start(vec![
+            MockResponse {
+                status_line: "HTTP/1.1 200 OK",
+                body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+            },
+            MockResponse {
+                status_line: "HTTP/1.1 200 OK",
+                body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+            },
+        ])
+        .await;
+
+        let adapter = OpenMeteoAdapter::with_base_url(adapter_config(), server.base_url());
+        let bus = EventBus::new(16);
+        let registry = DeviceRegistry::new(bus);
+
+        adapter.poll_once(&registry).await?;
+        let original = registry
+            .get(&DeviceId("open_meteo:temperature_outdoor".to_string()))
+            .expect("temperature device exists after first poll");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        adapter.poll_once(&registry).await?;
+
+        let seen_again = registry
+            .get(&DeviceId("open_meteo:temperature_outdoor".to_string()))
+            .expect("temperature device exists after second poll");
+
+        assert_eq!(seen_again.updated_at, original.updated_at);
+        assert!(seen_again.last_seen > original.last_seen);
 
         Ok(())
     }

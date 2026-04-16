@@ -23,3 +23,8 @@ enabled = true
 latitude = 51.5
 longitude = -0.1
 poll_interval_secs = 90
+
+[adapters.elgato_lights]
+enabled = true
+base_url = "http://127.0.0.1:9123"
+poll_interval_secs = 30

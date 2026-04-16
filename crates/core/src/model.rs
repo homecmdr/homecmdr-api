@@ -33,6 +33,8 @@ pub struct Device {
     pub metadata: Metadata,
     /// Timestamp of the most recent update.
     pub updated_at: DateTime<Utc>,
+    /// Timestamp of the most recent successful observation.
+    pub last_seen: DateTime<Utc>,
 }
 
 /// Typed attribute values.

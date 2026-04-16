@@ -5,7 +5,9 @@ use tokio::task::JoinSet;
 
 use crate::adapter::Adapter;
 use crate::bus::EventBus;
+use crate::command::DeviceCommand;
 use crate::event::Event;
+use crate::model::DeviceId;
 use crate::registry::DeviceRegistry;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -45,6 +47,18 @@ impl Runtime {
 
     pub fn bus(&self) -> &EventBus {
         &self.bus
+    }
+
+    pub async fn command_device(&self, id: &DeviceId, command: DeviceCommand) -> anyhow::Result<bool> {
+        let Some((adapter_name, _)) = id.0.split_once(':') else {
+            return Ok(false);
+        };
+
+        let Some(adapter) = self.adapters.iter().find(|adapter| adapter.name() == adapter_name) else {
+            return Ok(false);
+        };
+
+        adapter.command(id, command, self.registry.clone()).await
     }
 
     pub(crate) async fn run_until<F>(&self, shutdown: F)

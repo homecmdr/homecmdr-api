@@ -1,5 +1,7 @@
 use crate::bus::EventBus;
+use crate::command::DeviceCommand;
 use crate::config::AdapterConfig;
+use crate::model::DeviceId;
 use crate::registry::DeviceRegistry;
 
 #[async_trait::async_trait]
@@ -18,6 +20,20 @@ pub trait Adapter: Send + Sync + 'static {
     /// - Adapters must publish `Event::SystemError` on non-recoverable failures before returning `Err`.
     /// - Reconnection backoff must be exponential with a maximum of 60 seconds.
     async fn run(&self, registry: DeviceRegistry, bus: EventBus) -> anyhow::Result<()>;
+
+    /// Handle a command for a device owned by this adapter.
+    ///
+    /// Returns `Ok(true)` when the command was applied, `Ok(false)` when the
+    /// adapter does not support commands for that device, and `Err(...)` when
+    /// the command was recognized but invalid or failed.
+    async fn command(
+        &self,
+        _device_id: &DeviceId,
+        _command: DeviceCommand,
+        _registry: DeviceRegistry,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 pub trait AdapterFactory: Send + Sync + 'static {

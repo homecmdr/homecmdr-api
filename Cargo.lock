@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "adapter-elgato-lights"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "inventory",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smart-home-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "adapter-open-meteo"
 version = "0.1.0"
 dependencies = [
@@ -56,6 +72,7 @@ name = "api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "futures-util",
@@ -1828,6 +1845,7 @@ dependencies = [
 name = "smart-home-adapters"
 version = "0.1.0"
 dependencies = [
+ "adapter-elgato-lights",
  "adapter-open-meteo",
 ]
 
