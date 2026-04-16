@@ -393,6 +393,7 @@ Each scene file must return a table with:
 Current host API exposed to scenes:
 
 - `ctx:command(device_id, command_table)`
+- `ctx:invoke(target, payload_table)`
 
 Example:
 
@@ -416,6 +417,74 @@ return {
 ```
 
 `command_table` maps to the same canonical command shape used by `POST /devices/{id}/command`.
+
+`ctx:invoke(target, payload_table)` dispatches a service-style call to the adapter that owns the target prefix and returns a Lua value.
+
+Current built-in invoke targets from `adapter-ollama`:
+
+- `ollama:generate`
+- `ollama:vision`
+- `ollama:chat`
+- `ollama:embeddings`
+- `ollama:tags`
+- `ollama:ps`
+- `ollama:show`
+- `ollama:version`
+
+Highlights:
+
+- `ollama:vision` is a convenience wrapper around generate-with-images
+- `ollama:chat` accepts a Lua list in `messages`
+- `ollama:embeddings` accepts a string or Lua list in `input`
+- `ollama:tags`, `ollama:ps`, and `ollama:version` do not require a payload
+
+Example:
+
+```lua
+return {
+  id = "check_clothesline",
+  name = "Check Clothesline",
+  execute = function(ctx)
+    local result = ctx:invoke("ollama:vision", {
+      prompt = "Reply only true or false. Are clothes on the clothesline?",
+      image_base64 = "BASE64_IMAGE_HERE",
+    })
+
+    if result.boolean == true then
+      ctx:command("elgato_lights:light:0", {
+        capability = "power",
+        action = "on",
+      })
+    end
+  end
+}
+```
+
+Chat example:
+
+```lua
+local result = ctx:invoke("ollama:chat", {
+  messages = {
+    {
+      role = "user",
+      content = "Summarize this room state in one sentence.",
+    },
+  },
+})
+
+local reply = result.message.content
+```
+
+Embeddings example:
+
+```lua
+local result = ctx:invoke("ollama:embeddings", {
+  input = {
+    "washer running",
+    "dryer idle",
+  },
+})
+```
 
 ## Agent Usage Notes
 

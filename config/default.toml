@@ -37,3 +37,8 @@ poll_interval_secs = 30
 enabled = true
 ip_address = "192.168.1.114"
 poll_interval_secs = 30
+
+[adapters.ollama]
+enabled = false
+base_url = "http://127.0.0.1:11434"
+model = "llava"

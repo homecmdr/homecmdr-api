@@ -7,6 +7,7 @@ use crate::adapter::Adapter;
 use crate::bus::EventBus;
 use crate::command::DeviceCommand;
 use crate::event::Event;
+use crate::invoke::{InvokeRequest, InvokeResponse};
 use crate::model::DeviceId;
 use crate::registry::DeviceRegistry;
 
@@ -67,6 +68,22 @@ impl Runtime {
         };
 
         adapter.command(id, command, self.registry.clone()).await
+    }
+
+    pub async fn invoke(&self, request: InvokeRequest) -> anyhow::Result<Option<InvokeResponse>> {
+        let Some((adapter_name, _)) = request.target.split_once(':') else {
+            return Ok(None);
+        };
+
+        let Some(adapter) = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.name() == adapter_name)
+        else {
+            return Ok(None);
+        };
+
+        adapter.invoke(request, self.registry.clone()).await
     }
 
     pub(crate) async fn run_until<F>(&self, shutdown: F)

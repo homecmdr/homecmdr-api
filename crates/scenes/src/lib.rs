@@ -9,8 +9,11 @@ use anyhow::{bail, Context, Result};
 use mlua::{Function, Lua, Table, UserData, UserDataMethods, Value};
 use serde::Serialize;
 use smart_home_core::command::DeviceCommand;
+use smart_home_core::invoke::InvokeRequest;
 use smart_home_core::model::{AttributeValue, DeviceId};
 use smart_home_core::runtime::Runtime;
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SceneSummary {
@@ -81,7 +84,7 @@ impl SceneCatalog {
         scenes
     }
 
-    pub async fn execute(
+    pub fn execute(
         &self,
         id: &str,
         runtime: Arc<Runtime>,
@@ -90,57 +93,28 @@ impl SceneCatalog {
             return Ok(None);
         };
 
-        let planned_commands = {
-            let source = fs::read_to_string(&scene.path)
-                .with_context(|| format!("failed to read scene file {}", scene.path.display()))?;
-            let lua = Lua::new();
-            let module = evaluate_scene_module(&lua, &source, &scene.path)?;
-            let execute = module.get::<Function>("execute").map_err(|error| {
-                anyhow::anyhow!(
-                    "scene '{}' is missing execute function: {error}",
-                    scene.summary.id
-                )
-            })?;
+        let source = fs::read_to_string(&scene.path)
+            .with_context(|| format!("failed to read scene file {}", scene.path.display()))?;
+        let lua = Lua::new();
+        let module = evaluate_scene_module(&lua, &source, &scene.path)?;
+        let execute = module.get::<Function>("execute").map_err(|error| {
+            anyhow::anyhow!(
+                "scene '{}' is missing execute function: {error}",
+                scene.summary.id
+            )
+        })?;
 
-            let planned_commands = PlannedCommands::default();
-            let ctx = SceneContext {
-                planned_commands: planned_commands.clone(),
-            };
-
-            execute.call::<()>(ctx).map_err(|error| {
-                anyhow::anyhow!("scene '{}' execution failed: {error}", scene.summary.id)
-            })?;
-
-            planned_commands.take()
+        let execution_results = ExecutionResults::default();
+        let ctx = SceneContext {
+            runtime,
+            execution_results: execution_results.clone(),
         };
 
-        let mut results = Vec::new();
-        for planned in planned_commands {
-            results.push(
-                match runtime
-                    .command_device(&DeviceId(planned.target.clone()), planned.command)
-                    .await
-                {
-                    Ok(true) => SceneExecutionResult {
-                        target: planned.target,
-                        status: "ok",
-                        message: None,
-                    },
-                    Ok(false) => SceneExecutionResult {
-                        target: planned.target,
-                        status: "unsupported",
-                        message: Some("device commands are not implemented".to_string()),
-                    },
-                    Err(error) => SceneExecutionResult {
-                        target: planned.target,
-                        status: "error",
-                        message: Some(error.to_string()),
-                    },
-                },
-            );
-        }
+        execute.call::<()>(ctx).map_err(|error| {
+            anyhow::anyhow!("scene '{}' execution failed: {error}", scene.summary.id)
+        })?;
 
-        Ok(Some(results))
+        Ok(Some(execution_results.take()))
     }
 }
 
@@ -211,28 +185,23 @@ fn evaluate_scene_module(lua: &Lua, source: &str, path: &Path) -> Result<Table> 
     }
 }
 
-#[derive(Debug, Clone)]
-struct PlannedCommand {
-    target: String,
-    command: DeviceCommand,
-}
-
 #[derive(Clone, Default)]
-struct PlannedCommands(Rc<RefCell<Vec<PlannedCommand>>>);
+struct ExecutionResults(Rc<RefCell<Vec<SceneExecutionResult>>>);
 
-impl PlannedCommands {
-    fn push(&self, command: PlannedCommand) {
-        self.0.borrow_mut().push(command);
+impl ExecutionResults {
+    fn push(&self, result: SceneExecutionResult) {
+        self.0.borrow_mut().push(result);
     }
 
-    fn take(&self) -> Vec<PlannedCommand> {
+    fn take(&self) -> Vec<SceneExecutionResult> {
         self.0.borrow().clone()
     }
 }
 
 #[derive(Clone)]
 struct SceneContext {
-    planned_commands: PlannedCommands,
+    runtime: Arc<Runtime>,
+    execution_results: ExecutionResults,
 }
 
 impl UserData for SceneContext {
@@ -243,13 +212,49 @@ impl UserData for SceneContext {
                 let command = lua_table_to_command(&command)?;
                 command.validate().map_err(mlua::Error::external)?;
 
-                this.planned_commands.push(PlannedCommand {
-                    target: device_id,
-                    command,
-                });
+                let result = match block_in_place(|| {
+                    Handle::current().block_on(
+                        this.runtime
+                            .command_device(&DeviceId(device_id.clone()), command),
+                    )
+                }) {
+                    Ok(true) => SceneExecutionResult {
+                        target: device_id,
+                        status: "ok",
+                        message: None,
+                    },
+                    Ok(false) => SceneExecutionResult {
+                        target: device_id,
+                        status: "unsupported",
+                        message: Some("device commands are not implemented".to_string()),
+                    },
+                    Err(error) => SceneExecutionResult {
+                        target: device_id,
+                        status: "error",
+                        message: Some(error.to_string()),
+                    },
+                };
+                this.execution_results.push(result);
+
                 Ok(())
             },
         );
+
+        methods.add_method("invoke", |lua, this, (target, payload): (String, Value)| {
+            let payload = lua_value_to_attribute(payload)?;
+            let response = block_in_place(|| {
+                Handle::current().block_on(this.runtime.invoke(InvokeRequest {
+                    target: target.clone(),
+                    payload,
+                }))
+            })
+            .map_err(mlua::Error::external)?
+            .ok_or_else(|| {
+                mlua::Error::external(format!("invoke target '{target}' is not supported"))
+            })?;
+
+            attribute_to_lua_value(&lua, response.value)
+        });
     }
 }
 
@@ -272,6 +277,14 @@ fn lua_value_to_attribute(value: Value) -> mlua::Result<AttributeValue> {
         Value::Number(value) => Ok(AttributeValue::Float(value)),
         Value::String(value) => Ok(AttributeValue::Text(value.to_str()?.to_string())),
         Value::Table(table) => {
+            if is_array_table(&table)? {
+                let mut values = Vec::new();
+                for value in table.sequence_values::<Value>() {
+                    values.push(lua_value_to_attribute(value?)?);
+                }
+                return Ok(AttributeValue::Array(values));
+            }
+
             let mut fields = HashMap::new();
             for pair in table.pairs::<Value, Value>() {
                 let (key, value) = pair?;
@@ -286,6 +299,53 @@ fn lua_value_to_attribute(value: Value) -> mlua::Result<AttributeValue> {
             "command values must be nil, boolean, number, string, or table",
         )),
     }
+}
+
+fn attribute_to_lua_value(lua: &Lua, value: AttributeValue) -> mlua::Result<Value> {
+    match value {
+        AttributeValue::Null => Ok(Value::Nil),
+        AttributeValue::Bool(value) => Ok(Value::Boolean(value)),
+        AttributeValue::Integer(value) => Ok(Value::Integer(value)),
+        AttributeValue::Float(value) => Ok(Value::Number(value)),
+        AttributeValue::Text(value) => Ok(Value::String(lua.create_string(&value)?)),
+        AttributeValue::Array(values) => {
+            let table = lua.create_table()?;
+            for (index, value) in values.into_iter().enumerate() {
+                table.set(index + 1, attribute_to_lua_value(lua, value)?)?;
+            }
+            Ok(Value::Table(table))
+        }
+        AttributeValue::Object(fields) => {
+            let table = lua.create_table()?;
+            for (key, value) in fields {
+                table.set(key, attribute_to_lua_value(lua, value)?)?;
+            }
+            Ok(Value::Table(table))
+        }
+    }
+}
+
+fn is_array_table(table: &Table) -> mlua::Result<bool> {
+    let mut count = 0usize;
+
+    for pair in table.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::Integer(index) = key else {
+            return Ok(false);
+        };
+        if index <= 0 {
+            return Ok(false);
+        }
+        count += 1;
+    }
+
+    for expected in 1..=count {
+        if table.raw_get::<Value>(expected as i64)? == Value::Nil {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -447,7 +507,6 @@ mod tests {
         let catalog = SceneCatalog::load_from_directory(&dir).expect("scene catalog loads");
         let results = catalog
             .execute("set_brightness", runtime.clone())
-            .await
             .expect("scene executes")
             .expect("scene exists");
 

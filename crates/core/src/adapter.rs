@@ -1,6 +1,7 @@
 use crate::bus::EventBus;
 use crate::command::DeviceCommand;
 use crate::config::AdapterConfig;
+use crate::invoke::{InvokeRequest, InvokeResponse};
 use crate::model::DeviceId;
 use crate::registry::DeviceRegistry;
 
@@ -33,6 +34,19 @@ pub trait Adapter: Send + Sync + 'static {
         _registry: DeviceRegistry,
     ) -> anyhow::Result<bool> {
         Ok(false)
+    }
+
+    /// Handle a service-style invocation owned by this adapter.
+    ///
+    /// Returns `Ok(Some(...))` when the invocation was handled, `Ok(None)` when
+    /// the adapter does not support the target, and `Err(...)` when the target
+    /// was recognized but execution failed.
+    async fn invoke(
+        &self,
+        _request: InvokeRequest,
+        _registry: DeviceRegistry,
+    ) -> anyhow::Result<Option<InvokeResponse>> {
+        Ok(None)
     }
 }
 

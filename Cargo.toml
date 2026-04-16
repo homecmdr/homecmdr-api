@@ -4,6 +4,7 @@ members = [
     "crates/adapters",
     "crates/api",
     "crates/scenes",
+    "crates/adapter-ollama",
     "crates/adapter-elgato-lights",
     "crates/adapter-open-meteo",
     "crates/adapter-roku-tv",

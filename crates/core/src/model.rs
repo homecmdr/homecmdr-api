@@ -60,6 +60,7 @@ pub enum AttributeValue {
     Float(f64),
     Bool(bool),
     Text(String),
+    Array(Vec<AttributeValue>),
     Object(HashMap<String, AttributeValue>),
     Null,
 }

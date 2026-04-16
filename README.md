@@ -26,6 +26,7 @@ Adapter-specific docs:
 
 - `crates/adapter-open-meteo/README.md`
 - `crates/adapter-elgato-lights/README.md`
+- `crates/adapter-ollama/README.md`
 - `crates/adapter-roku-tv/README.md`
 
 ## Workspace Layout
@@ -41,6 +42,7 @@ smart-home/
 ├── crates/
 │   ├── adapters/
 │   ├── adapter-elgato-lights/
+│   ├── adapter-ollama/
 │   ├── adapter-open-meteo/
 │   ├── adapter-roku-tv/
 │   ├── api/
@@ -306,8 +308,47 @@ return {
 Current scene host API:
 
 - `ctx:command(device_id, command_table)`
+- `ctx:invoke(target, payload_table)`
 
 Scene execution uses the same canonical command validation and adapter dispatch path as `POST /devices/{id}/command`.
+`ctx:invoke(...)` routes service-style calls to the owning adapter and returns a Lua value converted from the adapter response.
+
+Example Ollama invocation:
+
+```lua
+return {
+  id = "check_clothesline",
+  name = "Check Clothesline",
+  execute = function(ctx)
+    local result = ctx:invoke("ollama:vision", {
+      prompt = "Reply only true or false. Are clothes on the clothesline?",
+      image_base64 = "BASE64_IMAGE_HERE",
+    })
+
+    if result.boolean == true then
+      ctx:command("roku_tv:tv", {
+        capability = "power",
+        action = "off",
+      })
+    end
+  end
+}
+```
+
+Ollama chat example:
+
+```lua
+local result = ctx:invoke("ollama:chat", {
+  messages = {
+    {
+      role = "user",
+      content = "Give me a short status summary.",
+    },
+  },
+})
+
+local reply = result.message.content
+```
 
 ## Event Model
 

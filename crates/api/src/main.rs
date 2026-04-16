@@ -423,7 +423,6 @@ async fn execute_scene(
     let Some(results) = state
         .scenes
         .execute(&id, state.runtime.clone())
-        .await
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?
     else {
         return Err(ApiError::not_found(format!("scene '{id}' not found")));

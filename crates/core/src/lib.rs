@@ -4,6 +4,7 @@ pub mod capability;
 pub mod command;
 pub mod config;
 pub mod event;
+pub mod invoke;
 pub mod model;
 pub mod registry;
 pub mod runtime;
