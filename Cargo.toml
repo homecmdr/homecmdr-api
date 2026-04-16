@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/api",
+    "crates/adapter-open-meteo",
+]
+resolver = "2"

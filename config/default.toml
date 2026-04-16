@@ -1,0 +1,11 @@
+[runtime]
+event_bus_capacity = 1024
+
+[logging]
+level = "info"
+
+[adapters.open_meteo]
+enabled = true
+latitude = 51.5
+longitude = -0.1
+poll_interval_secs = 90

@@ -1,0 +1,13 @@
+/target/
+
+# Local SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# SQLx offline metadata
+.sqlx/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
