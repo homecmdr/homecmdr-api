@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smart_home_adapters as _;
 use smart_home_automations::{
-    AutomationCatalog, AutomationExecutionObserver, AutomationRunner,
+    AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
 };
 use smart_home_core::adapter::{registered_adapter_factories, Adapter};
 use smart_home_core::capability::{CapabilitySchema, ALL_CAPABILITIES};
@@ -92,6 +92,16 @@ struct AssignRoomRequest {
     room_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AutomationEnabledRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManualAutomationRequest {
+    trigger_payload: Option<smart_home_core::model::AttributeValue>,
+}
+
 #[derive(Debug, Serialize)]
 struct RoomCommandResult {
     device_id: String,
@@ -104,6 +114,7 @@ struct AppState {
     runtime: Arc<Runtime>,
     scenes: Arc<SceneCatalog>,
     automations: Arc<AutomationCatalog>,
+    automation_control: Arc<AutomationController>,
     health: HealthState,
     store: Option<Arc<dyn DeviceStore>>,
     history: HistorySettings,
@@ -197,6 +208,20 @@ struct AutomationResponse {
     status: &'static str,
     last_run: Option<DateTime<Utc>>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationValidateResponse {
+    status: &'static str,
+    automation: AutomationResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationExecuteResponse {
+    status: String,
+    error: Option<String>,
+    duration_ms: i64,
+    results: Vec<SceneStepResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -553,11 +578,26 @@ async fn main() -> Result<()> {
             .context("failed to restore persisted devices into registry")?;
     }
 
+    let automation_observer = device_store.clone().and_then(|store| {
+        if config.persistence.history.enabled {
+            Some(Arc::new(StoreAutomationObserver { store }) as Arc<dyn AutomationExecutionObserver>)
+        } else {
+            None
+        }
+    });
+    let automation_runner = if let Some(observer) = automation_observer.clone() {
+        AutomationRunner::new((*automations).clone()).with_observer(observer)
+    } else {
+        AutomationRunner::new((*automations).clone())
+    };
+    let automation_control = Arc::new(automation_runner.controller());
+
     let app = app(
         AppState {
             runtime: runtime.clone(),
             scenes,
             automations: automations.clone(),
+            automation_control: automation_control.clone(),
             health: health.clone(),
             store: device_store.clone(),
             history: HistorySettings::from_config(&config),
@@ -586,22 +626,10 @@ async fn main() -> Result<()> {
     };
     let automation_task = {
         let runtime = runtime.clone();
-        let automations = automations.clone();
         let health = health.clone();
-        let observer = device_store.clone().and_then(|store| {
-            if config.persistence.history.enabled {
-                Some(Arc::new(StoreAutomationObserver { store }) as Arc<dyn AutomationExecutionObserver>)
-            } else {
-                None
-            }
-        });
+        let runner = automation_runner.clone();
         tokio::spawn(async move {
             health.automations_ok();
-            let runner = if let Some(observer) = observer {
-                AutomationRunner::new((*automations).clone()).with_observer(observer)
-            } else {
-                AutomationRunner::new((*automations).clone())
-            };
             runner.run(runtime).await;
             health.automations_error("automation runner exited unexpectedly");
         })
@@ -972,8 +1000,13 @@ fn app(state: AppState) -> Router {
         .route("/capabilities", get(list_capabilities))
         .route("/diagnostics", get(diagnostics))
         .route("/scenes", get(list_scenes))
+        .route("/scenes/reload", post(reload_scenes))
         .route("/automations", get(list_automations))
+        .route("/automations/reload", post(reload_automations))
         .route("/automations/{id}", get(get_automation))
+        .route("/automations/{id}/enabled", post(set_automation_enabled))
+        .route("/automations/{id}/validate", post(validate_automation))
+        .route("/automations/{id}/execute", post(execute_automation_manually))
         .route("/scenes/{id}/history", get(get_scene_history))
         .route("/scenes/{id}/execute", post(execute_scene))
         .route("/automations/{id}/history", get(get_automation_history))
@@ -1066,14 +1099,26 @@ async fn list_scenes(State(state): State<AppState>) -> Json<Vec<SceneSummary>> {
     Json(state.scenes.summaries())
 }
 
+async fn reload_scenes() -> Result<StatusCode, ApiError> {
+    Err(ApiError::not_implemented(
+        "scene reload is not supported; restart the API process to reload scenes",
+    ))
+}
+
 async fn list_automations(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AutomationResponse>>, ApiError> {
     let mut automations = Vec::new();
-    for summary in state.automations.summaries() {
+    for summary in state.automation_control.summaries() {
         automations.push(automation_response(&state, summary).await?);
     }
     Ok(Json(automations))
+}
+
+async fn reload_automations() -> Result<StatusCode, ApiError> {
+    Err(ApiError::not_implemented(
+        "automation reload is not supported; restart the API process to reload automations",
+    ))
 }
 
 async fn get_automation(
@@ -1081,13 +1126,83 @@ async fn get_automation(
     Path(id): Path<String>,
 ) -> Result<Json<AutomationResponse>, ApiError> {
     let summary = state
-        .automations
-        .summaries()
-        .into_iter()
-        .find(|automation| automation.id == id)
+        .automation_control
+        .get(&id)
         .ok_or_else(|| ApiError::not_found(format!("automation '{id}' not found")))?;
 
     Ok(Json(automation_response(&state, summary).await?))
+}
+
+async fn set_automation_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<AutomationEnabledRequest>,
+) -> Result<Json<AutomationResponse>, ApiError> {
+    state
+        .automation_control
+        .set_enabled(&id, request.enabled)
+        .map_err(|error| {
+            if error.to_string().contains("not found") {
+                ApiError::not_found(error.to_string())
+            } else {
+                ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
+            }
+        })?;
+
+    let summary = state
+        .automation_control
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found(format!("automation '{id}' not found")))?;
+    Ok(Json(automation_response(&state, summary).await?))
+}
+
+async fn validate_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AutomationValidateResponse>, ApiError> {
+    let summary = state.automation_control.validate(&id).map_err(|error| {
+        if error.to_string().contains("not found") {
+            ApiError::not_found(error.to_string())
+        } else {
+            ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
+        }
+    })?;
+
+    Ok(Json(AutomationValidateResponse {
+        status: "ok",
+        automation: automation_response(&state, summary).await?,
+    }))
+}
+
+async fn execute_automation_manually(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ManualAutomationRequest>,
+) -> Result<Json<AutomationExecuteResponse>, ApiError> {
+    let trigger_payload = request.trigger_payload.unwrap_or_else(|| {
+        smart_home_core::model::AttributeValue::Object(HashMap::from([(
+            "type".to_string(),
+            smart_home_core::model::AttributeValue::Text("manual".to_string()),
+        )]))
+    });
+
+    let execution = state
+        .automation_control
+        .execute(&id, state.runtime.clone(), trigger_payload)
+        .map_err(|error| {
+            if error.to_string().contains("not found") {
+                ApiError::not_found(error.to_string())
+            } else {
+                ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
+            }
+        })?;
+
+    Ok(Json(AutomationExecuteResponse {
+        status: execution.status,
+        error: execution.error,
+        duration_ms: execution.duration_ms,
+        results: execution.results,
+    }))
 }
 
 async fn execute_scene(
@@ -1613,10 +1728,11 @@ async fn automation_response(
     state: &AppState,
     summary: smart_home_automations::AutomationSummary,
 ) -> Result<AutomationResponse, ApiError> {
+    let automation_id = summary.id.clone();
     let latest_run = if state.history.enabled {
         if let Some(store) = &state.store {
             store
-                .load_automation_history(&summary.id, None, None, 1)
+                .load_automation_history(&automation_id, None, None, 1)
                 .await
                 .map_err(internal_api_error)?
                 .into_iter()
@@ -1633,7 +1749,15 @@ async fn automation_response(
         name: summary.name,
         description: summary.description,
         trigger_type: summary.trigger_type,
-        status: "enabled",
+        status: if state
+            .automation_control
+            .is_enabled(&automation_id)
+            .unwrap_or(true)
+        {
+            "enabled"
+        } else {
+            "disabled"
+        },
         last_run: latest_run.as_ref().map(|entry| entry.executed_at),
         last_error: latest_run.and_then(|entry| entry.error),
     })
@@ -1808,6 +1932,17 @@ mod tests {
         first_save_started: Notify,
         first_save_seen: Mutex<bool>,
         delay_first_save: Mutex<bool>,
+    }
+
+    #[derive(Default)]
+    struct RecordingAutomationObserver {
+        entries: Mutex<Vec<AutomationExecutionHistoryEntry>>,
+    }
+
+    impl AutomationExecutionObserver for RecordingAutomationObserver {
+        fn record(&self, entry: AutomationExecutionHistoryEntry) {
+            self.entries.lock().expect("observer lock").push(entry);
+        }
     }
 
     impl LaggyMemoryStore {
@@ -2338,10 +2473,12 @@ mod tests {
     async fn spawn_test_server(
         runtime: Arc<Runtime>,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let automations = Arc::new(AutomationCatalog::empty());
         let app = app(AppState {
             runtime,
             scenes: empty_scenes(),
-            automations: Arc::new(AutomationCatalog::empty()),
+            automations: automations.clone(),
+            automation_control: Arc::new(AutomationRunner::new((*automations).clone()).controller()),
             health: test_health(&["open_meteo"]),
             store: None,
             history: history_settings(false),
@@ -2368,10 +2505,12 @@ mod tests {
         runtime: Arc<Runtime>,
         scenes: Arc<SceneCatalog>,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let automations = Arc::new(AutomationCatalog::empty());
         let app = app(AppState {
             runtime,
             scenes,
-            automations: Arc::new(AutomationCatalog::empty()),
+            automations: automations.clone(),
+            automation_control: Arc::new(AutomationRunner::new((*automations).clone()).controller()),
             health: test_health(&["open_meteo"]),
             store: None,
             history: history_settings(false),
@@ -2399,10 +2538,12 @@ mod tests {
         store: Arc<dyn DeviceStore>,
         history_enabled: bool,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let automations = Arc::new(AutomationCatalog::empty());
         let app = app(AppState {
             runtime,
             scenes: empty_scenes(),
-            automations: Arc::new(AutomationCatalog::empty()),
+            automations: automations.clone(),
+            automation_control: Arc::new(AutomationRunner::new((*automations).clone()).controller()),
             health: test_health(&["open_meteo"]),
             store: Some(store),
             history: history_settings(history_enabled),
@@ -2812,10 +2953,13 @@ mod tests {
         let automations = Arc::new(
             AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
         );
+        let automation_control =
+            Arc::new(AutomationRunner::new((*automations).clone()).controller());
         let app = app(AppState {
             runtime,
             scenes: empty_scenes(),
             automations,
+            automation_control,
             health: test_health(&["open_meteo"]),
             store: None,
             history: history_settings(false),
@@ -2857,6 +3001,199 @@ mod tests {
         assert_eq!(detail_body["id"], "rain_check");
 
         let _ = shutdown_tx.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automation_control_endpoints_toggle_validate_and_execute() {
+        let automation_dir = write_temp_automation_dir(&[(
+            "rain.lua",
+            r#"return {
+                id = "rain_check",
+                name = "Rain Check",
+                description = "Respond to rain sensor changes",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 42,
+                    })
+                end
+            }"#,
+        )]);
+        let automations = Arc::new(
+            AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
+        );
+        let observer = Arc::new(RecordingAutomationObserver::default())
+            as Arc<dyn AutomationExecutionObserver>;
+        let automation_runner =
+            AutomationRunner::new((*automations).clone()).with_observer(observer.clone());
+        let automation_control = Arc::new(automation_runner.controller());
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:rain",
+                "custom.test.rain",
+                AttributeValue::Bool(false),
+            ))
+            .await
+            .expect("sensor exists");
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("target exists");
+
+        let app = app(AppState {
+            runtime: runtime.clone(),
+            scenes: empty_scenes(),
+            automations,
+            automation_control,
+            health: test_health(&["open_meteo"]),
+            store: None,
+            history: history_settings(false),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        let client = reqwest::Client::new();
+
+        let disable = client
+            .post(format!("http://{addr}/automations/rain_check/enabled"))
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .expect("disable request succeeds");
+        assert_eq!(disable.status(), StatusCode::OK);
+        assert_eq!(
+            disable.json::<Value>().await.expect("disable json body")["status"],
+            "disabled"
+        );
+
+        let validate = client
+            .post(format!("http://{addr}/automations/rain_check/validate"))
+            .send()
+            .await
+            .expect("validate request succeeds");
+        assert_eq!(validate.status(), StatusCode::OK);
+        assert_eq!(
+            validate.json::<Value>().await.expect("validate json body")["status"],
+            "ok"
+        );
+
+        let execute = client
+            .post(format!("http://{addr}/automations/rain_check/execute"))
+            .json(&json!({
+                "trigger_payload": {
+                    "type": "manual",
+                    "source": "test"
+                }
+            }))
+            .send()
+            .await
+            .expect("manual execute request succeeds");
+        assert_eq!(execute.status(), StatusCode::OK);
+        let execute_body = execute
+            .json::<Value>()
+            .await
+            .expect("execute json body");
+        assert_eq!(execute_body["status"], "ok");
+        assert_eq!(execute_body["results"][0]["target"], "test:device");
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("updated device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(42))
+        );
+
+        let enable = client
+            .post(format!("http://{addr}/automations/rain_check/enabled"))
+            .json(&json!({ "enabled": true }))
+            .send()
+            .await
+            .expect("enable request succeeds");
+        assert_eq!(enable.status(), StatusCode::OK);
+        assert_eq!(
+            enable.json::<Value>().await.expect("enable json body")["status"],
+            "enabled"
+        );
+
+        let _ = shutdown_tx.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn reload_endpoints_are_explicitly_restart_only() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+
+        let client = reqwest::Client::new();
+
+        let scene_reload = client
+            .post(format!("http://{addr}/scenes/reload"))
+            .send()
+            .await
+            .expect("scene reload request succeeds");
+        assert_eq!(scene_reload.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            scene_reload
+                .json::<Value>()
+                .await
+                .expect("scene reload json body")["error"],
+            "scene reload is not supported; restart the API process to reload scenes"
+        );
+
+        let automation_reload = client
+            .post(format!("http://{addr}/automations/reload"))
+            .send()
+            .await
+            .expect("automation reload request succeeds");
+        assert_eq!(automation_reload.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            automation_reload
+                .json::<Value>()
+                .await
+                .expect("automation reload json body")["error"],
+            "automation reload is not supported; restart the API process to reload automations"
+        );
+
+        let _ = shutdown.send(());
         handle.await.expect("server task completes");
     }
 
@@ -2928,6 +3265,9 @@ mod tests {
             runtime,
             scenes: empty_scenes(),
             automations: Arc::new(AutomationCatalog::empty()),
+            automation_control: Arc::new(
+                AutomationRunner::new(AutomationCatalog::empty()).controller(),
+            ),
             health,
             store: None,
             history: history_settings(false),
@@ -3330,6 +3670,9 @@ mod tests {
             runtime: runtime.clone(),
             scenes,
             automations: Arc::new(AutomationCatalog::empty()),
+            automation_control: Arc::new(
+                AutomationRunner::new(AutomationCatalog::empty()).controller(),
+            ),
             health: test_health(&["open_meteo"]),
             store: Some(store.clone()),
             history: history_settings(true),

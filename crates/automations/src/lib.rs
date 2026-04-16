@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -37,10 +37,24 @@ pub struct Automation {
     trigger: Trigger,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AutomationExecutionResult {
+    pub status: String,
+    pub error: Option<String>,
+    pub results: Vec<SceneStepResult>,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AutomationControlState {
+    enabled: HashMap<String, bool>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AutomationCatalog {
     automations: Vec<Automation>,
     scripts_root: Option<PathBuf>,
+    control: Arc<RwLock<AutomationControlState>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +71,12 @@ enum Trigger {
 
 #[derive(Clone)]
 pub struct AutomationRunner {
+    catalog: AutomationCatalog,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
+}
+
+#[derive(Clone)]
+pub struct AutomationController {
     catalog: AutomationCatalog,
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
 }
@@ -121,6 +141,7 @@ impl AutomationCatalog {
         Ok(Self {
             automations,
             scripts_root,
+            control: Arc::new(RwLock::new(AutomationControlState::default())),
         })
     }
 
@@ -129,6 +150,81 @@ impl AutomationCatalog {
             .iter()
             .map(|automation| automation.summary.clone())
             .collect()
+    }
+
+    pub fn get(&self, id: &str) -> Option<AutomationSummary> {
+        self.automations
+            .iter()
+            .find(|automation| automation.summary.id == id)
+            .map(|automation| automation.summary.clone())
+    }
+
+    pub fn is_enabled(&self, id: &str) -> Option<bool> {
+        self.automations
+            .iter()
+            .find(|automation| automation.summary.id == id)
+            .map(|_| self.read_control().enabled.get(id).copied().unwrap_or(true))
+    }
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        if self.automations.iter().all(|automation| automation.summary.id != id) {
+            bail!("automation '{id}' not found");
+        }
+
+        self.write_control().enabled.insert(id.to_string(), enabled);
+        Ok(enabled)
+    }
+
+    pub fn validate(&self, id: &str) -> Result<AutomationSummary> {
+        let automation = self
+            .automations
+            .iter()
+            .find(|automation| automation.summary.id == id)
+            .with_context(|| format!("automation '{id}' not found"))?;
+        let reloaded = load_automation_file(&automation.path, self.scripts_root.as_deref())?;
+        Ok(reloaded.summary)
+    }
+
+    pub fn execute(
+        &self,
+        id: &str,
+        runtime: Arc<Runtime>,
+        trigger_payload: AttributeValue,
+    ) -> Result<AutomationExecutionResult> {
+        let automation = self
+            .automations
+            .iter()
+            .find(|automation| automation.summary.id == id)
+            .with_context(|| format!("automation '{id}' not found"))?;
+
+        let record = execute_automation(
+            automation,
+            runtime,
+            trigger_payload,
+            self.scripts_root.as_deref(),
+            AUTOMATION_EXECUTION_TIMEOUT,
+        )?;
+
+        Ok(AutomationExecutionResult {
+            status: record.status,
+            error: record.error,
+            results: record.results,
+            duration_ms: record.duration_ms,
+        })
+    }
+
+    fn read_control(&self) -> std::sync::RwLockReadGuard<'_, AutomationControlState> {
+        match self.control.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_control(&self) -> std::sync::RwLockWriteGuard<'_, AutomationControlState> {
+        match self.control.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -143,6 +239,13 @@ impl AutomationRunner {
     pub fn with_observer(mut self, observer: Arc<dyn AutomationExecutionObserver>) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    pub fn controller(&self) -> AutomationController {
+        AutomationController {
+            catalog: self.catalog.clone(),
+            observer: self.observer.clone(),
+        }
     }
 
     pub async fn run(self, runtime: Arc<Runtime>) {
@@ -166,24 +269,29 @@ impl AutomationRunner {
             .any(|automation| matches!(automation.trigger, Trigger::DeviceStateChange { .. }))
         {
             let runtime = runtime.clone();
-            let automations = self.catalog.automations.clone();
+            let catalog = self.catalog.clone();
             let scripts_root = self.catalog.scripts_root.clone();
             let execution = execution.clone();
             let observer = self.observer.clone();
             tasks.spawn(async move {
-                run_event_trigger_loop(runtime, automations, scripts_root, execution, observer).await;
+                run_event_trigger_loop(runtime, catalog, scripts_root, execution, observer).await;
             });
         }
 
         for automation in self.catalog.automations.iter().cloned() {
             if let Trigger::Interval { every_secs } = automation.trigger {
+                if !self.catalog.is_enabled(&automation.summary.id).unwrap_or(true) {
+                    continue;
+                }
                 let runtime = runtime.clone();
                 let scripts_root = self.catalog.scripts_root.clone();
                 let execution = execution.clone();
                 let observer = self.observer.clone();
+                let catalog = self.catalog.clone();
                 tasks.spawn(async move {
                     run_interval_trigger_loop(
                         runtime,
+                        catalog,
                         automation,
                         every_secs,
                         scripts_root,
@@ -199,9 +307,52 @@ impl AutomationRunner {
     }
 }
 
+impl AutomationController {
+    pub fn summaries(&self) -> Vec<AutomationSummary> {
+        self.catalog.summaries()
+    }
+
+    pub fn get(&self, id: &str) -> Option<AutomationSummary> {
+        self.catalog.get(id)
+    }
+
+    pub fn is_enabled(&self, id: &str) -> Option<bool> {
+        self.catalog.is_enabled(id)
+    }
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        self.catalog.set_enabled(id, enabled)
+    }
+
+    pub fn validate(&self, id: &str) -> Result<AutomationSummary> {
+        self.catalog.validate(id)
+    }
+
+    pub fn execute(
+        &self,
+        id: &str,
+        runtime: Arc<Runtime>,
+        trigger_payload: AttributeValue,
+    ) -> Result<AutomationExecutionResult> {
+        let result = self.catalog.execute(id, runtime, trigger_payload.clone())?;
+        if let Some(observer) = &self.observer {
+            observer.record(AutomationExecutionHistoryEntry {
+                executed_at: Utc::now(),
+                automation_id: id.to_string(),
+                trigger_payload,
+                status: result.status.clone(),
+                duration_ms: result.duration_ms,
+                error: result.error.clone(),
+                results: result.results.clone(),
+            });
+        }
+        Ok(result)
+    }
+}
+
 async fn run_event_trigger_loop(
     runtime: Arc<Runtime>,
-    automations: Vec<Automation>,
+    catalog: AutomationCatalog,
     scripts_root: Option<PathBuf>,
     execution: ExecutionControl,
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
@@ -212,7 +363,10 @@ async fn run_event_trigger_loop(
     loop {
         match receiver.recv().await {
             Ok(event) => {
-                for automation in &automations {
+                for automation in &catalog.automations {
+                    if !catalog.is_enabled(&automation.summary.id).unwrap_or(true) {
+                        continue;
+                    }
                     if let Some(event_value) =
                         automation_event_from_runtime_event(automation, &event)
                     {
@@ -235,7 +389,7 @@ async fn run_event_trigger_loop(
                 recover_lagged_event_automations(
                     &mut executions,
                     runtime.clone(),
-                    &automations,
+                    &catalog,
                     scripts_root.clone(),
                     execution.clone(),
                     skipped,
@@ -250,6 +404,7 @@ async fn run_event_trigger_loop(
 
 async fn run_interval_trigger_loop(
     runtime: Arc<Runtime>,
+    catalog: AutomationCatalog,
     automation: Automation,
     every_secs: u64,
     scripts_root: Option<PathBuf>,
@@ -261,6 +416,10 @@ async fn run_interval_trigger_loop(
 
     loop {
         interval.tick().await;
+
+        if !catalog.is_enabled(&automation.summary.id).unwrap_or(true) {
+            continue;
+        }
 
         let event = AttributeValue::Object(HashMap::from([
             (
@@ -460,13 +619,16 @@ fn spawn_automation_execution(
 fn recover_lagged_event_automations(
     executions: &mut JoinSet<()>,
     runtime: Arc<Runtime>,
-    automations: &[Automation],
+    catalog: &AutomationCatalog,
     scripts_root: Option<PathBuf>,
     execution: ExecutionControl,
     skipped: u64,
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
 ) {
-    for automation in automations {
+    for automation in &catalog.automations {
+        if !catalog.is_enabled(&automation.summary.id).unwrap_or(true) {
+            continue;
+        }
         let Trigger::DeviceStateChange { device_id, .. } = &automation.trigger else {
             continue;
         };
