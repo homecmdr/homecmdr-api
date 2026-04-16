@@ -8,8 +8,8 @@ use smart_home_core::model::{
     AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
 };
 use smart_home_core::store::{
-    AttributeHistoryEntry, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
-    SceneExecutionHistoryEntry,
+    AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry,
+    DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -101,6 +101,24 @@ CREATE TABLE IF NOT EXISTS scene_execution_history (
 const CREATE_SCENE_HISTORY_INDEX_SQL: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_scene_history_scene_time
 ON scene_execution_history(scene_id, executed_at DESC)
+"#;
+
+const CREATE_AUTOMATION_HISTORY_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS automation_execution_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    executed_at TEXT NOT NULL,
+    automation_id TEXT NOT NULL,
+    trigger_payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    error TEXT,
+    results_json TEXT NOT NULL
+)
+"#;
+
+const CREATE_AUTOMATION_HISTORY_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_automation_history_automation_time
+ON automation_execution_history(automation_id, executed_at DESC)
 "#;
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -230,6 +248,16 @@ impl SqliteDeviceStore {
             .execute(&self.pool)
             .await
             .context("failed to create SQLite scene history index")?;
+
+        sqlx::query(CREATE_AUTOMATION_HISTORY_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite automation history table")?;
+
+        sqlx::query(CREATE_AUTOMATION_HISTORY_INDEX_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite automation history index")?;
 
         sqlx::query(
             r#"
@@ -637,6 +665,61 @@ impl DeviceStore for SqliteDeviceStore {
 
         rows.into_iter().map(scene_history_from_row).collect()
     }
+
+    async fn save_automation_execution(&self, entry: &AutomationExecutionHistoryEntry) -> Result<()> {
+        let trigger_payload_json = serde_json::to_string(&entry.trigger_payload)
+            .context("failed to serialize automation trigger payload")?;
+        let results_json = serde_json::to_string(&entry.results)
+            .context("failed to serialize automation execution history entry")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO automation_execution_history (executed_at, automation_id, trigger_payload_json, status, duration_ms, error, results_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+        )
+        .bind(entry.executed_at.to_rfc3339())
+        .bind(&entry.automation_id)
+        .bind(trigger_payload_json)
+        .bind(&entry.status)
+        .bind(entry.duration_ms)
+        .bind(&entry.error)
+        .bind(results_json)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to save automation execution history for '{}'", entry.automation_id))?;
+
+        Ok(())
+    }
+
+    async fn load_automation_history(
+        &self,
+        automation_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<AutomationExecutionHistoryEntry>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT executed_at, automation_id, trigger_payload_json, status, duration_ms, error, results_json
+            FROM automation_execution_history
+            WHERE automation_id = ?1
+              AND (?2 IS NULL OR executed_at >= ?2)
+              AND (?3 IS NULL OR executed_at <= ?3)
+            ORDER BY executed_at DESC, id DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(automation_id)
+        .bind(start.map(|value| value.to_rfc3339()))
+        .bind(end.map(|value| value.to_rfc3339()))
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("failed to load automation history for '{automation_id}'"))?;
+
+        rows.into_iter().map(automation_history_from_row).collect()
+    }
 }
 
 fn sqlite_connect_options(database_url: &str, auto_create: bool) -> Result<SqliteConnectOptions> {
@@ -754,6 +837,28 @@ fn scene_history_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SceneExecution
         executed_at,
         scene_id: row.get::<String, _>("scene_id"),
         status: row.get::<String, _>("status"),
+        error: row.get::<Option<String>, _>("error"),
+        results,
+    })
+}
+
+fn automation_history_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<AutomationExecutionHistoryEntry> {
+    let executed_at = DateTime::parse_from_rfc3339(&row.get::<String, _>("executed_at"))
+        .context("invalid automation execution history executed_at")?
+        .with_timezone(&Utc);
+    let trigger_payload = serde_json::from_str(&row.get::<String, _>("trigger_payload_json"))
+        .context("invalid automation trigger payload JSON")?;
+    let results = serde_json::from_str(&row.get::<String, _>("results_json"))
+        .context("invalid automation execution history JSON")?;
+
+    Ok(AutomationExecutionHistoryEntry {
+        executed_at,
+        automation_id: row.get::<String, _>("automation_id"),
+        trigger_payload,
+        status: row.get::<String, _>("status"),
+        duration_ms: row.get::<i64, _>("duration_ms"),
         error: row.get::<Option<String>, _>("error"),
         results,
     })
@@ -1131,6 +1236,39 @@ mod tests {
             .load_scene_history("movie_time", None, None, 10)
             .await
             .expect("load scene history succeeds");
+        assert_eq!(entries, vec![entry]);
+    }
+
+    #[tokio::test]
+    async fn saves_and_loads_automation_execution_history() {
+        let store = temp_store().await;
+        let executed_at = Utc::now();
+        let entry = AutomationExecutionHistoryEntry {
+            executed_at,
+            automation_id: "rain_check".to_string(),
+            trigger_payload: AttributeValue::Object(HashMap::from([(
+                "type".to_string(),
+                AttributeValue::Text("interval".to_string()),
+            )])),
+            status: "ok".to_string(),
+            duration_ms: 12,
+            error: None,
+            results: vec![SceneStepResult {
+                target: "test:one".to_string(),
+                status: "ok".to_string(),
+                message: None,
+            }],
+        };
+
+        store
+            .save_automation_execution(&entry)
+            .await
+            .expect("save automation history succeeds");
+
+        let entries = store
+            .load_automation_history("rain_check", None, None, 10)
+            .await
+            .expect("load automation history succeeds");
         assert_eq!(entries, vec![entry]);
     }
 }

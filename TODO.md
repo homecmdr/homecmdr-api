@@ -35,7 +35,7 @@ These areas are already present and should not be re-planned as greenfield work:
 - [x] Add history APIs for device timelines, attribute timelines, and time-range queries.
 - [x] Add command audit history so device commands can be traced after the fact.
 - [x] Add scene execution history with per-step results.
-- [ ] Add automation execution history with trigger payload, result, duration, and error details.
+- [x] Add automation execution history with trigger payload, result, duration, and error details.
 - [ ] Define whether history is always on or controlled by telemetry selection config, and wire the existing telemetry config into real behavior.
 - [x] Add migrations/versioning for persistence schema changes instead of relying only on `CREATE TABLE IF NOT EXISTS`.
 

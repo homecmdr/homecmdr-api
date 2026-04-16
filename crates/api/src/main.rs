@@ -16,8 +16,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smart_home_adapters as _;
-use smart_home_automations::AutomationCatalog;
-use smart_home_automations::AutomationRunner;
+use smart_home_automations::{
+    AutomationCatalog, AutomationExecutionObserver, AutomationRunner,
+};
 use smart_home_core::adapter::{registered_adapter_factories, Adapter};
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend};
@@ -25,8 +26,8 @@ use smart_home_core::event::Event;
 use smart_home_core::model::{DeviceId, Room, RoomId};
 use smart_home_core::runtime::Runtime;
 use smart_home_core::store::{
-    AttributeHistoryEntry, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
-    SceneExecutionHistoryEntry, SceneStepResult,
+    AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry,
+    DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry, SceneStepResult,
 };
 use smart_home_scenes::{SceneCatalog, SceneExecutionResult, SceneSummary};
 use store_sql::{SqliteDeviceStore, SqliteHistoryConfig};
@@ -153,6 +154,17 @@ struct CommandAuditResponse {
 struct SceneHistoryResponse {
     scene_id: String,
     entries: Vec<SceneExecutionHistoryEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationHistoryResponse {
+    automation_id: String,
+    entries: Vec<AutomationExecutionHistoryEntry>,
+}
+
+#[derive(Clone)]
+struct StoreAutomationObserver {
+    store: Arc<dyn DeviceStore>,
 }
 
 impl ComponentStatus {
@@ -439,7 +451,7 @@ async fn main() -> Result<()> {
 
     let (persistence_shutdown_tx, persistence_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut persistence_shutdown_tx = Some(persistence_shutdown_tx);
-    let persistence_task = device_store.map(|store| {
+    let persistence_task = device_store.clone().map(|store| {
         let runtime = runtime.clone();
         let health = health.clone();
         tokio::spawn(async move {
@@ -458,9 +470,21 @@ async fn main() -> Result<()> {
         let runtime = runtime.clone();
         let automations = automations.clone();
         let health = health.clone();
+        let observer = device_store.clone().and_then(|store| {
+            if config.persistence.history.enabled {
+                Some(Arc::new(StoreAutomationObserver { store }) as Arc<dyn AutomationExecutionObserver>)
+            } else {
+                None
+            }
+        });
         tokio::spawn(async move {
             health.automations_ok();
-            AutomationRunner::new((*automations).clone()).run(runtime).await;
+            let runner = if let Some(observer) = observer {
+                AutomationRunner::new((*automations).clone()).with_observer(observer)
+            } else {
+                AutomationRunner::new((*automations).clone())
+            };
+            runner.run(runtime).await;
             health.automations_error("automation runner exited unexpectedly");
         })
     };
@@ -812,6 +836,7 @@ fn app(state: AppState) -> Router {
         .route("/scenes", get(list_scenes))
         .route("/scenes/{id}/history", get(get_scene_history))
         .route("/scenes/{id}/execute", post(execute_scene))
+        .route("/automations/{id}/history", get(get_automation_history))
         .route("/rooms", get(list_rooms).post(create_room))
         .route("/rooms/{id}", get(get_room))
         .route("/rooms/{id}/devices", get(list_room_devices))
@@ -918,6 +943,26 @@ async fn get_scene_history(
 
     Ok(Json(SceneHistoryResponse {
         scene_id: id,
+        entries,
+    }))
+}
+
+async fn get_automation_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<AutomationHistoryResponse>, ApiError> {
+    let store = history_store(&state)?;
+    ensure_history_query_range(&query)?;
+    let limit = state.history.resolve_limit(query.limit)?;
+
+    let entries = store
+        .load_automation_history(&id, query.start, query.end, limit)
+        .await
+        .map_err(internal_api_error)?;
+
+    Ok(Json(AutomationHistoryResponse {
+        automation_id: id,
         entries,
     }))
 }
@@ -1309,6 +1354,17 @@ fn persist_scene_history(state: &AppState, entry: SceneExecutionHistoryEntry) {
     });
 }
 
+impl AutomationExecutionObserver for StoreAutomationObserver {
+    fn record(&self, entry: AutomationExecutionHistoryEntry) {
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store.save_automation_execution(&entry).await {
+                tracing::error!(error = %error, automation_id = %entry.automation_id, "failed to persist automation execution history");
+            }
+        });
+    }
+}
+
 async fn handle_events_socket(mut socket: WebSocket, runtime: Arc<Runtime>) {
     let mut receiver = runtime.bus().subscribe();
 
@@ -1433,6 +1489,7 @@ mod tests {
         attribute_history: Mutex<HashMap<(DeviceId, String), Vec<AttributeHistoryEntry>>>,
         command_audit: Mutex<Vec<CommandAuditEntry>>,
         scene_history: Mutex<HashMap<String, Vec<SceneExecutionHistoryEntry>>>,
+        automation_history: Mutex<HashMap<String, Vec<AutomationExecutionHistoryEntry>>>,
         first_save_started: Notify,
         first_save_seen: Mutex<bool>,
         delay_first_save: Mutex<bool>,
@@ -1447,6 +1504,7 @@ mod tests {
                 attribute_history: Mutex::new(HashMap::new()),
                 command_audit: Mutex::new(Vec::new()),
                 scene_history: Mutex::new(HashMap::new()),
+                automation_history: Mutex::new(HashMap::new()),
                 first_save_started: Notify::new(),
                 first_save_seen: Mutex::new(false),
                 delay_first_save: Mutex::new(true),
@@ -1664,6 +1722,42 @@ mod tests {
                 .lock()
                 .expect("scene history lock")
                 .get(scene_id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| start.map(|value| entry.executed_at >= value).unwrap_or(true))
+                .filter(|entry| end.map(|value| entry.executed_at <= value).unwrap_or(true))
+                .collect::<Vec<_>>();
+            entries.sort_by(|a, b| b.executed_at.cmp(&a.executed_at));
+            entries.truncate(limit);
+            Ok(entries)
+        }
+
+        async fn save_automation_execution(
+            &self,
+            entry: &AutomationExecutionHistoryEntry,
+        ) -> anyhow::Result<()> {
+            self.automation_history
+                .lock()
+                .expect("automation history lock")
+                .entry(entry.automation_id.clone())
+                .or_default()
+                .push(entry.clone());
+            Ok(())
+        }
+
+        async fn load_automation_history(
+            &self,
+            automation_id: &str,
+            start: Option<DateTime<Utc>>,
+            end: Option<DateTime<Utc>>,
+            limit: usize,
+        ) -> anyhow::Result<Vec<AutomationExecutionHistoryEntry>> {
+            let mut entries = self
+                .automation_history
+                .lock()
+                .expect("automation history lock")
+                .get(automation_id)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
@@ -2713,6 +2807,127 @@ mod tests {
         assert_eq!(body["entries"][0]["results"][0]["target"], "test:device");
 
         let _ = shutdown_tx.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automation_history_endpoint_returns_recorded_automation_runs() {
+        let database_url = temp_sqlite_url();
+        let store = Arc::new(
+            SqliteDeviceStore::new_with_history(
+                &database_url,
+                true,
+                SqliteHistoryConfig {
+                    enabled: true,
+                    retention: None,
+                },
+            )
+            .await
+            .expect("sqlite store initializes"),
+        );
+
+        let automation_dir = write_temp_scene_dir(&[(
+            "rain.lua",
+            r#"return {
+                id = "rain_check",
+                name = "Rain Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 42,
+                    })
+                end
+            }"#,
+        )]);
+        let automations = Arc::new(
+            AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:rain",
+                "custom.test.rain",
+                AttributeValue::Bool(false),
+            ))
+            .await
+            .expect("sensor exists");
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("target exists");
+
+        let observer = Arc::new(StoreAutomationObserver { store: store.clone() })
+            as Arc<dyn AutomationExecutionObserver>;
+        let runner = AutomationRunner::new((*automations).clone()).with_observer(observer);
+        let runtime_for_runner = runtime.clone();
+        let automation_task = tokio::spawn(async move {
+            runner.run(runtime_for_runner).await;
+        });
+
+        let (addr, shutdown, handle) =
+            spawn_test_server_with_store(runtime.clone(), store.clone(), true).await;
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:rain",
+                "custom.test.rain",
+                AttributeValue::Bool(true),
+            ))
+            .await
+            .expect("sensor update succeeds");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let entries = store
+                    .load_automation_history("rain_check", None, None, 10)
+                    .await
+                    .expect("automation history loads");
+                if !entries.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("automation history persists in time");
+
+        let response = reqwest::get(format!("http://{addr}/automations/rain_check/history"))
+            .await
+            .expect("automation history request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("automation history json body");
+        assert_eq!(body["automation_id"], "rain_check");
+        assert_eq!(body["entries"].as_array().expect("entries array").len(), 1);
+        assert_eq!(body["entries"][0]["status"], "ok");
+        assert_eq!(body["entries"][0]["results"][0]["target"], "test:device");
+
+        automation_task.abort();
+        let _ = automation_task.await;
+        let _ = shutdown.send(());
         handle.await.expect("server task completes");
     }
 

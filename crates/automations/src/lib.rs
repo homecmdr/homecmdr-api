@@ -11,6 +11,7 @@ use serde::Serialize;
 use smart_home_core::event::Event;
 use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId};
 use smart_home_core::runtime::Runtime;
+use smart_home_core::store::{AutomationExecutionHistoryEntry, SceneStepResult};
 use smart_home_lua_host::{
     attribute_to_lua_value, evaluate_module, LuaExecutionContext, LuaRuntimeOptions,
 };
@@ -54,15 +55,28 @@ enum Trigger {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AutomationRunner {
     catalog: AutomationCatalog,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
 }
 
 #[derive(Clone)]
 struct ExecutionControl {
     semaphore: Arc<Semaphore>,
     timeout: Duration,
+}
+
+pub trait AutomationExecutionObserver: Send + Sync {
+    fn record(&self, entry: AutomationExecutionHistoryEntry);
+}
+
+#[derive(Debug)]
+struct AutomationExecutionRecord {
+    status: String,
+    error: Option<String>,
+    results: Vec<SceneStepResult>,
+    duration_ms: i64,
 }
 
 impl AutomationCatalog {
@@ -120,7 +134,15 @@ impl AutomationCatalog {
 
 impl AutomationRunner {
     pub fn new(catalog: AutomationCatalog) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            observer: None,
+        }
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn AutomationExecutionObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     pub async fn run(self, runtime: Arc<Runtime>) {
@@ -147,8 +169,9 @@ impl AutomationRunner {
             let automations = self.catalog.automations.clone();
             let scripts_root = self.catalog.scripts_root.clone();
             let execution = execution.clone();
+            let observer = self.observer.clone();
             tasks.spawn(async move {
-                run_event_trigger_loop(runtime, automations, scripts_root, execution).await;
+                run_event_trigger_loop(runtime, automations, scripts_root, execution, observer).await;
             });
         }
 
@@ -157,6 +180,7 @@ impl AutomationRunner {
                 let runtime = runtime.clone();
                 let scripts_root = self.catalog.scripts_root.clone();
                 let execution = execution.clone();
+                let observer = self.observer.clone();
                 tasks.spawn(async move {
                     run_interval_trigger_loop(
                         runtime,
@@ -164,6 +188,7 @@ impl AutomationRunner {
                         every_secs,
                         scripts_root,
                         execution,
+                        observer,
                     )
                     .await;
                 });
@@ -179,6 +204,7 @@ async fn run_event_trigger_loop(
     automations: Vec<Automation>,
     scripts_root: Option<PathBuf>,
     execution: ExecutionControl,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
 ) {
     let mut receiver = runtime.bus().subscribe();
     let mut executions = JoinSet::new();
@@ -197,6 +223,7 @@ async fn run_event_trigger_loop(
                             event_value,
                             scripts_root.clone(),
                             execution.clone(),
+                            observer.clone(),
                         );
                     }
                 }
@@ -212,6 +239,7 @@ async fn run_event_trigger_loop(
                     scripts_root.clone(),
                     execution.clone(),
                     skipped,
+                    observer.clone(),
                 );
                 while executions.try_join_next().is_some() {}
             }
@@ -226,6 +254,7 @@ async fn run_interval_trigger_loop(
     every_secs: u64,
     scripts_root: Option<PathBuf>,
     execution: ExecutionControl,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(every_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -260,6 +289,7 @@ async fn run_interval_trigger_loop(
         let runtime_clone = runtime.clone();
         let scripts_root_clone = scripts_root.clone();
         let timeout_duration = execution.timeout;
+        let event_for_observer = event.clone();
         let join_handle = tokio::spawn(async move {
             let _permit = permit;
             execute_automation(
@@ -274,16 +304,56 @@ async fn run_interval_trigger_loop(
         tokio::pin!(join_handle);
 
         match timeout(timeout_duration, &mut join_handle).await {
-            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Ok(record))) => {
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    record,
+                );
+            }
             Ok(Ok(Err(error))) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "interval automation execution failed");
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    AutomationExecutionRecord {
+                        status: "error".to_string(),
+                        error: Some(error.to_string()),
+                        results: Vec::new(),
+                        duration_ms: timeout_duration.as_millis() as i64,
+                    },
+                );
             }
             Ok(Err(error)) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "interval automation task failed");
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    AutomationExecutionRecord {
+                        status: "error".to_string(),
+                        error: Some(error.to_string()),
+                        results: Vec::new(),
+                        duration_ms: timeout_duration.as_millis() as i64,
+                    },
+                );
             }
             Err(_) => {
                 join_handle.abort();
                 tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "interval automation execution timed out");
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    AutomationExecutionRecord {
+                        status: "timeout".to_string(),
+                        error: Some("automation execution timed out".to_string()),
+                        results: Vec::new(),
+                        duration_ms: timeout_duration.as_millis() as i64,
+                    },
+                );
             }
         }
     }
@@ -296,15 +366,28 @@ fn spawn_automation_execution(
     event: AttributeValue,
     scripts_root: Option<PathBuf>,
     execution: ExecutionControl,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
 ) {
     let Ok(permit) = execution.semaphore.clone().try_acquire_owned() else {
         tracing::warn!(automation = %automation.summary.id, "skipping automation execution because the runner is saturated");
+        notify_observer(
+            observer.as_ref(),
+            &automation,
+            event,
+            AutomationExecutionRecord {
+                status: "skipped".to_string(),
+                error: Some("automation runner saturated".to_string()),
+                results: Vec::new(),
+                duration_ms: 0,
+            },
+        );
         return;
     };
 
     executions.spawn(async move {
         let timeout_duration = execution.timeout;
         let automation_for_task = automation.clone();
+        let event_for_observer = event.clone();
         let join_handle = tokio::spawn(async move {
             let _permit = permit;
             execute_automation(
@@ -319,16 +402,56 @@ fn spawn_automation_execution(
         tokio::pin!(join_handle);
 
         match timeout(timeout_duration, &mut join_handle).await {
-            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Ok(record))) => {
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    record,
+                );
+            }
             Ok(Ok(Err(error))) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "automation execution failed");
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    AutomationExecutionRecord {
+                        status: "error".to_string(),
+                        error: Some(error.to_string()),
+                        results: Vec::new(),
+                        duration_ms: timeout_duration.as_millis() as i64,
+                    },
+                );
             }
             Ok(Err(error)) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "automation task failed");
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    AutomationExecutionRecord {
+                        status: "error".to_string(),
+                        error: Some(error.to_string()),
+                        results: Vec::new(),
+                        duration_ms: timeout_duration.as_millis() as i64,
+                    },
+                );
             }
             Err(_) => {
                 join_handle.abort();
                 tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "automation execution timed out");
+                notify_observer(
+                    observer.as_ref(),
+                    &automation,
+                    event_for_observer,
+                    AutomationExecutionRecord {
+                        status: "timeout".to_string(),
+                        error: Some("automation execution timed out".to_string()),
+                        results: Vec::new(),
+                        duration_ms: timeout_duration.as_millis() as i64,
+                    },
+                );
             }
         }
     });
@@ -341,6 +464,7 @@ fn recover_lagged_event_automations(
     scripts_root: Option<PathBuf>,
     execution: ExecutionControl,
     skipped: u64,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
 ) {
     for automation in automations {
         let Trigger::DeviceStateChange { device_id, .. } = &automation.trigger else {
@@ -360,6 +484,7 @@ fn recover_lagged_event_automations(
                 event_value,
                 scripts_root.clone(),
                 execution.clone(),
+                observer.clone(),
             );
         }
     }
@@ -371,7 +496,8 @@ fn execute_automation(
     event: AttributeValue,
     scripts_root: Option<&Path>,
     timeout_duration: Duration,
-) -> Result<()> {
+) -> Result<AutomationExecutionRecord> {
+    let started = Instant::now();
     let source = fs::read_to_string(&automation.path).with_context(|| {
         format!(
             "failed to read automation file {}",
@@ -392,12 +518,48 @@ fn execute_automation(
     let event =
         attribute_to_lua_value(&lua, event).map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    execute.call::<()>((ctx, event)).map_err(|error| {
+    execute.call::<()>((ctx.clone(), event)).map_err(|error| {
         anyhow::anyhow!(
             "automation '{}' execution failed: {error}",
             automation.summary.id
         )
+    })?;
+
+    Ok(AutomationExecutionRecord {
+        status: "ok".to_string(),
+        error: None,
+        results: ctx
+            .into_results()
+            .into_iter()
+            .map(|result| SceneStepResult {
+                target: result.target,
+                status: result.status.to_string(),
+                message: result.message,
+            })
+            .collect(),
+        duration_ms: started.elapsed().as_millis() as i64,
     })
+}
+
+fn notify_observer(
+    observer: Option<&Arc<dyn AutomationExecutionObserver>>,
+    automation: &Automation,
+    trigger_payload: AttributeValue,
+    record: AutomationExecutionRecord,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+
+    observer.record(AutomationExecutionHistoryEntry {
+        executed_at: Utc::now(),
+        automation_id: automation.summary.id.clone(),
+        trigger_payload,
+        status: record.status,
+        duration_ms: record.duration_ms,
+        error: record.error,
+        results: record.results,
+    });
 }
 
 fn install_execution_timeout_hook(lua: &Lua, timeout_duration: Duration) {
@@ -715,6 +877,7 @@ fn trigger_type_name(trigger: &Trigger) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -725,6 +888,7 @@ mod tests {
     use smart_home_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
     use smart_home_core::registry::DeviceRegistry;
     use smart_home_core::runtime::{Runtime, RuntimeConfig};
+    use smart_home_core::store::AutomationExecutionHistoryEntry;
     use tokio::sync::Semaphore;
     use tokio::time::{sleep, timeout, Duration};
 
@@ -733,6 +897,17 @@ mod tests {
     const RAIN_ATTRIBUTE: &str = "custom.test.rain";
 
     struct CommandAdapter;
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        entries: Mutex<Vec<AutomationExecutionHistoryEntry>>,
+    }
+
+    impl AutomationExecutionObserver for RecordingObserver {
+        fn record(&self, entry: AutomationExecutionHistoryEntry) {
+            self.entries.lock().expect("observer lock").push(entry);
+        }
+    }
 
     #[async_trait::async_trait]
     impl Adapter for CommandAdapter {
@@ -1374,5 +1549,85 @@ mod tests {
                 .get("brightness"),
             Some(&AttributeValue::Integer(0))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automation_runner_records_execution_history_via_observer() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "rain.lua",
+            r#"return {
+                id = "rain_check",
+                name = "Rain Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 42,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor upsert succeeds");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target device upsert succeeds");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let runtime_for_runner = runtime.clone();
+        let task = tokio::spawn(async move {
+            runner.run(runtime_for_runner).await;
+        });
+
+        sleep(Duration::from_millis(25)).await;
+
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("sensor change succeeds");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if !observer.entries.lock().expect("observer lock").is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("observer should receive execution record");
+
+        let entries = observer.entries.lock().expect("observer lock");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].automation_id, "rain_check");
+        assert_eq!(entries[0].status, "ok");
+        assert!(entries[0].duration_ms >= 0);
+        assert_eq!(entries[0].results[0].target, "test:device");
+
+        task.abort();
+        let _ = task.await;
     }
 }
