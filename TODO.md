@@ -53,13 +53,13 @@ These areas are already present and should not be re-planned as greenfield work:
 
 ## P1 API Surface Completion
 
-- [ ] Add automation endpoints for listing automations and inspecting their trigger type, status, last run, and last error.
+- [x] Add automation endpoints for listing automations and inspecting their trigger type, status, last run, and last error.
 - [ ] Add automation control endpoints for enable/disable, dry-run or validate, and manual execution where appropriate.
-- [ ] Add delete endpoints for rooms and any other missing lifecycle operations that are already supported in the registry.
-- [ ] Add history endpoints once time-based persistence exists.
-- [ ] Add a capabilities endpoint that exposes canonical schemas and supported actions.
-- [ ] Add adapter detail endpoints that expose health, last success, last error, and runtime status.
-- [ ] Add a metrics or diagnostics endpoint for local observability.
+- [x] Add delete endpoints for rooms and any other missing lifecycle operations that are already supported in the registry.
+- [x] Add history endpoints once time-based persistence exists.
+- [x] Add a capabilities endpoint that exposes canonical schemas and supported actions.
+- [x] Add adapter detail endpoints that expose health, last success, last error, and runtime status.
+- [x] Add a metrics or diagnostics endpoint for local observability.
 - [ ] Decide whether scenes and automations need reload endpoints or whether restart-only loading remains the intended contract.
 
 ## P1 Automation And Lua Runtime Expansion

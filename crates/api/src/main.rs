@@ -20,6 +20,7 @@ use smart_home_automations::{
     AutomationCatalog, AutomationExecutionObserver, AutomationRunner,
 };
 use smart_home_core::adapter::{registered_adapter_factories, Adapter};
+use smart_home_core::capability::{CapabilitySchema, ALL_CAPABILITIES};
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use smart_home_core::event::Event;
@@ -33,15 +34,32 @@ use smart_home_scenes::{SceneCatalog, SceneExecutionResult, SceneSummary};
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
 use tracing::Level;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct AdapterSummary {
     name: String,
     status: String,
     message: Option<String>,
     last_updated: Option<DateTime<Utc>>,
+    last_success: Option<DateTime<Utc>>,
+    last_error: Option<AdapterErrorSnapshot>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
+struct AdapterErrorSnapshot {
+    message: String,
+    observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterDetailResponse {
+    name: String,
+    runtime_status: String,
+    health: ComponentStatus,
+    last_success: Option<DateTime<Utc>>,
+    last_error: Option<AdapterErrorSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct ComponentStatus {
     status: String,
     message: Option<String>,
@@ -85,6 +103,7 @@ struct RoomCommandResult {
 struct AppState {
     runtime: Arc<Runtime>,
     scenes: Arc<SceneCatalog>,
+    automations: Arc<AutomationCatalog>,
     health: HealthState,
     store: Option<Arc<dyn DeviceStore>>,
     history: HistorySettings,
@@ -116,7 +135,14 @@ struct HealthSnapshot {
     runtime: ComponentStatus,
     persistence: ComponentStatus,
     automations: ComponentStatus,
-    adapters: HashMap<String, ComponentStatus>,
+    adapters: HashMap<String, AdapterHealth>,
+}
+
+#[derive(Clone)]
+struct AdapterHealth {
+    current: ComponentStatus,
+    last_success: Option<DateTime<Utc>>,
+    last_error: Option<AdapterErrorSnapshot>,
 }
 
 #[derive(Debug)]
@@ -162,6 +188,55 @@ struct AutomationHistoryResponse {
     entries: Vec<AutomationExecutionHistoryEntry>,
 }
 
+#[derive(Debug, Serialize)]
+struct AutomationResponse {
+    id: String,
+    name: String,
+    description: Option<String>,
+    trigger_type: &'static str,
+    status: &'static str,
+    last_run: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CapabilityCatalogResponse {
+    capabilities: Vec<CapabilityResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct CapabilityResponse {
+    key: &'static str,
+    schema: CapabilitySchemaResponse,
+    read_only: bool,
+    actions: Vec<&'static str>,
+    description: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct CapabilitySchemaResponse {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    values: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct DiagnosticsResponse {
+    status: String,
+    ready: bool,
+    devices: usize,
+    rooms: usize,
+    scenes: usize,
+    automations: usize,
+    history_enabled: bool,
+    default_history_limit: usize,
+    max_history_limit: usize,
+    runtime: ComponentStatus,
+    persistence: ComponentStatus,
+    automations_component: ComponentStatus,
+    adapters: Vec<AdapterSummary>,
+}
+
 #[derive(Clone)]
 struct StoreAutomationObserver {
     store: Arc<dyn DeviceStore>,
@@ -197,12 +272,31 @@ impl ComponentStatus {
     }
 }
 
+impl AdapterHealth {
+    fn starting(message: impl Into<String>) -> Self {
+        Self {
+            current: ComponentStatus::starting(message),
+            last_success: None,
+            last_error: None,
+        }
+    }
+
+    fn ok() -> Self {
+        let current = ComponentStatus::ok();
+        Self {
+            last_success: current.last_updated,
+            current,
+            last_error: None,
+        }
+    }
+}
+
 impl HealthState {
     fn new(adapter_names: &[String], persistence_enabled: bool, automations_enabled: bool) -> Self {
         let adapters = adapter_names
             .iter()
             .cloned()
-            .map(|name| (name, ComponentStatus::starting("waiting for adapter start")))
+            .map(|name| (name, AdapterHealth::starting("waiting for adapter start")))
             .collect();
 
         Self {
@@ -232,20 +326,26 @@ impl HealthState {
 
     fn adapter_started(&self, adapter: &str) {
         let mut snapshot = self.write();
-        snapshot
+        let status = snapshot
             .adapters
             .entry(adapter.to_string())
-            .or_insert_with(ComponentStatus::ok)
-            .set_ok();
+            .or_insert_with(AdapterHealth::ok);
+        status.current.set_ok();
+        status.last_success = status.current.last_updated;
     }
 
     fn adapter_error(&self, adapter: &str, message: impl Into<String>) {
         let mut snapshot = self.write();
-        snapshot
+        let message = message.into();
+        let status = snapshot
             .adapters
             .entry(adapter.to_string())
-            .or_insert_with(|| ComponentStatus::starting("adapter not started"))
-            .set_error(message);
+            .or_insert_with(|| AdapterHealth::starting("adapter not started"));
+        status.current.set_error(message.clone());
+        status.last_error = status.current.last_updated.map(|observed_at| AdapterErrorSnapshot {
+            message,
+            observed_at,
+        });
     }
 
     fn runtime_error(&self, message: impl Into<String>) {
@@ -270,22 +370,28 @@ impl HealthState {
 
     fn response(&self) -> HealthResponse {
         let snapshot = self.read();
-        let adapters = snapshot
+        let mut adapters = snapshot
             .adapters
             .iter()
             .map(|(name, status)| AdapterSummary {
                 name: name.clone(),
-                status: status.status.clone(),
-                message: status.message.clone(),
-                last_updated: status.last_updated,
+                status: status.current.status.clone(),
+                message: status.current.message.clone(),
+                last_updated: status.current.last_updated,
+                last_success: status.last_success,
+                last_error: status.last_error.clone(),
             })
             .collect::<Vec<_>>();
+        adapters.sort_by(|a, b| a.name.cmp(&b.name));
 
         let ready = snapshot.startup_complete
             && snapshot.runtime.status == "ok"
             && snapshot.persistence.status == "ok"
             && snapshot.automations.status == "ok"
-            && snapshot.adapters.values().all(|status| status.status == "ok");
+            && snapshot
+                .adapters
+                .values()
+                .all(|status| status.current.status == "ok");
         let overall_status = if ready { "ok" } else { "degraded" };
 
         HealthResponse {
@@ -300,6 +406,17 @@ impl HealthState {
 
     fn is_ready(&self) -> bool {
         self.response().ready
+    }
+
+    fn adapter_detail(&self, adapter: &str) -> Option<AdapterDetailResponse> {
+        let snapshot = self.read();
+        snapshot.adapters.get(adapter).map(|status| AdapterDetailResponse {
+            name: adapter.to_string(),
+            runtime_status: status.current.status.clone(),
+            health: status.current.clone(),
+            last_success: status.last_success,
+            last_error: status.last_error.clone(),
+        })
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HealthSnapshot> {
@@ -440,6 +557,7 @@ async fn main() -> Result<()> {
         AppState {
             runtime: runtime.clone(),
             scenes,
+            automations: automations.clone(),
             health: health.clone(),
             store: device_store.clone(),
             history: HistorySettings::from_config(&config),
@@ -850,12 +968,17 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/adapters", get(adapters))
+        .route("/adapters/{id}", get(get_adapter))
+        .route("/capabilities", get(list_capabilities))
+        .route("/diagnostics", get(diagnostics))
         .route("/scenes", get(list_scenes))
+        .route("/automations", get(list_automations))
+        .route("/automations/{id}", get(get_automation))
         .route("/scenes/{id}/history", get(get_scene_history))
         .route("/scenes/{id}/execute", post(execute_scene))
         .route("/automations/{id}/history", get(get_automation_history))
         .route("/rooms", get(list_rooms).post(create_room))
-        .route("/rooms/{id}", get(get_room))
+        .route("/rooms/{id}", get(get_room).delete(delete_room))
         .route("/rooms/{id}/devices", get(list_room_devices))
         .route("/rooms/{id}/command", post(command_room_devices))
         .route("/devices", get(list_devices))
@@ -891,8 +1014,80 @@ async fn adapters(State(state): State<AppState>) -> Json<Vec<AdapterSummary>> {
     Json(state.health.response().adapters)
 }
 
+async fn get_adapter(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AdapterDetailResponse>, ApiError> {
+    state
+        .health
+        .adapter_detail(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("adapter '{id}' not found")))
+}
+
+async fn list_capabilities() -> Json<CapabilityCatalogResponse> {
+    let mut capabilities = ALL_CAPABILITIES
+        .iter()
+        .flat_map(|group| group.iter())
+        .map(|definition| CapabilityResponse {
+            key: definition.key,
+            schema: capability_schema_response(definition.schema),
+            read_only: definition.read_only,
+            actions: definition.actions.to_vec(),
+            description: definition.description,
+        })
+        .collect::<Vec<_>>();
+    capabilities.sort_by(|a, b| a.key.cmp(b.key));
+
+    Json(CapabilityCatalogResponse { capabilities })
+}
+
+async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse> {
+    let health = state.health.response();
+
+    Json(DiagnosticsResponse {
+        status: health.status.clone(),
+        ready: health.ready,
+        devices: state.runtime.registry().list().len(),
+        rooms: state.runtime.registry().list_rooms().len(),
+        scenes: state.scenes.summaries().len(),
+        automations: state.automations.summaries().len(),
+        history_enabled: state.history.enabled,
+        default_history_limit: state.history.default_limit,
+        max_history_limit: state.history.max_limit,
+        runtime: health.runtime,
+        persistence: health.persistence,
+        automations_component: health.automations,
+        adapters: health.adapters,
+    })
+}
+
 async fn list_scenes(State(state): State<AppState>) -> Json<Vec<SceneSummary>> {
     Json(state.scenes.summaries())
+}
+
+async fn list_automations(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<AutomationResponse>>, ApiError> {
+    let mut automations = Vec::new();
+    for summary in state.automations.summaries() {
+        automations.push(automation_response(&state, summary).await?);
+    }
+    Ok(Json(automations))
+}
+
+async fn get_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AutomationResponse>, ApiError> {
+    let summary = state
+        .automations
+        .summaries()
+        .into_iter()
+        .find(|automation| automation.id == id)
+        .ok_or_else(|| ApiError::not_found(format!("automation '{id}' not found")))?;
+
+    Ok(Json(automation_response(&state, summary).await?))
 }
 
 async fn execute_scene(
@@ -1026,6 +1221,18 @@ async fn get_room(
         .get_room(&RoomId(id.clone()))
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("room '{id}' not found")))
+}
+
+async fn delete_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let room_id = RoomId(id.clone());
+    if !state.runtime.registry().remove_room(&room_id).await {
+        return Err(ApiError::not_found(format!("room '{id}' not found")));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_room_devices(
@@ -1339,6 +1546,97 @@ fn ensure_device_exists(state: &AppState, device_id: &DeviceId, raw_id: &str) ->
 fn internal_api_error(error: anyhow::Error) -> ApiError {
     tracing::error!(error = %error, "internal API error");
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+}
+
+fn capability_schema_response(schema: CapabilitySchema) -> CapabilitySchemaResponse {
+    match schema {
+        CapabilitySchema::Measurement => CapabilitySchemaResponse {
+            kind: "measurement",
+            values: Vec::new(),
+        },
+        CapabilitySchema::Accumulation => CapabilitySchemaResponse {
+            kind: "accumulation",
+            values: Vec::new(),
+        },
+        CapabilitySchema::Number => CapabilitySchemaResponse {
+            kind: "number",
+            values: Vec::new(),
+        },
+        CapabilitySchema::Integer => CapabilitySchemaResponse {
+            kind: "integer",
+            values: Vec::new(),
+        },
+        CapabilitySchema::String => CapabilitySchemaResponse {
+            kind: "string",
+            values: Vec::new(),
+        },
+        CapabilitySchema::IntegerOrString => CapabilitySchemaResponse {
+            kind: "integer_or_string",
+            values: Vec::new(),
+        },
+        CapabilitySchema::Boolean => CapabilitySchemaResponse {
+            kind: "boolean",
+            values: Vec::new(),
+        },
+        CapabilitySchema::Percentage => CapabilitySchemaResponse {
+            kind: "percentage",
+            values: Vec::new(),
+        },
+        CapabilitySchema::RgbColor => CapabilitySchemaResponse {
+            kind: "rgb_color",
+            values: Vec::new(),
+        },
+        CapabilitySchema::HexColor => CapabilitySchemaResponse {
+            kind: "hex_color",
+            values: Vec::new(),
+        },
+        CapabilitySchema::XyColor => CapabilitySchemaResponse {
+            kind: "xy_color",
+            values: Vec::new(),
+        },
+        CapabilitySchema::HsColor => CapabilitySchemaResponse {
+            kind: "hs_color",
+            values: Vec::new(),
+        },
+        CapabilitySchema::ColorTemperature => CapabilitySchemaResponse {
+            kind: "color_temperature",
+            values: Vec::new(),
+        },
+        CapabilitySchema::Enum(values) => CapabilitySchemaResponse {
+            kind: "enum",
+            values: values.to_vec(),
+        },
+    }
+}
+
+async fn automation_response(
+    state: &AppState,
+    summary: smart_home_automations::AutomationSummary,
+) -> Result<AutomationResponse, ApiError> {
+    let latest_run = if state.history.enabled {
+        if let Some(store) = &state.store {
+            store
+                .load_automation_history(&summary.id, None, None, 1)
+                .await
+                .map_err(internal_api_error)?
+                .into_iter()
+                .next()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(AutomationResponse {
+        id: summary.id,
+        name: summary.name,
+        description: summary.description,
+        trigger_type: summary.trigger_type,
+        status: "enabled",
+        last_run: latest_run.as_ref().map(|entry| entry.executed_at),
+        last_error: latest_run.and_then(|entry| entry.error),
+    })
 }
 
 fn persist_command_audit(state: &AppState, entry: CommandAuditEntry) {
@@ -2043,6 +2341,7 @@ mod tests {
         let app = app(AppState {
             runtime,
             scenes: empty_scenes(),
+            automations: Arc::new(AutomationCatalog::empty()),
             health: test_health(&["open_meteo"]),
             store: None,
             history: history_settings(false),
@@ -2072,6 +2371,7 @@ mod tests {
         let app = app(AppState {
             runtime,
             scenes,
+            automations: Arc::new(AutomationCatalog::empty()),
             health: test_health(&["open_meteo"]),
             store: None,
             history: history_settings(false),
@@ -2102,6 +2402,7 @@ mod tests {
         let app = app(AppState {
             runtime,
             scenes: empty_scenes(),
+            automations: Arc::new(AutomationCatalog::empty()),
             health: test_health(&["open_meteo"]),
             store: Some(store),
             history: history_settings(history_enabled),
@@ -2137,6 +2438,10 @@ mod tests {
         }
 
         path
+    }
+
+    fn write_temp_automation_dir(files: &[(&str, &str)]) -> std::path::PathBuf {
+        write_temp_scene_dir(files)
     }
 
     #[tokio::test]
@@ -2325,6 +2630,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_can_be_deleted_and_unassigns_devices() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert_room(Room {
+                id: RoomId("outside".to_string()),
+                name: "Outside".to_string(),
+            })
+            .await;
+        let mut device = sample_device(
+            "test:device",
+            TEMPERATURE_OUTDOOR,
+            measurement_value(22.0, "celsius"),
+        );
+        device.room_id = Some(RoomId("outside".to_string()));
+        runtime
+            .registry()
+            .upsert(device)
+            .await
+            .expect("device exists");
+        let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
+
+        let response = reqwest::Client::new()
+            .delete(format!("http://{addr}/rooms/outside"))
+            .send()
+            .await
+            .expect("delete room request succeeds");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(runtime
+            .registry()
+            .get_room(&RoomId("outside".to_string()))
+            .is_none());
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("device remains present")
+                .room_id,
+            None
+        );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
     async fn room_command_fans_out_to_room_devices() {
         let runtime = Arc::new(Runtime::new(
             vec![Box::new(CommandAdapter)],
@@ -2425,6 +2782,181 @@ mod tests {
         assert_eq!(body[0]["name"], "Video");
 
         let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn automations_endpoint_lists_loaded_automations() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let automation_dir = write_temp_automation_dir(&[(
+            "rain.lua",
+            r#"return {
+                id = "rain_check",
+                name = "Rain Check",
+                description = "Respond to rain sensor changes",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                end
+            }"#,
+        )]);
+        let automations = Arc::new(
+            AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
+        );
+        let app = app(AppState {
+            runtime,
+            scenes: empty_scenes(),
+            automations,
+            health: test_health(&["open_meteo"]),
+            store: None,
+            history: history_settings(false),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        let response = reqwest::get(format!("http://{addr}/automations"))
+            .await
+            .expect("automations request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<Value>().await.expect("automations json body");
+        assert_eq!(body.as_array().expect("automations array").len(), 1);
+        assert_eq!(body[0]["id"], "rain_check");
+        assert_eq!(body[0]["trigger_type"], "device_state_change");
+        assert_eq!(body[0]["status"], "enabled");
+        assert!(body[0]["last_run"].is_null());
+
+        let detail = reqwest::get(format!("http://{addr}/automations/rain_check"))
+            .await
+            .expect("automation detail request succeeds");
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail_body = detail
+            .json::<Value>()
+            .await
+            .expect("automation detail json body");
+        assert_eq!(detail_body["id"], "rain_check");
+
+        let _ = shutdown_tx.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn capabilities_and_diagnostics_endpoints_expose_api_metadata() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(22.0, "celsius"),
+            ))
+            .await
+            .expect("valid test device upsert succeeds");
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+
+        let capabilities = reqwest::get(format!("http://{addr}/capabilities"))
+            .await
+            .expect("capabilities request succeeds");
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        let capability_body = capabilities
+            .json::<Value>()
+            .await
+            .expect("capabilities json body");
+        let entries = capability_body["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+        assert!(entries.iter().any(|entry| {
+            entry["key"] == "brightness"
+                && entry["schema"]["type"] == "percentage"
+                && entry["actions"].as_array().is_some()
+        }));
+
+        let diagnostics = reqwest::get(format!("http://{addr}/diagnostics"))
+            .await
+            .expect("diagnostics request succeeds");
+        assert_eq!(diagnostics.status(), StatusCode::OK);
+        let diagnostics_body = diagnostics
+            .json::<Value>()
+            .await
+            .expect("diagnostics json body");
+        assert_eq!(diagnostics_body["ready"], true);
+        assert_eq!(diagnostics_body["devices"], 1);
+        assert_eq!(diagnostics_body["rooms"], 0);
+        assert_eq!(diagnostics_body["automations"], 0);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn adapter_detail_endpoint_reports_last_error() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let health = test_health(&["open_meteo"]);
+        health.adapter_error("open_meteo", "open_meteo poll failed: timeout");
+
+        let app = app(AppState {
+            runtime,
+            scenes: empty_scenes(),
+            automations: Arc::new(AutomationCatalog::empty()),
+            health,
+            store: None,
+            history: history_settings(false),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        let response = reqwest::get(format!("http://{addr}/adapters/open_meteo"))
+            .await
+            .expect("adapter detail request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<Value>().await.expect("adapter detail json body");
+        assert_eq!(body["name"], "open_meteo");
+        assert_eq!(body["runtime_status"], "error");
+        assert_eq!(body["last_error"]["message"], "open_meteo poll failed: timeout");
+
+        let _ = shutdown_tx.send(());
         handle.await.expect("server task completes");
     }
 
@@ -2797,6 +3329,7 @@ mod tests {
         let app = app(AppState {
             runtime: runtime.clone(),
             scenes,
+            automations: Arc::new(AutomationCatalog::empty()),
             health: test_health(&["open_meteo"]),
             store: Some(store.clone()),
             history: history_settings(true),
