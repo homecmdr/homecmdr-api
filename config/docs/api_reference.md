@@ -113,6 +113,53 @@ Scene execution currently runs commands sequentially in the order the Lua scene 
 
 ## Devices
 
+## Capabilities
+
+### `GET /capabilities`
+
+Returns the canonical capability catalog used for device validation and command validation.
+
+Response shape:
+
+```json
+{
+  "capabilities": [
+    {
+      "domain": "lighting",
+      "key": "brightness",
+      "schema": { "type": "percentage", "values": [] },
+      "read_only": false,
+      "actions": ["set", "increase", "decrease"],
+      "description": "Brightness level as a percentage (0-100)."
+    },
+    {
+      "domain": "climate",
+      "key": "hvac_mode",
+      "schema": {
+        "type": "enum",
+        "values": ["off", "heat", "cool", "auto", "heat_cool", "dry", "fan_only"]
+      },
+      "read_only": false,
+      "actions": ["set"],
+      "description": "Thermostat operating mode."
+    }
+  ],
+  "ownership": {
+    "canonical_attribute_location": "device.attributes.<capability_key>",
+    "custom_attribute_prefix": "custom.",
+    "vendor_metadata_field": "metadata.vendor_specific",
+    "rules": [
+      "Use device.attributes.<capability_key> whenever a canonical capability already exists for the state or command.",
+      "Use custom.<adapter>.<field> only for current-state attributes that do not fit an existing canonical capability.",
+      "Use metadata.vendor_specific for adapter metadata, opaque upstream identifiers, and descriptive fields that are not canonical device state.",
+      "Do not duplicate the same meaning in both a canonical capability and vendor-specific fields."
+    ]
+  }
+}
+```
+
+Current domains in the catalog include weather, lighting, sensor, climate, energy, media, and access-control capabilities.
+
 ### `GET /devices`
 
 Returns all devices currently present in the in-memory registry.

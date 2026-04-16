@@ -391,6 +391,13 @@ Use `DeviceKind` intentionally:
 
 Choose attributes from existing capabilities when possible.
 
+Canonical ownership rules:
+
+- use `device.attributes.<capability_key>` first whenever a canonical capability already covers the state or command
+- use `custom.<adapter>.<field>` only for current-state attributes that do not fit the canonical catalog
+- use `metadata.vendor_specific` for opaque upstream identifiers, descriptive metadata, and other non-canonical adapter details
+- do not publish the same meaning in both a canonical capability and vendor-specific data
+
 Examples already used in the repo:
 
 - weather: `temperature_outdoor`, `wind_speed`, `wind_direction`

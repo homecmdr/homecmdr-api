@@ -41,15 +41,15 @@ These areas are already present and should not be re-planned as greenfield work:
 
 ## P1 Canonical Capability Coverage
 
-- [ ] Expand the canonical capability catalog beyond weather and lighting basics.
-- [ ] Add core sensor capabilities such as humidity, motion, contact, occupancy/presence, pressure, air quality, smoke, leak, and battery.
-- [ ] Add energy and power capabilities such as current power draw, voltage, current, accumulated energy, and cost-friendly meter shapes.
-- [ ] Add HVAC and climate capabilities such as target temperature, thermostat mode, fan mode, and heating/cooling state.
-- [ ] Add media capabilities needed for TVs and speakers such as volume, mute, input/source, playback transport, and app/media selection.
-- [ ] Add cover and access-control capabilities such as lock, door, garage, blind/shade position, and tilt where needed.
+- [x] Expand the canonical capability catalog beyond weather and lighting basics.
+- [x] Add core sensor capabilities such as humidity, motion, contact, occupancy/presence, pressure, air quality, smoke, leak, and battery.
+- [x] Add energy and power capabilities such as current power draw, voltage, current, accumulated energy, and cost-friendly meter shapes.
+- [x] Add HVAC and climate capabilities such as target temperature, thermostat mode, fan mode, and heating/cooling state.
+- [x] Add media capabilities needed for TVs and speakers such as volume, mute, input/source, playback transport, and app/media selection.
+- [x] Add cover and access-control capabilities such as lock, door, garage, blind/shade position, and tilt where needed.
 - [ ] Add camera and security-oriented capability shapes only when they can be expressed cleanly and safely.
-- [ ] Define capability ownership rules so adapters use canonical fields first and vendor metadata only for truly vendor-specific data.
-- [ ] Add a capability catalog API so clients and agents can discover supported capabilities and actions dynamically.
+- [x] Define capability ownership rules so adapters use canonical fields first and vendor metadata only for truly vendor-specific data.
+- [x] Add a capability catalog API so clients and agents can discover supported capabilities and actions dynamically.
 
 ## P1 API Surface Completion
 

@@ -15,11 +15,20 @@ use crate::adapter::Adapter;
 use crate::bus::EventBus;
 use crate::capability::{
     accumulation_value, capability_definition, is_custom_attribute_key, light_capability,
-    measurement_value, weather_capability, CapabilitySchema, AVAILABILITY_VALUES, BRIGHTNESS,
-    CLOUD_COVERAGE, COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB,
-    COLOR_TEMPERATURE, COLOR_XY, EFFECT, ILLUMINANCE, LED_INDICATION, LIGHT_CAPABILITIES,
-    LIGHT_EFFECT_VALUES, POWER, POWER_VALUES, STATE, TEMPERATURE_OUTDOOR, TRANSITION,
-    WEATHER_CAPABILITIES, WIND_DIRECTION, WIND_SPEED,
+    measurement_value, weather_capability, CapabilitySchema, AIR_QUALITY, AIR_QUALITY_VALUES,
+    AVAILABILITY_VALUES, BATTERY, BRIGHTNESS, CAPABILITY_OWNERSHIP, CLOUD_COVERAGE, CO2,
+    COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB, COLOR_TEMPERATURE,
+    COLOR_XY, CONTACT, CONTACT_VALUES, COVER_POSITION, COVER_TILT, CURRENT, DOOR,
+    EFFECT, ENERGY_MONTH, ENERGY_TODAY, ENERGY_TOTAL, ENERGY_YESTERDAY, ENTRY_STATE_VALUES,
+    FAN_MODE, GARAGE_DOOR,
+    HVAC_MODE, HVAC_MODE_VALUES, HVAC_STATE, HVAC_STATE_VALUES, HUMIDITY, ILLUMINANCE,
+    LED_INDICATION, LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, LOCK, LOCK_VALUES,
+    MEDIA_APP, MEDIA_PLAYBACK, MEDIA_PLAYBACK_VALUES, MEDIA_SOURCE, MEDIA_TITLE, MOTION,
+    MOTION_VALUES, MUTED, OCCUPANCY, OCCUPANCY_VALUES, POWER, POWER_CONSUMPTION,
+    POWER_VALUES,
+    PRESET_MODE, PRESSURE, SENSOR_CAPABILITIES, SMOKE, STATE, SWING_MODE, TARGET_TEMPERATURE,
+    TEMPERATURE, TEMPERATURE_OUTDOOR, TRANSITION, VOLTAGE, WATER_LEAK, WEATHER_CAPABILITIES,
+    WIND_DIRECTION, WIND_SPEED, VOLUME,
 };
 use crate::command::DeviceCommand;
 use crate::config::Config;
@@ -622,6 +631,84 @@ fn light_capabilities_are_unique_and_typed() {
 }
 
 #[test]
+fn expanded_capabilities_are_discoverable_and_typed() {
+    let expected = [
+        (BATTERY, CapabilitySchema::Percentage),
+        (TEMPERATURE, CapabilitySchema::Measurement),
+        (HUMIDITY, CapabilitySchema::Measurement),
+        (PRESSURE, CapabilitySchema::Measurement),
+        (CO2, CapabilitySchema::Measurement),
+        (AIR_QUALITY, CapabilitySchema::Enum(&AIR_QUALITY_VALUES)),
+        (MOTION, CapabilitySchema::Enum(&MOTION_VALUES)),
+        (CONTACT, CapabilitySchema::Enum(&CONTACT_VALUES)),
+        (OCCUPANCY, CapabilitySchema::Enum(&OCCUPANCY_VALUES)),
+        (SMOKE, CapabilitySchema::Boolean),
+        (WATER_LEAK, CapabilitySchema::Boolean),
+        (TARGET_TEMPERATURE, CapabilitySchema::Measurement),
+        (HVAC_MODE, CapabilitySchema::Enum(&HVAC_MODE_VALUES)),
+        (HVAC_STATE, CapabilitySchema::Enum(&HVAC_STATE_VALUES)),
+        (FAN_MODE, CapabilitySchema::String),
+        (SWING_MODE, CapabilitySchema::String),
+        (PRESET_MODE, CapabilitySchema::String),
+        (POWER_CONSUMPTION, CapabilitySchema::Measurement),
+        (ENERGY_TOTAL, CapabilitySchema::Accumulation),
+        (ENERGY_TODAY, CapabilitySchema::Accumulation),
+        (ENERGY_YESTERDAY, CapabilitySchema::Accumulation),
+        (ENERGY_MONTH, CapabilitySchema::Accumulation),
+        (VOLTAGE, CapabilitySchema::Measurement),
+        (CURRENT, CapabilitySchema::Measurement),
+        (VOLUME, CapabilitySchema::Percentage),
+        (MEDIA_SOURCE, CapabilitySchema::String),
+        (MEDIA_TITLE, CapabilitySchema::String),
+        (MEDIA_APP, CapabilitySchema::String),
+        (MEDIA_PLAYBACK, CapabilitySchema::Enum(&MEDIA_PLAYBACK_VALUES)),
+        (LOCK, CapabilitySchema::Enum(&LOCK_VALUES)),
+        (DOOR, CapabilitySchema::Enum(&ENTRY_STATE_VALUES)),
+        (COVER_POSITION, CapabilitySchema::Percentage),
+        (COVER_TILT, CapabilitySchema::Percentage),
+    ];
+
+    for (key, schema) in expected {
+        assert_eq!(
+            capability_definition(key).map(|capability| capability.schema),
+            Some(schema),
+            "capability '{key}' should be discoverable with the expected schema"
+        );
+    }
+}
+
+#[test]
+fn capability_domains_and_ownership_policy_are_consistent() {
+    let mut seen = std::collections::HashSet::new();
+
+    for capability in crate::capability::ALL_CAPABILITIES
+        .iter()
+        .flat_map(|group| group.iter())
+    {
+        assert!(
+            seen.insert(capability.key),
+            "duplicate capability key: {}",
+            capability.key
+        );
+        assert!(!capability.domain.is_empty());
+    }
+
+    assert!(
+        SENSOR_CAPABILITIES
+            .iter()
+            .all(|capability| capability.read_only),
+        "sensor capabilities should be read-only"
+    );
+    assert_eq!(
+        CAPABILITY_OWNERSHIP.canonical_attribute_location,
+        "device.attributes.<capability_key>"
+    );
+    assert_eq!(CAPABILITY_OWNERSHIP.custom_attribute_prefix, "custom.");
+    assert_eq!(CAPABILITY_OWNERSHIP.vendor_metadata_field, "metadata.vendor_specific");
+    assert_eq!(CAPABILITY_OWNERSHIP.rules.len(), 4);
+}
+
+#[test]
 fn capability_helpers_build_expected_shapes() {
     assert_eq!(
         measurement_value(18.5, "celsius"),
@@ -641,6 +728,140 @@ fn capability_helpers_build_expected_shapes() {
             ("unit".to_string(), AttributeValue::Text("mm".to_string())),
             ("period".to_string(), AttributeValue::Text("1h".to_string())),
         ]))
+    );
+}
+
+#[tokio::test]
+async fn registry_accepts_expanded_canonical_capabilities() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let device = Device {
+        id: DeviceId("test:capabilities:expanded".to_string()),
+        room_id: None,
+        kind: DeviceKind::Sensor,
+        attributes: HashMap::from([
+            (BATTERY.to_string(), AttributeValue::Integer(82)),
+            (TEMPERATURE.to_string(), measurement_value(21.5, "celsius")),
+            (HUMIDITY.to_string(), measurement_value(48.0, "percent")),
+            (PRESSURE.to_string(), measurement_value(1013.2, "hpa")),
+            (CO2.to_string(), measurement_value(640.0, "ppm")),
+            (AIR_QUALITY.to_string(), AttributeValue::Text("good".to_string())),
+            (MOTION.to_string(), AttributeValue::Text("clear".to_string())),
+            (CONTACT.to_string(), AttributeValue::Text("closed".to_string())),
+            (OCCUPANCY.to_string(), AttributeValue::Text("occupied".to_string())),
+            (SMOKE.to_string(), AttributeValue::Bool(false)),
+            (WATER_LEAK.to_string(), AttributeValue::Bool(false)),
+            (
+                TARGET_TEMPERATURE.to_string(),
+                measurement_value(22.0, "celsius"),
+            ),
+            (HVAC_MODE.to_string(), AttributeValue::Text("auto".to_string())),
+            (HVAC_STATE.to_string(), AttributeValue::Text("heating".to_string())),
+            (FAN_MODE.to_string(), AttributeValue::Text("medium".to_string())),
+            (SWING_MODE.to_string(), AttributeValue::Text("vertical".to_string())),
+            (PRESET_MODE.to_string(), AttributeValue::Text("home".to_string())),
+            (
+                POWER_CONSUMPTION.to_string(),
+                measurement_value(87.5, "watt"),
+            ),
+            (
+                ENERGY_TOTAL.to_string(),
+                accumulation_value(328.4, "kwh", "lifetime"),
+            ),
+            (
+                ENERGY_TODAY.to_string(),
+                accumulation_value(4.2, "kwh", "day"),
+            ),
+            (
+                ENERGY_YESTERDAY.to_string(),
+                accumulation_value(5.1, "kwh", "day"),
+            ),
+            (
+                ENERGY_MONTH.to_string(),
+                accumulation_value(112.6, "kwh", "month"),
+            ),
+            (VOLTAGE.to_string(), measurement_value(120.3, "volt")),
+            (CURRENT.to_string(), measurement_value(0.72, "ampere")),
+            (VOLUME.to_string(), AttributeValue::Integer(35)),
+            (MUTED.to_string(), AttributeValue::Bool(false)),
+            (
+                MEDIA_SOURCE.to_string(),
+                AttributeValue::Text("hdmi1".to_string()),
+            ),
+            (
+                MEDIA_TITLE.to_string(),
+                AttributeValue::Text("Nature Documentary".to_string()),
+            ),
+            (MEDIA_APP.to_string(), AttributeValue::Text("plex".to_string())),
+            (
+                MEDIA_PLAYBACK.to_string(),
+                AttributeValue::Text("playing".to_string()),
+            ),
+            (LOCK.to_string(), AttributeValue::Text("locked".to_string())),
+            (DOOR.to_string(), AttributeValue::Text("closed".to_string())),
+            (
+                GARAGE_DOOR.to_string(),
+                AttributeValue::Text("stopped".to_string()),
+            ),
+            (COVER_POSITION.to_string(), AttributeValue::Integer(50)),
+            (COVER_TILT.to_string(), AttributeValue::Integer(15)),
+        ]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            accuracy: None,
+            vendor_specific: HashMap::from([(
+                "friendly_name".to_string(),
+                serde_json::Value::String("Hallway sensor".to_string()),
+            )]),
+        },
+        updated_at: Utc::now(),
+        last_seen: Utc::now(),
+    };
+
+    registry
+        .upsert(device.clone())
+        .await
+        .expect("valid expanded canonical device should succeed");
+
+    assert_eq!(registry.get(&device.id), Some(device));
+}
+
+#[test]
+fn device_command_accepts_lock_action_without_value() {
+    DeviceCommand {
+        capability: LOCK.to_string(),
+        action: "lock".to_string(),
+        value: None,
+    }
+    .validate()
+    .expect("lock command should validate");
+}
+
+#[test]
+fn device_command_accepts_media_source_set_with_value() {
+    DeviceCommand {
+        capability: MEDIA_SOURCE.to_string(),
+        action: "set".to_string(),
+        value: Some(AttributeValue::Text("hdmi2".to_string())),
+    }
+    .validate()
+    .expect("media source set command should validate");
+}
+
+#[test]
+fn device_command_rejects_reset_with_value() {
+    let error = DeviceCommand {
+        capability: ENERGY_TOTAL.to_string(),
+        action: "reset".to_string(),
+        value: Some(AttributeValue::Integer(0)),
+    }
+    .validate()
+    .err()
+    .expect("energy reset should not accept a value");
+
+    assert_eq!(
+        error.to_string(),
+        "command action 'reset' for capability 'energy_total' does not accept a value"
     );
 }
 

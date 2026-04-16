@@ -20,7 +20,9 @@ use smart_home_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
 };
 use smart_home_core::adapter::{registered_adapter_factories, Adapter};
-use smart_home_core::capability::{CapabilitySchema, ALL_CAPABILITIES};
+use smart_home_core::capability::{
+    CapabilitySchema, CAPABILITY_OWNERSHIP, CapabilityOwnershipPolicy, ALL_CAPABILITIES,
+};
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use smart_home_core::event::Event;
@@ -227,15 +229,25 @@ struct AutomationExecuteResponse {
 #[derive(Debug, Serialize)]
 struct CapabilityCatalogResponse {
     capabilities: Vec<CapabilityResponse>,
+    ownership: CapabilityOwnershipResponse,
 }
 
 #[derive(Debug, Serialize)]
 struct CapabilityResponse {
+    domain: &'static str,
     key: &'static str,
     schema: CapabilitySchemaResponse,
     read_only: bool,
     actions: Vec<&'static str>,
     description: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct CapabilityOwnershipResponse {
+    canonical_attribute_location: &'static str,
+    custom_attribute_prefix: &'static str,
+    vendor_metadata_field: &'static str,
+    rules: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1063,6 +1075,7 @@ async fn list_capabilities() -> Json<CapabilityCatalogResponse> {
         .iter()
         .flat_map(|group| group.iter())
         .map(|definition| CapabilityResponse {
+            domain: definition.domain,
             key: definition.key,
             schema: capability_schema_response(definition.schema),
             read_only: definition.read_only,
@@ -1072,7 +1085,10 @@ async fn list_capabilities() -> Json<CapabilityCatalogResponse> {
         .collect::<Vec<_>>();
     capabilities.sort_by(|a, b| a.key.cmp(b.key));
 
-    Json(CapabilityCatalogResponse { capabilities })
+    Json(CapabilityCatalogResponse {
+        capabilities,
+        ownership: capability_ownership_response(CAPABILITY_OWNERSHIP),
+    })
 }
 
 async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse> {
@@ -1721,6 +1737,15 @@ fn capability_schema_response(schema: CapabilitySchema) -> CapabilitySchemaRespo
             kind: "enum",
             values: values.to_vec(),
         },
+    }
+}
+
+fn capability_ownership_response(policy: CapabilityOwnershipPolicy) -> CapabilityOwnershipResponse {
+    CapabilityOwnershipResponse {
+        canonical_attribute_location: policy.canonical_attribute_location,
+        custom_attribute_prefix: policy.custom_attribute_prefix,
+        vendor_metadata_field: policy.vendor_metadata_field,
+        rules: policy.rules.to_vec(),
     }
 }
 
@@ -3229,9 +3254,28 @@ mod tests {
             .expect("capabilities array");
         assert!(entries.iter().any(|entry| {
             entry["key"] == "brightness"
+                && entry["domain"] == "lighting"
                 && entry["schema"]["type"] == "percentage"
                 && entry["actions"].as_array().is_some()
         }));
+        assert!(entries.iter().any(|entry| {
+            entry["key"] == "hvac_mode"
+                && entry["domain"] == "climate"
+                && entry["schema"]["type"] == "enum"
+        }));
+        assert_eq!(
+            capability_body["ownership"]["canonical_attribute_location"],
+            "device.attributes.<capability_key>"
+        );
+        assert_eq!(
+            capability_body["ownership"]["custom_attribute_prefix"],
+            "custom."
+        );
+        assert_eq!(
+            capability_body["ownership"]["vendor_metadata_field"],
+            "metadata.vendor_specific"
+        );
+        assert!(capability_body["ownership"]["rules"].is_array());
 
         let diagnostics = reqwest::get(format!("http://{addr}/diagnostics"))
             .await
