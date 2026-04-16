@@ -10,6 +10,14 @@ pub enum CapabilitySchema {
     Integer,
     String,
     IntegerOrString,
+    Boolean,
+    Percentage,
+    RgbColor,
+    HexColor,
+    XyColor,
+    HsColor,
+    ColorTemperature,
+    Enum(&'static [&'static str]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +40,20 @@ pub const UV_INDEX: &str = "uv_index";
 pub const WEATHER_CONDITION: &str = "weather_condition";
 pub const CLOUD_COVERAGE: &str = "cloud_coverage";
 pub const VISIBILITY: &str = "visibility";
+pub const BRIGHTNESS: &str = "brightness";
+pub const COLOR_RGB: &str = "color_rgb";
+pub const COLOR_HEX: &str = "color_hex";
+pub const COLOR_XY: &str = "color_xy";
+pub const COLOR_HS: &str = "color_hs";
+pub const COLOR_TEMPERATURE: &str = "color_temperature";
+pub const COLOR_MODE: &str = "color_mode";
+pub const EFFECT: &str = "effect";
+pub const TRANSITION: &str = "transition";
+pub const ILLUMINANCE: &str = "illuminance";
+pub const LED_INDICATION: &str = "led_indication";
+
+pub const COLOR_MODE_VALUES: [&str; 5] = ["color_temp", "rgb", "xy", "hs", "white"];
+pub const LIGHT_EFFECT_VALUES: [&str; 5] = ["none", "flash", "strobe", "colorloop", "random"];
 
 pub const WEATHER_CAPABILITIES: [CapabilityDefinition; 12] = [
     CapabilityDefinition {
@@ -108,9 +130,94 @@ pub const WEATHER_CAPABILITIES: [CapabilityDefinition; 12] = [
     },
 ];
 
+pub const LIGHT_CAPABILITIES: [CapabilityDefinition; 11] = [
+    CapabilityDefinition {
+        key: BRIGHTNESS,
+        schema: CapabilitySchema::Percentage,
+        read_only: false,
+        description: "Brightness level as a percentage (0-100).",
+    },
+    CapabilityDefinition {
+        key: COLOR_RGB,
+        schema: CapabilitySchema::RgbColor,
+        read_only: false,
+        description: "RGB colour control.",
+    },
+    CapabilityDefinition {
+        key: COLOR_HEX,
+        schema: CapabilitySchema::HexColor,
+        read_only: false,
+        description: "Hex colour control (#000000-#ffffff).",
+    },
+    CapabilityDefinition {
+        key: COLOR_XY,
+        schema: CapabilitySchema::XyColor,
+        read_only: false,
+        description: "CIE xy chromaticity colour control.",
+    },
+    CapabilityDefinition {
+        key: COLOR_HS,
+        schema: CapabilitySchema::HsColor,
+        read_only: false,
+        description: "Hue/saturation colour control.",
+    },
+    CapabilityDefinition {
+        key: COLOR_TEMPERATURE,
+        schema: CapabilitySchema::ColorTemperature,
+        read_only: false,
+        description: "Colour temperature in mireds or kelvin.",
+    },
+    CapabilityDefinition {
+        key: COLOR_MODE,
+        schema: CapabilitySchema::Enum(&COLOR_MODE_VALUES),
+        read_only: false,
+        description: "Active colour mode of the light.",
+    },
+    CapabilityDefinition {
+        key: EFFECT,
+        schema: CapabilitySchema::Enum(&LIGHT_EFFECT_VALUES),
+        read_only: false,
+        description: "Light effect control.",
+    },
+    CapabilityDefinition {
+        key: TRANSITION,
+        schema: CapabilitySchema::Number,
+        read_only: false,
+        description: "Transition duration in seconds.",
+    },
+    CapabilityDefinition {
+        key: ILLUMINANCE,
+        schema: CapabilitySchema::Integer,
+        read_only: true,
+        description: "Ambient light / illuminance sensor in lux.",
+    },
+    CapabilityDefinition {
+        key: LED_INDICATION,
+        schema: CapabilitySchema::Boolean,
+        read_only: false,
+        description: "LED status indicator on the device.",
+    },
+];
+
+pub const ALL_CAPABILITIES: [&[CapabilityDefinition]; 2] =
+    [&WEATHER_CAPABILITIES, &LIGHT_CAPABILITIES];
+
 pub fn weather_capability(key: &str) -> Option<&'static CapabilityDefinition> {
     WEATHER_CAPABILITIES
         .iter()
+        .find(|capability| capability.key == key)
+}
+
+pub fn light_capability(key: &str) -> Option<&'static CapabilityDefinition> {
+    LIGHT_CAPABILITIES
+        .iter()
+        .find(|capability| capability.key == key)
+}
+
+pub fn capability_definition(key: &str) -> Option<&'static CapabilityDefinition> {
+    ALL_CAPABILITIES
+        .iter()
+        .flat_map(|capabilities| capabilities.iter())
         .find(|capability| capability.key == key)
 }
 

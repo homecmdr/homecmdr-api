@@ -14,8 +14,11 @@ use tokio::time::{sleep, Duration};
 use crate::adapter::Adapter;
 use crate::bus::EventBus;
 use crate::capability::{
-    CapabilitySchema, CLOUD_COVERAGE, TEMPERATURE_OUTDOOR, WEATHER_CAPABILITIES, WIND_DIRECTION,
-    WIND_SPEED, accumulation_value, measurement_value, weather_capability,
+    BRIGHTNESS, COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB,
+    COLOR_TEMPERATURE, COLOR_XY, CapabilitySchema, CLOUD_COVERAGE, EFFECT, ILLUMINANCE,
+    LED_INDICATION, LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, TEMPERATURE_OUTDOOR, TRANSITION,
+    WEATHER_CAPABILITIES, WIND_DIRECTION, WIND_SPEED, accumulation_value, capability_definition,
+    light_capability, measurement_value, weather_capability,
 };
 use crate::event::Event;
 use crate::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
@@ -418,6 +421,40 @@ fn weather_capabilities_are_unique_and_typed() {
 }
 
 #[test]
+fn light_capabilities_are_unique_and_typed() {
+    let mut seen = std::collections::HashSet::new();
+
+    for capability in LIGHT_CAPABILITIES {
+        assert!(seen.insert(capability.key), "duplicate capability key: {}", capability.key);
+    }
+
+    assert_eq!(
+        light_capability(BRIGHTNESS).map(|capability| capability.schema),
+        Some(CapabilitySchema::Percentage)
+    );
+    assert_eq!(
+        light_capability(COLOR_RGB).map(|capability| capability.schema),
+        Some(CapabilitySchema::RgbColor)
+    );
+    assert_eq!(
+        light_capability(COLOR_HEX).map(|capability| capability.schema),
+        Some(CapabilitySchema::HexColor)
+    );
+    assert_eq!(
+        capability_definition(LED_INDICATION).map(|capability| capability.schema),
+        Some(CapabilitySchema::Boolean)
+    );
+    assert_eq!(
+        capability_definition(COLOR_MODE).map(|capability| capability.schema),
+        Some(CapabilitySchema::Enum(&COLOR_MODE_VALUES))
+    );
+    assert_eq!(
+        capability_definition(EFFECT).map(|capability| capability.schema),
+        Some(CapabilitySchema::Enum(&LIGHT_EFFECT_VALUES))
+    );
+}
+
+#[test]
 fn capability_helpers_build_expected_shapes() {
     assert_eq!(
         measurement_value(18.5, "celsius"),
@@ -435,6 +472,140 @@ fn capability_helpers_build_expected_shapes() {
             ("period".to_string(), AttributeValue::Text("1h".to_string())),
         ]))
     );
+}
+
+#[tokio::test]
+async fn registry_accepts_valid_light_capabilities() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let device = Device {
+        id: DeviceId("elgato:light:1".to_string()),
+        kind: DeviceKind::Light,
+        attributes: HashMap::from([
+            (BRIGHTNESS.to_string(), AttributeValue::Integer(50)),
+            (
+                COLOR_RGB.to_string(),
+                AttributeValue::Object(HashMap::from([
+                    ("r".to_string(), AttributeValue::Integer(255)),
+                    ("g".to_string(), AttributeValue::Integer(128)),
+                    ("b".to_string(), AttributeValue::Integer(0)),
+                ])),
+            ),
+            (COLOR_HEX.to_string(), AttributeValue::Text("#ff8000".to_string())),
+            (
+                COLOR_XY.to_string(),
+                AttributeValue::Object(HashMap::from([
+                    ("x".to_string(), AttributeValue::Float(0.5)),
+                    ("y".to_string(), AttributeValue::Float(0.4)),
+                ])),
+            ),
+            (
+                COLOR_HS.to_string(),
+                AttributeValue::Object(HashMap::from([
+                    ("hue".to_string(), AttributeValue::Integer(120)),
+                    ("saturation".to_string(), AttributeValue::Integer(80)),
+                ])),
+            ),
+            (
+                COLOR_TEMPERATURE.to_string(),
+                AttributeValue::Object(HashMap::from([
+                    ("value".to_string(), AttributeValue::Integer(3000)),
+                    ("unit".to_string(), AttributeValue::Text("kelvin".to_string())),
+                ])),
+            ),
+            (COLOR_MODE.to_string(), AttributeValue::Text("rgb".to_string())),
+            (EFFECT.to_string(), AttributeValue::Text("none".to_string())),
+            (TRANSITION.to_string(), AttributeValue::Float(1.5)),
+            (ILLUMINANCE.to_string(), AttributeValue::Integer(320)),
+            (LED_INDICATION.to_string(), AttributeValue::Bool(true)),
+        ]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            location: Some("desk".to_string()),
+            accuracy: None,
+            vendor_specific: HashMap::new(),
+        },
+        updated_at: Utc::now(),
+    };
+
+    registry.upsert(device.clone()).await.expect("valid light device should succeed");
+
+    assert_eq!(registry.get(&device.id), Some(device));
+}
+
+#[tokio::test]
+async fn registry_rejects_invalid_brightness_percentage() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let invalid = Device {
+        id: DeviceId("elgato:light:bad-brightness".to_string()),
+        kind: DeviceKind::Light,
+        attributes: HashMap::from([(BRIGHTNESS.to_string(), AttributeValue::Integer(101))]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            location: None,
+            accuracy: None,
+            vendor_specific: HashMap::new(),
+        },
+        updated_at: Utc::now(),
+    };
+
+    let error = registry.upsert(invalid).await.expect_err("invalid brightness should fail");
+
+    assert!(error.to_string().contains("expected integer percentage between 0 and 100"));
+}
+
+#[tokio::test]
+async fn registry_rejects_invalid_color_temperature_unit_or_range() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let invalid = Device {
+        id: DeviceId("elgato:light:bad-temp".to_string()),
+        kind: DeviceKind::Light,
+        attributes: HashMap::from([(
+            COLOR_TEMPERATURE.to_string(),
+            AttributeValue::Object(HashMap::from([
+                ("value".to_string(), AttributeValue::Integer(1000)),
+                ("unit".to_string(), AttributeValue::Text("kelvin".to_string())),
+            ])),
+        )]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            location: None,
+            accuracy: None,
+            vendor_specific: HashMap::new(),
+        },
+        updated_at: Utc::now(),
+    };
+
+    let error = registry
+        .upsert(invalid)
+        .await
+        .expect_err("invalid color temperature should fail");
+
+    assert!(error.to_string().contains("color temperature in kelvin must be between 2200 and 6500"));
+}
+
+#[tokio::test]
+async fn registry_rejects_invalid_hex_color_shape() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let invalid = Device {
+        id: DeviceId("elgato:light:bad-hex".to_string()),
+        kind: DeviceKind::Light,
+        attributes: HashMap::from([(COLOR_HEX.to_string(), AttributeValue::Text("orange".to_string()))]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            location: None,
+            accuracy: None,
+            vendor_specific: HashMap::new(),
+        },
+        updated_at: Utc::now(),
+    };
+
+    let error = registry.upsert(invalid).await.expect_err("invalid hex color should fail");
+
+    assert!(error.to_string().contains("expected hex color string like '#ff8800'"));
 }
 
 #[tokio::test]

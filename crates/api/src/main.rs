@@ -825,14 +825,23 @@ mod tests {
             .await
             .expect("valid test device upsert succeeds");
 
-        let message = timeout(Duration::from_secs(10), socket.next())
-            .await
-            .expect("websocket event arrives in time")
-            .expect("websocket stream yields a message")
-            .expect("websocket message is valid");
+        let payload = timeout(Duration::from_secs(10), async {
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .expect("websocket stream yields a message")
+                    .expect("websocket message is valid");
+                let payload: Value = serde_json::from_str(message.to_text().expect("text websocket frame"))
+                    .expect("valid websocket JSON frame");
 
-        let payload: Value = serde_json::from_str(message.to_text().expect("text websocket frame"))
-            .expect("valid websocket JSON frame");
+                if payload["type"] == "device.state_changed" && payload["id"] == "test:device" {
+                    break payload;
+                }
+            }
+        })
+        .await
+        .expect("expected websocket device state event arrives in time");
 
         assert_eq!(payload["type"], "device.state_changed");
 
