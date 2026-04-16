@@ -13,6 +13,12 @@ use smart_home_core::runtime::Runtime;
 use smart_home_lua_host::{
     attribute_to_lua_value, evaluate_module, LuaExecutionContext, LuaRuntimeOptions,
 };
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio::time::{timeout, Duration};
+
+const MAX_CONCURRENT_AUTOMATIONS: usize = 8;
+const AUTOMATION_EXECUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AutomationSummary {
@@ -50,6 +56,12 @@ enum Trigger {
 #[derive(Debug, Clone)]
 pub struct AutomationRunner {
     catalog: AutomationCatalog,
+}
+
+#[derive(Clone)]
+struct ExecutionControl {
+    semaphore: Arc<Semaphore>,
+    timeout: Duration,
 }
 
 impl AutomationCatalog {
@@ -111,6 +123,17 @@ impl AutomationRunner {
     }
 
     pub async fn run(self, runtime: Arc<Runtime>) {
+        self.run_with_options(
+            runtime,
+            ExecutionControl {
+                semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_AUTOMATIONS)),
+                timeout: AUTOMATION_EXECUTION_TIMEOUT,
+            },
+        )
+        .await;
+    }
+
+    async fn run_with_options(self, runtime: Arc<Runtime>, execution: ExecutionControl) {
         let mut tasks = tokio::task::JoinSet::new();
 
         if self
@@ -122,8 +145,9 @@ impl AutomationRunner {
             let runtime = runtime.clone();
             let automations = self.catalog.automations.clone();
             let scripts_root = self.catalog.scripts_root.clone();
+            let execution = execution.clone();
             tasks.spawn(async move {
-                run_event_trigger_loop(runtime, automations, scripts_root).await;
+                run_event_trigger_loop(runtime, automations, scripts_root, execution).await;
             });
         }
 
@@ -131,8 +155,16 @@ impl AutomationRunner {
             if let Trigger::Interval { every_secs } = automation.trigger {
                 let runtime = runtime.clone();
                 let scripts_root = self.catalog.scripts_root.clone();
+                let execution = execution.clone();
                 tasks.spawn(async move {
-                    run_interval_trigger_loop(runtime, automation, every_secs, scripts_root).await;
+                    run_interval_trigger_loop(
+                        runtime,
+                        automation,
+                        every_secs,
+                        scripts_root,
+                        execution,
+                    )
+                    .await;
                 });
             }
         }
@@ -145,8 +177,10 @@ async fn run_event_trigger_loop(
     runtime: Arc<Runtime>,
     automations: Vec<Automation>,
     scripts_root: Option<PathBuf>,
+    execution: ExecutionControl,
 ) {
     let mut receiver = runtime.bus().subscribe();
+    let mut executions = JoinSet::new();
 
     loop {
         match receiver.recv().await {
@@ -155,16 +189,18 @@ async fn run_event_trigger_loop(
                     if let Some(event_value) =
                         automation_event_from_runtime_event(automation, &event)
                     {
-                        if let Err(error) = execute_automation(
-                            automation,
+                        spawn_automation_execution(
+                            &mut executions,
+                            automation.clone(),
                             runtime.clone(),
                             event_value,
-                            scripts_root.as_deref(),
-                        ) {
-                            tracing::error!(automation = %automation.summary.id, error = %error, "automation execution failed");
-                        }
+                            scripts_root.clone(),
+                            execution.clone(),
+                        );
                     }
                 }
+
+                while executions.try_join_next().is_some() {}
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "automation event trigger loop lagged behind");
@@ -179,6 +215,7 @@ async fn run_interval_trigger_loop(
     automation: Automation,
     every_secs: u64,
     scripts_root: Option<PathBuf>,
+    execution: ExecutionControl,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(every_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -201,12 +238,82 @@ async fn run_interval_trigger_loop(
             ),
         ]));
 
-        if let Err(error) =
-            execute_automation(&automation, runtime.clone(), event, scripts_root.as_deref())
-        {
-            tracing::error!(automation = %automation.summary.id, error = %error, "interval automation execution failed");
+        let permit = match execution.semaphore.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                tracing::error!(automation = %automation.summary.id, error = %error, "automation runner semaphore closed");
+                break;
+            }
+        };
+
+        let automation_clone = automation.clone();
+        let runtime_clone = runtime.clone();
+        let scripts_root_clone = scripts_root.clone();
+        let timeout_duration = execution.timeout;
+        let join_handle = tokio::spawn(async move {
+            let _permit = permit;
+            execute_automation(
+                &automation_clone,
+                runtime_clone,
+                event,
+                scripts_root_clone.as_deref(),
+            )
+        });
+
+        match timeout(timeout_duration, join_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                tracing::error!(automation = %automation.summary.id, error = %error, "interval automation execution failed");
+            }
+            Ok(Err(error)) => {
+                tracing::error!(automation = %automation.summary.id, error = %error, "interval automation task failed");
+            }
+            Err(_) => {
+                tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "interval automation execution timed out");
+            }
         }
     }
+}
+
+fn spawn_automation_execution(
+    executions: &mut JoinSet<()>,
+    automation: Automation,
+    runtime: Arc<Runtime>,
+    event: AttributeValue,
+    scripts_root: Option<PathBuf>,
+    execution: ExecutionControl,
+) {
+    let Ok(permit) = execution.semaphore.clone().try_acquire_owned() else {
+        tracing::warn!(automation = %automation.summary.id, "skipping automation execution because the runner is saturated");
+        return;
+    };
+
+    executions.spawn(async move {
+        let timeout_duration = execution.timeout;
+        let automation_for_task = automation.clone();
+        let join_handle = tokio::spawn(async move {
+            let _permit = permit;
+            execute_automation(
+                &automation_for_task,
+                runtime,
+                event,
+                scripts_root.as_deref(),
+            )
+        });
+
+        match timeout(timeout_duration, join_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                tracing::error!(automation = %automation.summary.id, error = %error, "automation execution failed");
+            }
+            Ok(Err(error)) => {
+                tracing::error!(automation = %automation.summary.id, error = %error, "automation task failed");
+            }
+            Err(_) => {
+                tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "automation execution timed out");
+            }
+        }
+    });
 }
 
 fn execute_automation(
@@ -478,6 +585,8 @@ mod tests {
     use smart_home_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
     use smart_home_core::registry::DeviceRegistry;
     use smart_home_core::runtime::{Runtime, RuntimeConfig};
+    use tokio::sync::Semaphore;
+    use tokio::time::{sleep, timeout, Duration};
 
     use super::*;
 
@@ -500,11 +609,13 @@ mod tests {
             command: DeviceCommand,
             registry: DeviceRegistry,
         ) -> Result<bool> {
-            if device_id.0 != "test:device" {
+            if !device_id.0.starts_with("test:") {
                 return Ok(false);
             }
 
-            let mut device = registry.get(device_id).expect("test device exists");
+            let Some(mut device) = registry.get(device_id) else {
+                return Ok(false);
+            };
             device.attributes.insert(
                 command.capability,
                 command.value.expect("test command must include value"),
@@ -537,6 +648,22 @@ mod tests {
             room_id: None,
             kind: DeviceKind::Sensor,
             attributes: HashMap::from([("rain".to_string(), AttributeValue::Bool(wet))]),
+            metadata: Metadata {
+                source: "test".to_string(),
+                accuracy: None,
+                vendor_specific: HashMap::new(),
+            },
+            updated_at: Utc::now(),
+            last_seen: Utc::now(),
+        }
+    }
+
+    fn target_device(id: &str) -> Device {
+        Device {
+            id: DeviceId(id.to_string()),
+            room_id: None,
+            kind: DeviceKind::Light,
+            attributes: HashMap::from([("brightness".to_string(), AttributeValue::Integer(0))]),
             metadata: Metadata {
                 source: "test".to_string(),
                 accuracy: None,
@@ -610,19 +737,7 @@ mod tests {
             .expect("sensor upsert succeeds");
         runtime
             .registry()
-            .upsert(Device {
-                id: DeviceId("test:device".to_string()),
-                room_id: None,
-                kind: DeviceKind::Light,
-                attributes: HashMap::from([("brightness".to_string(), AttributeValue::Integer(0))]),
-                metadata: Metadata {
-                    source: "test".to_string(),
-                    accuracy: None,
-                    vendor_specific: HashMap::new(),
-                },
-                updated_at: Utc::now(),
-                last_seen: Utc::now(),
-            })
+            .upsert(target_device("test:device"))
             .await
             .expect("target device upsert succeeds");
 
@@ -633,7 +748,7 @@ mod tests {
             runner.run(runtime_for_runner).await;
         });
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+        sleep(Duration::from_millis(25)).await;
 
         runtime
             .registry()
@@ -641,7 +756,7 @@ mod tests {
             .await
             .expect("sensor change succeeds");
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
 
         assert_eq!(
             runtime
@@ -714,19 +829,7 @@ mod tests {
             .expect("sensor upsert succeeds");
         runtime
             .registry()
-            .upsert(Device {
-                id: DeviceId("test:device".to_string()),
-                room_id: None,
-                kind: DeviceKind::Light,
-                attributes: HashMap::from([("brightness".to_string(), AttributeValue::Integer(0))]),
-                metadata: Metadata {
-                    source: "test".to_string(),
-                    accuracy: None,
-                    vendor_specific: HashMap::new(),
-                },
-                updated_at: Utc::now(),
-                last_seen: Utc::now(),
-            })
+            .upsert(target_device("test:device"))
             .await
             .expect("target device upsert succeeds");
 
@@ -738,7 +841,7 @@ mod tests {
             runner.run(runtime_for_runner).await;
         });
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+        sleep(Duration::from_millis(25)).await;
 
         runtime
             .registry()
@@ -746,7 +849,7 @@ mod tests {
             .await
             .expect("sensor change succeeds");
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
 
         assert_eq!(
             runtime
@@ -756,6 +859,213 @@ mod tests {
                 .attributes
                 .get("brightness"),
             Some(&AttributeValue::Integer(55))
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn event_automation_executes_without_blocking_other_matching_automations() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "slow.lua",
+            r#"return {
+                id = "slow_check",
+                name = "Slow Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    local started = os.clock()
+                    while os.clock() - started < 0.25 do
+                    end
+                    ctx:command("test:slow", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 11,
+                    })
+                end
+            }"#,
+        );
+        write_automation(
+            &dir,
+            "fast.lua",
+            r#"return {
+                id = "fast_check",
+                name = "Fast Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:fast", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 99,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor upsert succeeds");
+        runtime
+            .registry()
+            .upsert(target_device("test:slow"))
+            .await
+            .expect("slow target device exists");
+        runtime
+            .registry()
+            .upsert(target_device("test:fast"))
+            .await
+            .expect("fast target device exists");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let runner = AutomationRunner::new(catalog);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runner.run(runtime).await;
+            }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("sensor change succeeds");
+
+        timeout(Duration::from_millis(150), async {
+            loop {
+                if runtime
+                    .registry()
+                    .get(&DeviceId("test:fast".to_string()))
+                    .expect("fast target device exists")
+                    .attributes
+                    .get("brightness")
+                    == Some(&AttributeValue::Integer(99))
+                {
+                    break;
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fast automation should complete before slow automation finishes");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn saturated_event_runner_skips_new_automation_runs() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "slow.lua",
+            r#"return {
+                id = "slow_check",
+                name = "Slow Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    local started = os.clock()
+                    while os.clock() - started < 0.2 do
+                    end
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 7,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor upsert succeeds");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target device exists");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let runner = AutomationRunner::new(catalog);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runner
+                    .run_with_options(
+                        runtime,
+                        ExecutionControl {
+                            semaphore: Arc::new(Semaphore::new(1)),
+                            timeout: Duration::from_secs(1),
+                        },
+                    )
+                    .await;
+            }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first matching event succeeds");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset event succeeds");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second matching event succeeds");
+
+        sleep(Duration::from_millis(350)).await;
+
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("target device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(7))
         );
 
         task.abort();

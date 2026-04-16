@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
@@ -8,7 +9,8 @@ use axum::extract::WebSocketUpgrade;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Extension, Json, Router};
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smart_home_adapters as _;
@@ -28,11 +30,30 @@ use tracing::Level;
 #[derive(Clone, Serialize)]
 struct AdapterSummary {
     name: String,
-    status: &'static str,
+    status: String,
+    message: Option<String>,
+    last_updated: Option<DateTime<Utc>>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
+struct ComponentStatus {
+    status: String,
+    message: Option<String>,
+    last_updated: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Serialize)]
 struct HealthResponse {
+    status: String,
+    ready: bool,
+    runtime: ComponentStatus,
+    persistence: ComponentStatus,
+    automations: ComponentStatus,
+    adapters: Vec<AdapterSummary>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReadyResponse {
     status: &'static str,
 }
 
@@ -58,6 +79,7 @@ struct RoomCommandResult {
 struct AppState {
     runtime: Arc<Runtime>,
     scenes: Arc<SceneCatalog>,
+    health: HealthState,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,12 +88,176 @@ struct SceneExecuteResponse {
     results: Vec<SceneExecutionResult>,
 }
 
-type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<AdapterSummary>);
+type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<String>);
+
+#[derive(Clone)]
+struct HealthState {
+    inner: Arc<RwLock<HealthSnapshot>>,
+}
+
+#[derive(Clone)]
+struct HealthSnapshot {
+    startup_complete: bool,
+    runtime: ComponentStatus,
+    persistence: ComponentStatus,
+    automations: ComponentStatus,
+    adapters: HashMap<String, ComponentStatus>,
+}
 
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
+}
+
+impl ComponentStatus {
+    fn ok() -> Self {
+        Self {
+            status: "ok".to_string(),
+            message: None,
+            last_updated: Some(Utc::now()),
+        }
+    }
+
+    fn starting(message: impl Into<String>) -> Self {
+        Self {
+            status: "starting".to_string(),
+            message: Some(message.into()),
+            last_updated: Some(Utc::now()),
+        }
+    }
+
+    fn set_ok(&mut self) {
+        self.status = "ok".to_string();
+        self.message = None;
+        self.last_updated = Some(Utc::now());
+    }
+
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.status = "error".to_string();
+        self.message = Some(message.into());
+        self.last_updated = Some(Utc::now());
+    }
+}
+
+impl HealthState {
+    fn new(adapter_names: &[String], persistence_enabled: bool, automations_enabled: bool) -> Self {
+        let adapters = adapter_names
+            .iter()
+            .cloned()
+            .map(|name| (name, ComponentStatus::starting("waiting for adapter start")))
+            .collect();
+
+        Self {
+            inner: Arc::new(RwLock::new(HealthSnapshot {
+                startup_complete: false,
+                runtime: ComponentStatus::starting("starting runtime"),
+                persistence: if persistence_enabled {
+                    ComponentStatus::starting("starting persistence worker")
+                } else {
+                    ComponentStatus::ok()
+                },
+                automations: if automations_enabled {
+                    ComponentStatus::starting("starting automation runner")
+                } else {
+                    ComponentStatus::ok()
+                },
+                adapters,
+            })),
+        }
+    }
+
+    fn mark_startup_complete(&self) {
+        let mut snapshot = self.write();
+        snapshot.startup_complete = true;
+        snapshot.runtime.set_ok();
+    }
+
+    fn adapter_started(&self, adapter: &str) {
+        let mut snapshot = self.write();
+        snapshot
+            .adapters
+            .entry(adapter.to_string())
+            .or_insert_with(ComponentStatus::ok)
+            .set_ok();
+    }
+
+    fn adapter_error(&self, adapter: &str, message: impl Into<String>) {
+        let mut snapshot = self.write();
+        snapshot
+            .adapters
+            .entry(adapter.to_string())
+            .or_insert_with(|| ComponentStatus::starting("adapter not started"))
+            .set_error(message);
+    }
+
+    fn runtime_error(&self, message: impl Into<String>) {
+        self.write().runtime.set_error(message);
+    }
+
+    fn persistence_ok(&self) {
+        self.write().persistence.set_ok();
+    }
+
+    fn persistence_error(&self, message: impl Into<String>) {
+        self.write().persistence.set_error(message);
+    }
+
+    fn automations_ok(&self) {
+        self.write().automations.set_ok();
+    }
+
+    fn automations_error(&self, message: impl Into<String>) {
+        self.write().automations.set_error(message);
+    }
+
+    fn response(&self) -> HealthResponse {
+        let snapshot = self.read();
+        let adapters = snapshot
+            .adapters
+            .iter()
+            .map(|(name, status)| AdapterSummary {
+                name: name.clone(),
+                status: status.status.clone(),
+                message: status.message.clone(),
+                last_updated: status.last_updated,
+            })
+            .collect::<Vec<_>>();
+
+        let ready = snapshot.startup_complete
+            && snapshot.runtime.status == "ok"
+            && snapshot.persistence.status == "ok"
+            && snapshot.automations.status == "ok"
+            && snapshot.adapters.values().all(|status| status.status == "ok");
+        let overall_status = if ready { "ok" } else { "degraded" };
+
+        HealthResponse {
+            status: overall_status.to_string(),
+            ready,
+            runtime: snapshot.runtime.clone(),
+            persistence: snapshot.persistence.clone(),
+            automations: snapshot.automations.clone(),
+            adapters,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.response().ready
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HealthSnapshot> {
+        match self.inner.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HealthSnapshot> {
+        match self.inner.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 }
 
 impl ApiError {
@@ -111,6 +297,11 @@ async fn main() -> Result<()> {
 
     let (adapters, adapter_summaries) =
         build_adapters(&config).context("failed to build adapters")?;
+    let health = HealthState::new(
+        &adapter_summaries,
+        device_store.is_some(),
+        config.automations.enabled,
+    );
 
     let runtime = Arc::new(Runtime::new(adapters, config.runtime));
     let scripts_root = config
@@ -161,8 +352,8 @@ async fn main() -> Result<()> {
         AppState {
             runtime: runtime.clone(),
             scenes,
+            health: health.clone(),
         },
-        adapter_summaries,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -170,26 +361,31 @@ async fn main() -> Result<()> {
 
     let persistence_task = device_store.map(|store| {
         let runtime = runtime.clone();
+        let health = health.clone();
         tokio::spawn(async move {
-            run_persistence_worker(runtime, store).await;
+            run_persistence_worker(runtime, store, health).await;
         })
     });
 
     let runtime_task = {
         let runtime = runtime.clone();
+        let health = health.clone();
         tokio::spawn(async move {
-            runtime.run().await;
+            monitor_runtime_health(runtime, health).await;
         })
     };
     let automation_task = {
         let runtime = runtime.clone();
         let automations = automations.clone();
+        let health = health.clone();
         tokio::spawn(async move {
-            AutomationRunner::new((*automations).clone())
-                .run(runtime)
-                .await;
+            health.automations_ok();
+            AutomationRunner::new((*automations).clone()).run(runtime).await;
+            health.automations_error("automation runner exited unexpectedly");
         })
     };
+
+    health.mark_startup_complete();
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -237,10 +433,7 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
             .build(adapter_config.clone())
             .with_context(|| format!("failed to build adapter '{name}'"))?
         {
-            summaries.push(AdapterSummary {
-                name: name.clone(),
-                status: "running",
-            });
+            summaries.push(name.clone());
             adapters.push(adapter);
         }
     }
@@ -273,27 +466,70 @@ async fn create_device_store(config: &Config) -> Result<Option<Arc<dyn DeviceSto
     Ok(Some(store))
 }
 
-async fn run_persistence_worker(runtime: Arc<Runtime>, store: Arc<dyn DeviceStore>) {
+async fn monitor_runtime_health(runtime: Arc<Runtime>, health: HealthState) {
+    let mut receiver = runtime.bus().subscribe();
+
+    let monitor_task = tokio::spawn({
+        let health = health.clone();
+        async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(Event::AdapterStarted { adapter }) => health.adapter_started(&adapter),
+                    Ok(Event::SystemError { message }) => {
+                        if let Some(adapter) = adapter_name_from_system_error(&message) {
+                            health.adapter_error(adapter, message.clone());
+                        } else {
+                            health.runtime_error(message);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        health.runtime_error(format!(
+                            "health monitor lagged and dropped {skipped} runtime events"
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+
+    runtime.run().await;
+
+    monitor_task.abort();
+    let _ = monitor_task.await;
+}
+
+async fn run_persistence_worker(runtime: Arc<Runtime>, store: Arc<dyn DeviceStore>, health: HealthState) {
     let mut receiver = runtime.bus().subscribe();
 
     loop {
         match receiver.recv().await {
             Ok(Event::DeviceAdded { device }) => {
                 if let Err(error) = store.save_device(&device).await {
+                    health.persistence_error(format!("failed to persist added device '{}': {error}", device.id.0));
                     tracing::error!(device_id = %device.id.0, error = %error, "failed to persist added device");
+                } else {
+                    health.persistence_ok();
                 }
             }
             Ok(Event::DeviceRoomChanged { id, .. }) => {
                 if let Some(device) = runtime.registry().get(&id) {
                     if let Err(error) = store.save_device(&device).await {
+                        health.persistence_error(format!("failed to persist room change for '{}': {error}", id.0));
                         tracing::error!(device_id = %id.0, error = %error, "failed to persist device room change");
+                    } else {
+                        health.persistence_ok();
                     }
                 }
             }
             Ok(Event::DeviceStateChanged { id, .. }) => {
                 if let Some(device) = runtime.registry().get(&id) {
                     if let Err(error) = store.save_device(&device).await {
+                        health.persistence_error(format!("failed to persist state change for '{}': {error}", id.0));
                         tracing::error!(device_id = %id.0, error = %error, "failed to persist device state change");
+                    } else {
+                        health.persistence_ok();
                     }
                 } else {
                     tracing::warn!(device_id = %id.0, "device state changed event received after device disappeared from registry");
@@ -301,36 +537,57 @@ async fn run_persistence_worker(runtime: Arc<Runtime>, store: Arc<dyn DeviceStor
             }
             Ok(Event::DeviceRemoved { id }) => {
                 if let Err(error) = store.delete_device(&id).await {
+                    health.persistence_error(format!("failed to delete persisted device '{}': {error}", id.0));
                     tracing::error!(device_id = %id.0, error = %error, "failed to delete persisted device");
+                } else {
+                    health.persistence_ok();
                 }
             }
             Ok(Event::DeviceSeen { id, .. }) => {
                 if let Some(device) = runtime.registry().get(&id) {
                     if let Err(error) = store.save_device(&device).await {
+                        health.persistence_error(format!("failed to persist last_seen for '{}': {error}", id.0));
                         tracing::error!(device_id = %id.0, error = %error, "failed to persist device last_seen update");
+                    } else {
+                        health.persistence_ok();
                     }
                 }
             }
             Ok(Event::RoomAdded { room } | Event::RoomUpdated { room }) => {
                 if let Err(error) = store.save_room(&room).await {
+                    health.persistence_error(format!("failed to persist room '{}': {error}", room.id.0));
                     tracing::error!(room_id = %room.id.0, error = %error, "failed to persist room");
+                } else {
+                    health.persistence_ok();
                 }
             }
             Ok(Event::RoomRemoved { id }) => {
                 if let Err(error) = store.delete_room(&id).await {
+                    health.persistence_error(format!("failed to delete room '{}': {error}", id.0));
                     tracing::error!(room_id = %id.0, error = %error, "failed to delete persisted room");
+                } else {
+                    health.persistence_ok();
                 }
 
                 for device in runtime.registry().list() {
                     if device.room_id.is_none() {
                         if let Err(error) = store.save_device(&device).await {
+                            health.persistence_error(format!(
+                                "failed to persist room removal update for '{}': {error}",
+                                device.id.0
+                            ));
                             tracing::error!(device_id = %device.id.0, error = %error, "failed to persist room removal device update");
+                        } else {
+                            health.persistence_ok();
                         }
                     }
                 }
             }
             Ok(Event::AdapterStarted { .. } | Event::SystemError { .. }) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                health.persistence_error(format!(
+                    "persistence worker lagged and dropped {skipped} runtime events"
+                ));
                 tracing::warn!(
                     skipped,
                     "persistence subscriber lagged; reconciling registry state"
@@ -343,12 +600,24 @@ async fn run_persistence_worker(runtime: Arc<Runtime>, store: Arc<dyn DeviceStor
                 )
                 .await
                 {
+                    health.persistence_error(format!(
+                        "failed to reconcile persisted registry state after lag: {error}"
+                    ));
                     tracing::error!(error = %error, "failed to reconcile persisted registry state after lag");
+                } else {
+                    health.persistence_ok();
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+fn adapter_name_from_system_error(message: &str) -> Option<&str> {
+    message
+        .split_once(' ')
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| prefix.contains('_'))
 }
 
 async fn reconcile_device_store(
@@ -415,9 +684,10 @@ async fn reconcile_device_store(
     Ok(())
 }
 
-fn app(state: AppState, adapter_summaries: Vec<AdapterSummary>) -> Router {
+fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/adapters", get(adapters))
         .route("/scenes", get(list_scenes))
         .route("/scenes/{id}/execute", post(execute_scene))
@@ -430,18 +700,26 @@ fn app(state: AppState, adapter_summaries: Vec<AdapterSummary>) -> Router {
         .route("/devices/{id}/room", post(assign_device_room))
         .route("/devices/{id}/command", post(command_device))
         .route("/events", get(events))
-        .layer(Extension(Arc::new(adapter_summaries)))
         .with_state(state)
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(state.health.response())
 }
 
-async fn adapters(
-    Extension(adapter_summaries): Extension<Arc<Vec<AdapterSummary>>>,
-) -> Json<Vec<AdapterSummary>> {
-    Json((*adapter_summaries).clone())
+async fn ready(State(state): State<AppState>) -> Result<Json<ReadyResponse>, ApiError> {
+    if state.health.is_ready() {
+        Ok(Json(ReadyResponse { status: "ok" }))
+    } else {
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "system is not ready",
+        ))
+    }
+}
+
+async fn adapters(State(state): State<AppState>) -> Json<Vec<AdapterSummary>> {
+    Json(state.health.response().adapters)
 }
 
 async fn list_scenes(State(state): State<AppState>) -> Json<Vec<SceneSummary>> {
@@ -911,6 +1189,8 @@ mod tests {
                 auto_create: true,
             },
             scenes: smart_home_core::config::ScenesConfig::default(),
+            automations: smart_home_core::config::AutomationsConfig::default(),
+            scripts: smart_home_core::config::ScriptsConfig::default(),
             telemetry: smart_home_core::config::TelemetryConfig::default(),
             adapters: adapters.into_iter().collect(),
         }
@@ -918,6 +1198,19 @@ mod tests {
 
     fn empty_scenes() -> Arc<SceneCatalog> {
         Arc::new(SceneCatalog::empty())
+    }
+
+    fn test_health(adapter_names: &[&str]) -> HealthState {
+        let health = HealthState::new(
+            &adapter_names.iter().map(|name| (*name).to_string()).collect::<Vec<_>>(),
+            false,
+            false,
+        );
+        for adapter_name in adapter_names {
+            health.adapter_started(adapter_name);
+        }
+        health.mark_startup_complete();
+        health
     }
 
     async fn create_runtime_with_hydrated_store(device: Device) -> Arc<Runtime> {
@@ -965,16 +1258,11 @@ mod tests {
     async fn spawn_test_server(
         runtime: Arc<Runtime>,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-        let app = app(
-            AppState {
-                runtime,
-                scenes: empty_scenes(),
-            },
-            vec![AdapterSummary {
-                name: "open_meteo".to_string(),
-                status: "running",
-            }],
-        );
+        let app = app(AppState {
+            runtime,
+            scenes: empty_scenes(),
+            health: test_health(&["open_meteo"]),
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -997,13 +1285,11 @@ mod tests {
         runtime: Arc<Runtime>,
         scenes: Arc<SceneCatalog>,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-        let app = app(
-            AppState { runtime, scenes },
-            vec![AdapterSummary {
-                name: "open_meteo".to_string(),
-                status: "running",
-            }],
-        );
+        let app = app(AppState {
+            runtime,
+            scenes,
+            health: test_health(&["open_meteo"]),
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -1052,8 +1338,17 @@ mod tests {
             .expect("health request succeeds");
 
         assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<Value>().await.expect("health JSON body");
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["runtime"]["status"], "ok");
+
+        let ready = reqwest::get(format!("http://{addr}/ready"))
+            .await
+            .expect("ready request succeeds");
+        assert_eq!(ready.status(), StatusCode::OK);
         assert_eq!(
-            response.json::<Value>().await.expect("health JSON body"),
+            ready.json::<Value>().await.expect("ready JSON body"),
             json!({ "status": "ok" })
         );
 
@@ -1242,7 +1537,9 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes = Arc::new(SceneCatalog::load_from_directory(&scene_dir).expect("scenes load"));
+        let scenes = Arc::new(
+            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
+        );
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime, scenes).await;
 
         let response = reqwest::get(format!("http://{addr}/scenes"))
@@ -1259,7 +1556,7 @@ mod tests {
         handle.await.expect("server task completes");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn execute_scene_endpoint_runs_scene_commands() {
         let runtime = Arc::new(Runtime::new(
             vec![Box::new(CommandAdapter)],
@@ -1291,7 +1588,9 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes = Arc::new(SceneCatalog::load_from_directory(&scene_dir).expect("scenes load"));
+        let scenes = Arc::new(
+            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
+        );
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime.clone(), scenes).await;
 
         let response = reqwest::Client::new()
@@ -1663,8 +1962,9 @@ mod tests {
         let persistence_task = {
             let runtime = runtime.clone();
             let store: Arc<dyn DeviceStore> = store.clone();
+            let health = HealthState::new(&[], true, false);
             tokio::spawn(async move {
-                run_persistence_worker(runtime, store).await;
+                run_persistence_worker(runtime, store, health).await;
             })
         };
         tokio::task::yield_now().await;
@@ -1770,6 +2070,8 @@ mod tests {
                 auto_create: true,
             },
             scenes: smart_home_core::config::ScenesConfig::default(),
+            automations: smart_home_core::config::AutomationsConfig::default(),
+            scripts: smart_home_core::config::ScriptsConfig::default(),
             telemetry: smart_home_core::config::TelemetryConfig::default(),
             adapters: HashMap::new(),
         };
@@ -1812,8 +2114,7 @@ mod tests {
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].name(), "open_meteo");
         assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].name, "open_meteo");
-        assert_eq!(summaries[0].status, "running");
+        assert_eq!(summaries[0], "open_meteo");
     }
 
     #[test]

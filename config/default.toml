@@ -42,7 +42,7 @@ base_url = "http://127.0.0.1:9123"
 poll_interval_secs = 30
 
 [adapters.roku_tv]
-enabled = true
+enabled = false
 ip_address = "192.168.1.114"
 poll_interval_secs = 30
 
