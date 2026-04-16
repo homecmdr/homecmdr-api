@@ -546,12 +546,15 @@ Automation assets live in `config/automations/`.
 Current trigger types:
 
 - `device_state_change`
+- `weather_state`
 - `device_room_change`
 - `room_change`
 - `adapter_lifecycle`
 - `system_error`
 - `wall_clock`
 - `cron`
+- `sunrise`
+- `sunset`
 - `interval`
 
 Example:
@@ -587,6 +590,20 @@ return {
 - `device_id` required
 - `attribute` optional
 - `equals` optional
+- `above` optional numeric threshold
+- `below` optional numeric threshold
+- `debounce_secs` optional stable-state delay before execution
+- `duration_secs` optional must-remain-matching delay before execution
+
+`weather_state` fields:
+
+- `device_id` required
+- `attribute` required
+- `equals` optional
+- `above` optional numeric threshold
+- `below` optional numeric threshold
+- `debounce_secs` optional
+- `duration_secs` optional
 
 `device_room_change` fields:
 
@@ -616,6 +633,14 @@ At least one of `device_id` or `room_id` is required.
 `cron` fields:
 
 - `expression` required, currently interpreted as a UTC seven-field cron expression
+
+`sunrise` fields:
+
+- `offset_mins` optional, defaults to `0`
+
+`sunset` fields:
+
+- `offset_mins` optional, defaults to `0`
 
 Automations can also include an optional top-level `state` table:
 

@@ -42,10 +42,12 @@ impl DeviceRegistry {
                         || device.metadata != existing.metadata;
 
                     if state_changed {
+                        let previous_attributes = existing.attributes.clone();
                         *existing = device.clone();
                         Some(Event::DeviceStateChanged {
                             id,
                             attributes: device.attributes.clone(),
+                            previous_attributes,
                         })
                     } else if device.last_seen != existing.last_seen {
                         existing.last_seen = device.last_seen;

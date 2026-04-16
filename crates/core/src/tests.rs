@@ -306,12 +306,16 @@ async fn upserting_existing_device_publishes_state_changed() {
 
     assert_eq!(
         subscriber
-            .recv()
-            .await
-            .expect("device updated event received"),
+        .recv()
+        .await
+        .expect("device updated event received"),
         Event::DeviceStateChanged {
             id: updated.id.clone(),
             attributes: updated.attributes.clone(),
+            previous_attributes: HashMap::from([(
+                TEMPERATURE_OUTDOOR.to_string(),
+                measurement_value(20.0, "celsius"),
+            )]),
         }
     );
 }

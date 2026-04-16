@@ -270,12 +270,15 @@ Optional fields:
 Current first-pass trigger types:
 
 - `device_state_change`
+- `weather_state`
 - `device_room_change`
 - `room_change`
 - `adapter_lifecycle`
 - `system_error`
 - `wall_clock`
 - `cron`
+- `sunrise`
+- `sunset`
 - `interval`
 
 #### `device_state_change`
@@ -285,6 +288,10 @@ Fields:
 - `device_id` required
 - `attribute` optional
 - `equals` optional
+- `above` optional numeric threshold
+- `below` optional numeric threshold
+- `debounce_secs` optional stable-state delay before execution
+- `duration_secs` optional must-remain-matching delay before execution
 
 Example:
 
@@ -303,6 +310,27 @@ Behavior:
 - matches the target device ID
 - if `attribute` is present, requires that attribute to be present in the changed attribute set
 - if `equals` is also present, the attribute value must match exactly
+- `above` and `below` treat numeric attributes, including measurement-shaped `{ value, unit }` objects, as threshold checks
+- threshold triggers only fire when the value crosses into the matching range
+- `debounce_secs` waits for the matching attribute value to remain stable before running
+- `duration_secs` waits for the matching attribute value to remain true for the full duration before running
+
+#### `weather_state`
+
+Fields:
+
+- `device_id` required
+- `attribute` required
+- `equals` optional
+- `above` optional numeric threshold
+- `below` optional numeric threshold
+- `debounce_secs` optional
+- `duration_secs` optional
+
+Behavior:
+
+- uses the same matching rules as `device_state_change`
+- intended for weather or other derived environmental devices where an automation wants a more explicit semantic trigger type
 
 #### `device_room_change`
 
@@ -399,6 +427,28 @@ trigger = {
 }
 ```
 
+#### `sunrise`
+
+Fields:
+
+- `offset_mins` optional, defaults to `0`
+
+Behavior:
+
+- schedules from the configured location in `adapters.open_meteo.latitude` and `adapters.open_meteo.longitude`
+- event payload includes `type`, `scheduled_at`, `offset_mins`, and `timezone`
+
+#### `sunset`
+
+Fields:
+
+- `offset_mins` optional, defaults to `0`
+
+Behavior:
+
+- schedules from the configured location in `adapters.open_meteo.latitude` and `adapters.open_meteo.longitude`
+- event payload includes `type`, `scheduled_at`, `offset_mins`, and `timezone`
+
 ## Scheduling Notes
 
 Current scheduling behavior is intentionally simple:
@@ -407,6 +457,16 @@ Current scheduling behavior is intentionally simple:
 - there is no configurable timezone yet
 - resumable schedules can persist the last completed scheduled fire time per automation
 - missed runs while the process is down are not replayed in bulk; the next scheduled fire resumes from persisted schedule state
+
+## Delay And Wait Policy
+
+Lua scripts do not currently expose a first-class `sleep` or `wait` primitive.
+
+Intentional policy:
+
+- keep long waits out of Lua execution so one script cannot hold a worker slot or hide timeout behavior
+- use trigger-level `debounce_secs`, `duration_secs`, `interval`, `wall_clock`, `cron`, `sunrise`, or `sunset` scheduling instead of in-script waiting
+- if more complex delayed workflows are needed later, add them as explicit automation runtime features rather than a general Lua blocking primitive
 
 ## Persisted Runtime State
 
@@ -452,6 +512,7 @@ Event object passed to `execute(ctx, event)` includes:
 - `event.device_id`
 - `event.attribute` when filtered by attribute
 - `event.value` when filtered by attribute
+- `event.previous_value` when the triggering attribute had a previous value
 - `event.attributes`
 
 #### `interval`

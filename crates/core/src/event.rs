@@ -8,6 +8,7 @@ pub enum Event {
     DeviceStateChanged {
         id: DeviceId,
         attributes: Attributes,
+        previous_attributes: Attributes,
     },
     DeviceAdded {
         device: Device,

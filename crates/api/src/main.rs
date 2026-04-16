@@ -18,6 +18,7 @@ use serde_json::json;
 use smart_home_adapters as _;
 use smart_home_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
+    TriggerContext,
 };
 use smart_home_core::adapter::{registered_adapter_factories, Adapter};
 use smart_home_core::capability::{
@@ -597,15 +598,19 @@ async fn main() -> Result<()> {
             None
         }
     });
+    let trigger_context = trigger_context_from_config(&config);
     let automation_runner = if let Some(observer) = automation_observer.clone() {
-        let runner = AutomationRunner::new((*automations).clone()).with_observer(observer);
+        let runner = AutomationRunner::new((*automations).clone())
+            .with_observer(observer)
+            .with_trigger_context(trigger_context);
         if let Some(store) = device_store.clone() {
             runner.with_state_store(store)
         } else {
             runner
         }
     } else {
-        let runner = AutomationRunner::new((*automations).clone());
+        let runner = AutomationRunner::new((*automations).clone())
+            .with_trigger_context(trigger_context);
         if let Some(store) = device_store.clone() {
             runner.with_state_store(store)
         } else {
@@ -765,6 +770,20 @@ fn history_selection_from_telemetry(selection: &TelemetrySelectionConfig) -> His
         device_ids: selection.device_ids.clone(),
         capabilities: selection.capabilities.clone(),
         adapter_names: selection.adapter_names.clone(),
+    }
+}
+
+fn trigger_context_from_config(config: &Config) -> TriggerContext {
+    let Some(adapter_config) = config.adapters.get("open_meteo") else {
+        return TriggerContext::default();
+    };
+    let Some(adapter) = adapter_config.as_object() else {
+        return TriggerContext::default();
+    };
+
+    TriggerContext {
+        latitude: adapter.get("latitude").and_then(|value| value.as_f64()),
+        longitude: adapter.get("longitude").and_then(|value| value.as_f64()),
     }
 }
 
@@ -1867,7 +1886,7 @@ async fn handle_events_socket(mut socket: WebSocket, runtime: Arc<Runtime>) {
 
 fn event_to_frame(event: Event) -> serde_json::Value {
     match event {
-        Event::DeviceStateChanged { id, attributes } => {
+        Event::DeviceStateChanged { id, attributes, .. } => {
             json!({ "type": "device.state_changed", "id": id.0, "state": attributes })
         }
         Event::DeviceAdded { device } => {

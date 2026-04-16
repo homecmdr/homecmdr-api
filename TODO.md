@@ -64,16 +64,16 @@ These areas are already present and should not be re-planned as greenfield work:
 
 ## P1 Automation And Lua Runtime Expansion
 
-- [ ] Extend automation triggers beyond `device_state_change` and `interval`.
+- [x] Extend automation triggers beyond `device_state_change` and `interval`.
 - [x] Add wall-clock and cron-style scheduling.
-- [ ] Add sunrise/sunset and weather/time derived triggers.
-- [ ] Add threshold-crossing, debounce, and duration-based triggers.
+- [x] Add sunrise/sunset triggers using configured location and add any remaining weather/time derived triggers.
+- [x] Add threshold-crossing, debounce, and duration-based triggers.
 - [x] Add room-scoped and multi-device condition triggers.
 - [x] Add triggers for room changes, adapter lifecycle events, and selected system errors where useful.
 - [x] Add optional persisted automation state for cooldowns, dedupe windows, and resumable schedules.
 - [x] Add Lua read helpers for current device state, room membership, and simple registry queries.
 - [x] Add Lua logging helpers so scenes and automations can emit useful structured logs.
-- [ ] Decide whether Lua needs a safe delay/wait primitive or whether that should stay outside first-class automation logic.
+- [x] Decide whether Lua needs a safe delay/wait primitive or whether that should stay outside first-class automation logic.
 
 ## P2 Adapter And Device Coverage
 

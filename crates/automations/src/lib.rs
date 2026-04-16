@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use cron::Schedule;
 use mlua::{Function, HookTriggers, Lua, VmState};
 use serde::Serialize;
@@ -19,6 +19,7 @@ use smart_home_core::store::{
 use smart_home_lua_host::{
     attribute_to_lua_value, evaluate_module, LuaExecutionContext, LuaRuntimeOptions,
 };
+use sunrise::{Coordinates, SolarDay, SolarEvent};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
@@ -68,6 +69,17 @@ enum Trigger {
         device_id: String,
         attribute: Option<String>,
         equals: Option<AttributeValue>,
+        threshold: Option<ThresholdTrigger>,
+        debounce_secs: Option<u64>,
+        duration_secs: Option<u64>,
+    },
+    WeatherState {
+        device_id: String,
+        attribute: String,
+        equals: Option<AttributeValue>,
+        threshold: Option<ThresholdTrigger>,
+        debounce_secs: Option<u64>,
+        duration_secs: Option<u64>,
     },
     DeviceRoomChange {
         device_id: Option<String>,
@@ -91,6 +103,12 @@ enum Trigger {
         expression: String,
         schedule: Schedule,
     },
+    Sunrise {
+        offset_mins: i64,
+    },
+    Sunset {
+        offset_mins: i64,
+    },
     Interval {
         every_secs: u64,
     },
@@ -101,11 +119,24 @@ enum AdapterLifecycleEvent {
     Started,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ThresholdTrigger {
+    above: Option<f64>,
+    below: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TriggerContext {
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+}
+
 #[derive(Clone)]
 pub struct AutomationRunner {
     catalog: AutomationCatalog,
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
     state_store: Option<Arc<dyn DeviceStore>>,
+    trigger_context: TriggerContext,
 }
 
 #[derive(Clone)]
@@ -292,6 +323,7 @@ impl AutomationRunner {
             catalog,
             observer: None,
             state_store: None,
+            trigger_context: TriggerContext::default(),
         }
     }
 
@@ -302,6 +334,11 @@ impl AutomationRunner {
 
     pub fn with_state_store(mut self, store: Arc<dyn DeviceStore>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    pub fn with_trigger_context(mut self, trigger_context: TriggerContext) -> Self {
+        self.trigger_context = trigger_context;
         self
     }
 
@@ -373,7 +410,10 @@ impl AutomationRunner {
                         .await;
                     });
                 }
-                Trigger::WallClock { .. } | Trigger::Cron { .. } => {
+                Trigger::WallClock { .. }
+                | Trigger::Cron { .. }
+                | Trigger::Sunrise { .. }
+                | Trigger::Sunset { .. } => {
                     if !self.catalog.is_enabled(&automation.summary.id).unwrap_or(true) {
                         continue;
                     }
@@ -383,6 +423,7 @@ impl AutomationRunner {
                     let observer = self.observer.clone();
                     let catalog = self.catalog.clone();
                     let state_store = self.state_store.clone();
+                    let trigger_context = self.trigger_context;
                     tasks.spawn(async move {
                         run_scheduled_trigger_loop(
                             runtime,
@@ -392,6 +433,7 @@ impl AutomationRunner {
                             execution,
                             observer,
                             state_store,
+                            trigger_context,
                         )
                         .await;
                     });
@@ -576,14 +618,16 @@ async fn run_scheduled_trigger_loop(
     execution: ExecutionControl,
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
     state_store: Option<Arc<dyn DeviceStore>>,
+    trigger_context: TriggerContext,
 ) {
     let next_fire_at = next_scheduled_fire_after(
         &automation,
         state_store.as_ref().map(|store| AutomationStateStore { store: store.clone() }),
         Utc::now(),
+        trigger_context,
     )
     .await
-    .unwrap_or_else(|| next_schedule_time(&automation.trigger, Utc::now()));
+    .unwrap_or_else(|| next_schedule_time(&automation.trigger, Utc::now(), trigger_context));
     let mut next_fire_at = match next_fire_at {
         Some(next_fire_at) => next_fire_at,
         None => {
@@ -601,7 +645,7 @@ async fn run_scheduled_trigger_loop(
         tokio::time::sleep(sleep_duration).await;
 
         if !catalog.is_enabled(&automation.summary.id).unwrap_or(true) {
-            next_fire_at = match next_schedule_time(&automation.trigger, Utc::now()) {
+            next_fire_at = match next_schedule_time(&automation.trigger, Utc::now(), trigger_context) {
                 Some(next_fire_at) => next_fire_at,
                 None => break,
             };
@@ -609,7 +653,7 @@ async fn run_scheduled_trigger_loop(
         }
 
         let scheduled_for = next_fire_at;
-        next_fire_at = match next_schedule_time(&automation.trigger, scheduled_for) {
+        next_fire_at = match next_schedule_time(&automation.trigger, scheduled_for, trigger_context) {
             Some(next_fire_at) => next_fire_at,
             None => break,
         };
@@ -641,6 +685,14 @@ async fn execute_scheduled_automation(
     state_store: Option<AutomationStateStore>,
     scheduled_for: Option<DateTime<Utc>>,
 ) {
+    let delay_secs = event_number_field(&event, "duration_secs")
+        .or_else(|| event_number_field(&event, "debounce_secs"));
+    if let Some(delay_secs) = delay_secs {
+        if !confirm_delayed_trigger(runtime.as_ref(), &event, delay_secs).await {
+            return;
+        }
+    }
+
     if should_skip_trigger(automation, &event, state_store.as_ref().map(|store| &store.store), scheduled_for)
         .await
         .is_skip()
@@ -768,6 +820,42 @@ fn scheduled_trigger_event(trigger: &Trigger, scheduled_at: DateTime<Utc>) -> At
                 AttributeValue::Text("UTC".to_string()),
             ),
         ])),
+        Trigger::Sunrise { offset_mins } => AttributeValue::Object(HashMap::from([
+            (
+                "type".to_string(),
+                AttributeValue::Text("sunrise".to_string()),
+            ),
+            (
+                "scheduled_at".to_string(),
+                AttributeValue::Text(scheduled_at.to_rfc3339()),
+            ),
+            (
+                "offset_mins".to_string(),
+                AttributeValue::Integer(*offset_mins),
+            ),
+            (
+                "timezone".to_string(),
+                AttributeValue::Text("UTC".to_string()),
+            ),
+        ])),
+        Trigger::Sunset { offset_mins } => AttributeValue::Object(HashMap::from([
+            (
+                "type".to_string(),
+                AttributeValue::Text("sunset".to_string()),
+            ),
+            (
+                "scheduled_at".to_string(),
+                AttributeValue::Text(scheduled_at.to_rfc3339()),
+            ),
+            (
+                "offset_mins".to_string(),
+                AttributeValue::Integer(*offset_mins),
+            ),
+            (
+                "timezone".to_string(),
+                AttributeValue::Text("UTC".to_string()),
+            ),
+        ])),
         _ => AttributeValue::Object(HashMap::from([(
             "scheduled_at".to_string(),
             AttributeValue::Text(scheduled_at.to_rfc3339()),
@@ -775,12 +863,54 @@ fn scheduled_trigger_event(trigger: &Trigger, scheduled_at: DateTime<Utc>) -> At
     }
 }
 
-fn next_schedule_time(trigger: &Trigger, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn next_schedule_time(
+    trigger: &Trigger,
+    after: DateTime<Utc>,
+    trigger_context: TriggerContext,
+) -> Option<DateTime<Utc>> {
     match trigger {
         Trigger::WallClock { hour, minute } => next_wall_clock_occurrence(*hour, *minute, after),
         Trigger::Cron { schedule, .. } => schedule.after(&after).next(),
+        Trigger::Sunrise { offset_mins } => next_solar_occurrence(after, trigger_context, true, *offset_mins),
+        Trigger::Sunset { offset_mins } => next_solar_occurrence(after, trigger_context, false, *offset_mins),
         _ => None,
     }
+}
+
+fn next_solar_occurrence(
+    after: DateTime<Utc>,
+    trigger_context: TriggerContext,
+    sunrise: bool,
+    offset_mins: i64,
+) -> Option<DateTime<Utc>> {
+    let (latitude, longitude) = (trigger_context.latitude?, trigger_context.longitude?);
+
+    for day_offset in 0..=366 {
+        let date = after.date_naive().checked_add_signed(ChronoDuration::days(day_offset))?;
+        let event_time = solar_event_time(date, latitude, longitude, sunrise, offset_mins)?;
+        if event_time > after {
+            return Some(event_time);
+        }
+    }
+
+    None
+}
+
+fn solar_event_time(
+    date: NaiveDate,
+    latitude: f64,
+    longitude: f64,
+    sunrise: bool,
+    offset_mins: i64,
+) -> Option<DateTime<Utc>> {
+    let coordinates = Coordinates::new(latitude, longitude)?;
+    let solar_day = SolarDay::new(coordinates, date);
+    let base = solar_day.event_time(if sunrise {
+        SolarEvent::Sunrise
+    } else {
+        SolarEvent::Sunset
+    });
+    Some(base + ChronoDuration::minutes(offset_mins))
 }
 
 fn next_wall_clock_occurrence(
@@ -829,6 +959,14 @@ fn spawn_automation_execution(
     };
 
     executions.spawn(async move {
+        let delay_secs = event_number_field(&event, "duration_secs")
+            .or_else(|| event_number_field(&event, "debounce_secs"));
+        if let Some(delay_secs) = delay_secs {
+            if !confirm_delayed_trigger(runtime.as_ref(), &event, delay_secs).await {
+                return;
+            }
+        }
+
         if should_skip_trigger(
             &automation,
             &event,
@@ -949,6 +1087,56 @@ impl TriggerDecision {
     }
 }
 
+fn event_number_field(event: &AttributeValue, field: &str) -> Option<u64> {
+    let AttributeValue::Object(fields) = event else {
+        return None;
+    };
+
+    match fields.get(field) {
+        Some(AttributeValue::Integer(value)) if *value > 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
+async fn confirm_delayed_trigger(
+    runtime: &Runtime,
+    event: &AttributeValue,
+    delay_secs: u64,
+) -> bool {
+    if delay_secs == 0 {
+        return true;
+    }
+
+    let Some((device_id, attribute, expected_value)) = delayed_trigger_target(event) else {
+        return true;
+    };
+
+    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+
+    let Some(device) = runtime.registry().get(&DeviceId(device_id)) else {
+        return false;
+    };
+    let Some(current_value) = device.attributes.get(&attribute) else {
+        return false;
+    };
+
+    current_value == &expected_value
+}
+
+fn delayed_trigger_target(event: &AttributeValue) -> Option<(String, String, AttributeValue)> {
+    let AttributeValue::Object(fields) = event else {
+        return None;
+    };
+    let AttributeValue::Text(device_id) = fields.get("device_id")? else {
+        return None;
+    };
+    let AttributeValue::Text(attribute) = fields.get("attribute")? else {
+        return None;
+    };
+    let value = fields.get("value")?.clone();
+    Some((device_id.clone(), attribute.clone(), value))
+}
+
 async fn should_skip_trigger(
     automation: &Automation,
     event: &AttributeValue,
@@ -1026,6 +1214,7 @@ async fn next_scheduled_fire_after(
     automation: &Automation,
     state_store: Option<AutomationStateStore>,
     now: DateTime<Utc>,
+    trigger_context: TriggerContext,
 ) -> Option<Option<DateTime<Utc>>> {
     if !automation.runtime_state_policy.resumable_schedule {
         return None;
@@ -1036,7 +1225,7 @@ async fn next_scheduled_fire_after(
 
     let state = state_store.load(&automation.summary.id).await.unwrap_or_default();
     let anchor = state.last_scheduled_at.unwrap_or(now);
-    Some(next_schedule_time(&automation.trigger, anchor))
+    Some(next_schedule_time(&automation.trigger, anchor, trigger_context))
 }
 
 fn parse_runtime_state_policy(module: &mlua::Table, path: &Path) -> Result<RuntimeStatePolicy> {
@@ -1073,7 +1262,45 @@ fn parse_runtime_state_policy(module: &mlua::Table, path: &Path) -> Result<Runti
 }
 
 fn trigger_fingerprint(event: &AttributeValue) -> String {
-    serde_json::to_string(event).unwrap_or_else(|_| "null".to_string())
+    canonicalize_attribute_value(event)
+}
+
+fn canonicalize_attribute_value(value: &AttributeValue) -> String {
+    match value {
+        AttributeValue::Integer(value) => value.to_string(),
+        AttributeValue::Float(value) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+        }
+        AttributeValue::Bool(value) => value.to_string(),
+        AttributeValue::Text(value) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+        }
+        AttributeValue::Array(values) => {
+            let values = values
+                .iter()
+                .map(canonicalize_attribute_value)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{values}]")
+        }
+        AttributeValue::Object(fields) => {
+            let mut entries = fields.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let entries = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_else(|_| "null".to_string()),
+                        canonicalize_attribute_value(value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{entries}}}")
+        }
+        AttributeValue::Null => "null".to_string(),
+    }
 }
 
 fn event_scheduled_at(event: &AttributeValue) -> Option<DateTime<Utc>> {
@@ -1216,38 +1443,55 @@ fn automation_event_from_runtime_event(
                 device_id,
                 attribute,
                 equals,
+                threshold,
+                debounce_secs,
+                duration_secs,
             },
-            Event::DeviceStateChanged { id, attributes },
-        ) => {
-            if &id.0 != device_id {
-                return None;
-            }
-
-            if let Some(attribute_name) = attribute {
-                let value = attributes.get(attribute_name)?;
-                if let Some(expected) = equals {
-                    if value != expected {
-                        return None;
-                    }
-                }
-
-                return Some(device_state_change_event(
-                    &id.0,
-                    attributes,
-                    Some(attribute_name.as_str()),
-                    Some(value.clone()),
-                    None,
-                ));
-            }
-
-            Some(device_state_change_event(
-                &id.0,
+            Event::DeviceStateChanged {
+                id,
                 attributes,
-                None,
-                None,
-                None,
-            ))
-        }
+                previous_attributes,
+            },
+        ) => device_state_event_from_change(
+            "device_state_change",
+            device_id,
+            attribute.as_deref(),
+            equals.as_ref(),
+            threshold.as_ref(),
+            *debounce_secs,
+            *duration_secs,
+            &id.0,
+            attributes,
+            previous_attributes,
+            None,
+        ),
+        (
+            Trigger::WeatherState {
+                device_id,
+                attribute,
+                equals,
+                threshold,
+                debounce_secs,
+                duration_secs,
+            },
+            Event::DeviceStateChanged {
+                id,
+                attributes,
+                previous_attributes,
+            },
+        ) => device_state_event_from_change(
+            "weather_state",
+            device_id,
+            Some(attribute.as_str()),
+            equals.as_ref(),
+            threshold.as_ref(),
+            *debounce_secs,
+            *duration_secs,
+            &id.0,
+            attributes,
+            previous_attributes,
+            None,
+        ),
         (
             Trigger::DeviceRoomChange { device_id, room_id },
             Event::DeviceRoomChanged { id, room_id: changed_room_id },
@@ -1314,33 +1558,43 @@ fn automation_event_from_registry_snapshot(
             device_id,
             attribute,
             equals,
+            threshold,
+            debounce_secs,
+            duration_secs,
         } => {
             let device = registry.get(&DeviceId(device_id.clone()))?;
-
-            if let Some(attribute_name) = attribute {
-                let value = device.attributes.get(attribute_name)?;
-                if let Some(expected) = equals {
-                    if value != expected {
-                        return None;
-                    }
-                }
-
-                return Some(device_state_change_event(
-                    &device.id.0,
-                    &device.attributes,
-                    Some(attribute_name.as_str()),
-                    Some(value.clone()),
-                    Some(skipped),
-                ));
-            }
-
-            Some(device_state_change_event(
+            device_state_event_from_snapshot(
+                "device_state_change",
                 &device.id.0,
                 &device.attributes,
-                None,
-                None,
-                Some(skipped),
-            ))
+                attribute.as_deref(),
+                equals.as_ref(),
+                threshold.as_ref(),
+                *debounce_secs,
+                *duration_secs,
+                skipped,
+            )
+        }
+        Trigger::WeatherState {
+            device_id,
+            attribute,
+            equals,
+            threshold,
+            debounce_secs,
+            duration_secs,
+        } => {
+            let device = registry.get(&DeviceId(device_id.clone()))?;
+            device_state_event_from_snapshot(
+                "weather_state",
+                &device.id.0,
+                &device.attributes,
+                Some(attribute.as_str()),
+                equals.as_ref(),
+                threshold.as_ref(),
+                *debounce_secs,
+                *duration_secs,
+                skipped,
+            )
         }
         Trigger::DeviceRoomChange { device_id, room_id } => {
             let device = match device_id {
@@ -1383,17 +1637,205 @@ fn automation_event_from_registry_snapshot(
     }
 }
 
+fn device_state_event_from_change(
+    event_type: &str,
+    expected_device_id: &str,
+    attribute_name: Option<&str>,
+    equals: Option<&AttributeValue>,
+    threshold: Option<&ThresholdTrigger>,
+    debounce_secs: Option<u64>,
+    duration_secs: Option<u64>,
+    actual_device_id: &str,
+    attributes: &Attributes,
+    previous_attributes: &Attributes,
+    recovered_skipped: Option<u64>,
+) -> Option<AttributeValue> {
+    if actual_device_id != expected_device_id {
+        return None;
+    }
+
+    if let Some(attribute_name) = attribute_name {
+        let value = attributes.get(attribute_name)?;
+        let previous_value = previous_attributes.get(attribute_name).cloned();
+        let matches_now = attribute_matches(value, equals, threshold);
+        let matched_before = previous_value
+            .as_ref()
+            .is_some_and(|previous| attribute_matches(previous, equals, threshold));
+
+        if duration_secs.is_some() && !matches_now {
+            return None;
+        }
+
+        if duration_secs.is_none() {
+            if debounce_secs.is_some() {
+                if !matches_now || matched_before {
+                    return None;
+                }
+            } else if threshold.is_some() {
+                if !crossed_threshold(previous_value.as_ref(), value, threshold?) {
+                    return None;
+                }
+            } else if !matches_now {
+                return None;
+            }
+        }
+
+        return Some(device_state_change_event(
+            event_type,
+            actual_device_id,
+            attributes,
+            Some(attribute_name),
+            Some(value.clone()),
+            previous_value,
+            debounce_secs,
+            duration_secs,
+            threshold,
+            recovered_skipped,
+        ));
+    }
+
+    Some(device_state_change_event(
+        event_type,
+        actual_device_id,
+        attributes,
+        None,
+        None,
+        None,
+        debounce_secs,
+        duration_secs,
+        threshold,
+        recovered_skipped,
+    ))
+}
+
+fn device_state_event_from_snapshot(
+    event_type: &str,
+    device_id: &str,
+    attributes: &Attributes,
+    attribute_name: Option<&str>,
+    equals: Option<&AttributeValue>,
+    threshold: Option<&ThresholdTrigger>,
+    debounce_secs: Option<u64>,
+    duration_secs: Option<u64>,
+    skipped: u64,
+) -> Option<AttributeValue> {
+    if let Some(attribute_name) = attribute_name {
+        let value = attributes.get(attribute_name)?;
+        if !attribute_matches(value, equals, threshold) {
+            return None;
+        }
+
+        return Some(device_state_change_event(
+            event_type,
+            device_id,
+            attributes,
+            Some(attribute_name),
+            Some(value.clone()),
+            None,
+            debounce_secs,
+            duration_secs,
+            threshold,
+            Some(skipped),
+        ));
+    }
+
+    Some(device_state_change_event(
+        event_type,
+        device_id,
+        attributes,
+        None,
+        None,
+        None,
+        debounce_secs,
+        duration_secs,
+        threshold,
+        Some(skipped),
+    ))
+}
+
+fn attribute_matches(
+    value: &AttributeValue,
+    equals: Option<&AttributeValue>,
+    threshold: Option<&ThresholdTrigger>,
+) -> bool {
+    if let Some(expected) = equals {
+        return value == expected;
+    }
+
+    if let Some(threshold) = threshold {
+        let Some(number) = attribute_value_to_f64(value) else {
+            return false;
+        };
+        if let Some(above) = threshold.above {
+            if number <= above {
+                return false;
+            }
+        }
+        if let Some(below) = threshold.below {
+            if number >= below {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+fn crossed_threshold(
+    previous_value: Option<&AttributeValue>,
+    current_value: &AttributeValue,
+    threshold: &ThresholdTrigger,
+) -> bool {
+    let Some(previous_number) = previous_value.and_then(attribute_value_to_f64) else {
+        return false;
+    };
+    let Some(current_number) = attribute_value_to_f64(current_value) else {
+        return false;
+    };
+
+    if let Some(above) = threshold.above {
+        if previous_number <= above && current_number > above {
+            return true;
+        }
+    }
+    if let Some(below) = threshold.below {
+        if previous_number >= below && current_number < below {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn attribute_value_to_f64(value: &AttributeValue) -> Option<f64> {
+    match value {
+        AttributeValue::Integer(value) => Some(*value as f64),
+        AttributeValue::Float(value) => Some(*value),
+        AttributeValue::Object(fields) => match fields.get("value") {
+            Some(AttributeValue::Integer(value)) => Some(*value as f64),
+            Some(AttributeValue::Float(value)) => Some(*value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn device_state_change_event(
+    event_type: &str,
     device_id: &str,
     attributes: &Attributes,
     attribute_name: Option<&str>,
     value: Option<AttributeValue>,
+    previous_value: Option<AttributeValue>,
+    debounce_secs: Option<u64>,
+    duration_secs: Option<u64>,
+    threshold: Option<&ThresholdTrigger>,
     recovered_skipped: Option<u64>,
 ) -> AttributeValue {
     let mut event = HashMap::from([
         (
             "type".to_string(),
-            AttributeValue::Text("device_state_change".to_string()),
+            AttributeValue::Text(event_type.to_string()),
         ),
         (
             "device_id".to_string(),
@@ -1414,6 +1856,38 @@ fn device_state_change_event(
 
     if let Some(value) = value {
         event.insert("value".to_string(), value);
+    }
+
+    if let Some(previous_value) = previous_value {
+        event.insert("previous_value".to_string(), previous_value);
+    }
+
+    if let Some(debounce_secs) = debounce_secs {
+        event.insert(
+            "debounce_secs".to_string(),
+            AttributeValue::Integer(debounce_secs as i64),
+        );
+    }
+
+    if let Some(duration_secs) = duration_secs {
+        event.insert(
+            "duration_secs".to_string(),
+            AttributeValue::Integer(duration_secs as i64),
+        );
+    }
+
+    if let Some(threshold) = threshold {
+        let mut threshold_fields = HashMap::new();
+        if let Some(above) = threshold.above {
+            threshold_fields.insert("above".to_string(), AttributeValue::Float(above));
+        }
+        if let Some(below) = threshold.below {
+            threshold_fields.insert("below".to_string(), AttributeValue::Float(below));
+        }
+        event.insert(
+            "threshold".to_string(),
+            AttributeValue::Object(threshold_fields),
+        );
     }
 
     if let Some(skipped) = recovered_skipped {
@@ -1658,11 +2132,96 @@ fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> {
                     ))
                 }
             };
+            let threshold = parse_threshold_trigger(&table, path, "device_state_change")?;
+            let debounce_secs = table.get::<Option<u64>>("debounce_secs").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} trigger field 'debounce_secs' is invalid: {error}",
+                    path.display()
+                )
+            })?;
+            let duration_secs = table.get::<Option<u64>>("duration_secs").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} trigger field 'duration_secs' is invalid: {error}",
+                    path.display()
+                )
+            })?;
+
+            validate_extended_device_trigger(
+                path,
+                "device_state_change",
+                attribute.as_deref(),
+                equals.as_ref(),
+                threshold.as_ref(),
+                debounce_secs,
+                duration_secs,
+            )?;
 
             Ok(Trigger::DeviceStateChange {
                 device_id,
                 attribute,
                 equals,
+                threshold,
+                debounce_secs,
+                duration_secs,
+            })
+        }
+        "weather_state" => {
+            let device_id = table.get::<String>("device_id").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} weather_state trigger requires 'device_id': {error}",
+                    path.display()
+                )
+            })?;
+            let attribute = table.get::<String>("attribute").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} weather_state trigger requires string 'attribute': {error}",
+                    path.display()
+                )
+            })?;
+            let equals = match table.get::<mlua::Value>("equals") {
+                Ok(mlua::Value::Nil) => None,
+                Ok(value) => Some(
+                    smart_home_lua_host::lua_value_to_attribute(value)
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                ),
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "automation file {} trigger field 'equals' is invalid: {error}",
+                        path.display()
+                    ))
+                }
+            };
+            let threshold = parse_threshold_trigger(&table, path, "weather_state")?;
+            let debounce_secs = table.get::<Option<u64>>("debounce_secs").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} trigger field 'debounce_secs' is invalid: {error}",
+                    path.display()
+                )
+            })?;
+            let duration_secs = table.get::<Option<u64>>("duration_secs").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} trigger field 'duration_secs' is invalid: {error}",
+                    path.display()
+                )
+            })?;
+
+            validate_extended_device_trigger(
+                path,
+                "weather_state",
+                Some(attribute.as_str()),
+                equals.as_ref(),
+                threshold.as_ref(),
+                debounce_secs,
+                duration_secs,
+            )?;
+
+            Ok(Trigger::WeatherState {
+                device_id,
+                attribute,
+                equals,
+                threshold,
+                debounce_secs,
+                duration_secs,
             })
         }
         "device_room_change" => {
@@ -1788,6 +2347,28 @@ fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> {
                 schedule,
             })
         }
+        "sunrise" => {
+            let offset_mins = table.get::<Option<i64>>("offset_mins").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} sunrise trigger field 'offset_mins' is invalid: {error}",
+                    path.display()
+                )
+            })?
+            .unwrap_or(0);
+
+            Ok(Trigger::Sunrise { offset_mins })
+        }
+        "sunset" => {
+            let offset_mins = table.get::<Option<i64>>("offset_mins").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} sunset trigger field 'offset_mins' is invalid: {error}",
+                    path.display()
+                )
+            })?
+            .unwrap_or(0);
+
+            Ok(Trigger::Sunset { offset_mins })
+        }
         "interval" => {
             let every_secs = table.get::<u64>("every_secs").map_err(|error| {
                 anyhow::anyhow!(
@@ -1805,22 +2386,100 @@ fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> {
             Ok(Trigger::Interval { every_secs })
         }
         _ => bail!(
-            "automation file {} has unsupported trigger type '{}'; supported types are device_state_change, device_room_change, room_change, adapter_lifecycle, system_error, wall_clock, cron, and interval",
+            "automation file {} has unsupported trigger type '{}'; supported types are device_state_change, weather_state, device_room_change, room_change, adapter_lifecycle, system_error, wall_clock, cron, sunrise, sunset, and interval",
             path.display(),
             trigger_type
         ),
     }
 }
 
+fn parse_threshold_trigger(
+    table: &mlua::Table,
+    path: &Path,
+    trigger_type: &str,
+) -> Result<Option<ThresholdTrigger>> {
+    let above = table.get::<Option<f64>>("above").map_err(|error| {
+        anyhow::anyhow!(
+            "automation file {} {} trigger field 'above' is invalid: {error}",
+            path.display(),
+            trigger_type
+        )
+    })?;
+    let below = table.get::<Option<f64>>("below").map_err(|error| {
+        anyhow::anyhow!(
+            "automation file {} {} trigger field 'below' is invalid: {error}",
+            path.display(),
+            trigger_type
+        )
+    })?;
+
+    if above.is_none() && below.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(ThresholdTrigger { above, below }))
+}
+
+fn validate_extended_device_trigger(
+    path: &Path,
+    trigger_type: &str,
+    attribute: Option<&str>,
+    equals: Option<&AttributeValue>,
+    threshold: Option<&ThresholdTrigger>,
+    debounce_secs: Option<u64>,
+    duration_secs: Option<u64>,
+) -> Result<()> {
+    if threshold.is_some() && equals.is_some() {
+        bail!(
+            "automation file {} {} trigger cannot combine 'equals' with 'above'/'below'",
+            path.display(),
+            trigger_type
+        );
+    }
+
+    if threshold.is_none() && equals.is_none() && attribute.is_some() && debounce_secs.is_none() && duration_secs.is_none() {
+        return Ok(());
+    }
+
+    if (threshold.is_some() || debounce_secs.is_some() || duration_secs.is_some()) && attribute.is_none() {
+        bail!(
+            "automation file {} {} trigger requires 'attribute' when using threshold, debounce, or duration options",
+            path.display(),
+            trigger_type
+        );
+    }
+
+    if debounce_secs == Some(0) {
+        bail!(
+            "automation file {} {} trigger field 'debounce_secs' must be > 0",
+            path.display(),
+            trigger_type
+        );
+    }
+
+    if duration_secs == Some(0) {
+        bail!(
+            "automation file {} {} trigger field 'duration_secs' must be > 0",
+            path.display(),
+            trigger_type
+        );
+    }
+
+    Ok(())
+}
+
 fn trigger_type_name(trigger: &Trigger) -> &'static str {
     match trigger {
         Trigger::DeviceStateChange { .. } => "device_state_change",
+        Trigger::WeatherState { .. } => "weather_state",
         Trigger::DeviceRoomChange { .. } => "device_room_change",
         Trigger::RoomChange { .. } => "room_change",
         Trigger::AdapterLifecycle { .. } => "adapter_lifecycle",
         Trigger::SystemError { .. } => "system_error",
         Trigger::WallClock { .. } => "wall_clock",
         Trigger::Cron { .. } => "cron",
+        Trigger::Sunrise { .. } => "sunrise",
+        Trigger::Sunset { .. } => "sunset",
         Trigger::Interval { .. } => "interval",
     }
 }
@@ -1829,6 +2488,7 @@ fn trigger_uses_event_bus(automation: &Automation) -> bool {
     matches!(
         automation.trigger,
         Trigger::DeviceStateChange { .. }
+            | Trigger::WeatherState { .. }
             | Trigger::DeviceRoomChange { .. }
             | Trigger::RoomChange { .. }
             | Trigger::AdapterLifecycle { .. }
@@ -1978,6 +2638,28 @@ mod tests {
         }
     }
 
+    fn numeric_device(id: &str, attribute: &str, value: f64) -> Device {
+        Device {
+            id: DeviceId(id.to_string()),
+            room_id: None,
+            kind: DeviceKind::Sensor,
+            attributes: HashMap::from([(
+                attribute.to_string(),
+                AttributeValue::Object(HashMap::from([
+                    ("value".to_string(), AttributeValue::Float(value)),
+                    ("unit".to_string(), AttributeValue::Text("celsius".to_string())),
+                ])),
+            )]),
+            metadata: Metadata {
+                source: "test".to_string(),
+                accuracy: None,
+                vendor_specific: HashMap::new(),
+            },
+            updated_at: Utc::now(),
+            last_seen: Utc::now(),
+        }
+    }
+
     fn target_device(id: &str) -> Device {
         Device {
             id: DeviceId(id.to_string()),
@@ -2113,6 +2795,96 @@ mod tests {
     }
 
     #[test]
+    fn loads_sunrise_and_sunset_trigger_catalog() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "sunrise.lua",
+            r#"return {
+                id = "sunrise_watch",
+                name = "Sunrise Watch",
+                trigger = {
+                    type = "sunrise",
+                    offset_mins = -15,
+                },
+                execute = function(ctx, event)
+                end
+            }"#,
+        );
+        write_automation(
+            &dir,
+            "sunset.lua",
+            r#"return {
+                id = "sunset_watch",
+                name = "Sunset Watch",
+                trigger = {
+                    type = "sunset",
+                    offset_mins = 20,
+                },
+                execute = function(ctx, event)
+                end
+            }"#,
+        );
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let trigger_types = catalog
+            .summaries()
+            .into_iter()
+            .map(|summary| summary.trigger_type)
+            .collect::<Vec<_>>();
+        assert!(trigger_types.contains(&"sunrise"));
+        assert!(trigger_types.contains(&"sunset"));
+    }
+
+    #[test]
+    fn loads_weather_and_threshold_trigger_catalog() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "weather.lua",
+            r#"return {
+                id = "weather_watch",
+                name = "Weather Watch",
+                trigger = {
+                    type = "weather_state",
+                    device_id = "weather:outside",
+                    attribute = "temperature_outdoor",
+                    above = 25.0,
+                    debounce_secs = 60,
+                },
+                execute = function(ctx, event)
+                end
+            }"#,
+        );
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        assert_eq!(catalog.summaries()[0].trigger_type, "weather_state");
+    }
+
+    #[test]
+    fn rejects_threshold_without_attribute() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "bad.lua",
+            r#"return {
+                id = "bad_trigger",
+                name = "Bad Trigger",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:sensor",
+                    above = 25.0,
+                },
+                execute = function(ctx, event)
+                end
+            }"#,
+        );
+
+        let error = AutomationCatalog::load_from_directory(&dir, None).expect_err("catalog should fail");
+        assert!(error.to_string().contains("requires 'attribute'"));
+    }
+
+    #[test]
     fn next_wall_clock_occurrence_rolls_to_next_day_after_past_time() {
         let after = Utc.from_utc_datetime(
             &NaiveDate::from_ymd_opt(2026, 4, 16)
@@ -2140,10 +2912,33 @@ mod tests {
                 .expect("valid time"),
         );
 
-        let next = next_schedule_time(&trigger, after).expect("next schedule exists");
+        let next = next_schedule_time(&trigger, after, TriggerContext::default()).expect("next schedule exists");
         assert_eq!(next.hour(), 8);
         assert_eq!(next.minute(), 10);
         assert_eq!(next.second(), 0);
+    }
+
+    #[test]
+    fn next_schedule_time_uses_sunrise_and_sunset_with_context() {
+        let after = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 6, 21)
+                .expect("valid date")
+                .and_hms_opt(0, 0, 0)
+                .expect("valid time"),
+        );
+        let context = TriggerContext {
+            latitude: Some(51.5),
+            longitude: Some(-0.1),
+        };
+
+        let sunrise = next_schedule_time(&Trigger::Sunrise { offset_mins: 0 }, after, context)
+            .expect("sunrise exists");
+        let sunset = next_schedule_time(&Trigger::Sunset { offset_mins: 0 }, after, context)
+            .expect("sunset exists");
+
+        assert_eq!(sunrise.date_naive(), after.date_naive());
+        assert_eq!(sunset.date_naive(), after.date_naive());
+        assert!(sunrise < sunset);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2213,6 +3008,245 @@ mod tests {
                 .attributes
                 .get("brightness"),
             Some(&AttributeValue::Integer(42))
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn threshold_trigger_only_executes_on_crossing() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "threshold.lua",
+            r#"return {
+                id = "threshold_check",
+                name = "Threshold Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:weather",
+                    attribute = "temperature_outdoor",
+                    above = 25.0,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 90,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig { event_bus_capacity: 32 },
+        ));
+        runtime
+            .registry()
+            .upsert(numeric_device("test:weather", "temperature_outdoor", 24.0))
+            .await
+            .expect("sensor upsert succeeds");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target device upsert succeeds");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let runner = AutomationRunner::new(catalog);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        runtime
+            .registry()
+            .upsert(numeric_device("test:weather", "temperature_outdoor", 24.5))
+            .await
+            .expect("below-threshold change succeeds");
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("target device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(0))
+        );
+
+        runtime
+            .registry()
+            .upsert(numeric_device("test:weather", "temperature_outdoor", 26.0))
+            .await
+            .expect("crossing change succeeds");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime
+                    .registry()
+                    .get(&DeviceId("test:device".to_string()))
+                    .expect("target device exists")
+                    .attributes
+                    .get("brightness")
+                    == Some(&AttributeValue::Integer(90))
+                {
+                    break;
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("threshold crossing executes automation");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn debounce_trigger_waits_for_stable_state() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "debounce.lua",
+            r#"return {
+                id = "debounce_trigger",
+                name = "Debounce Trigger",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                    debounce_secs = 1,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 33,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig { event_bus_capacity: 32 },
+        ));
+        runtime.registry().upsert(sample_device("test:rain", false)).await.expect("sensor upsert succeeds");
+        runtime.registry().upsert(target_device("test:device")).await.expect("target exists");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let runner = AutomationRunner::new(catalog);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        runtime.registry().upsert(sample_device("test:rain", true)).await.expect("trigger on");
+        sleep(Duration::from_millis(300)).await;
+        runtime.registry().upsert(sample_device("test:rain", false)).await.expect("trigger reset");
+        sleep(Duration::from_millis(1000)).await;
+
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("target device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(0))
+        );
+
+        runtime.registry().upsert(sample_device("test:rain", true)).await.expect("trigger on again");
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if runtime
+                    .registry()
+                    .get(&DeviceId("test:device".to_string()))
+                    .expect("target device exists")
+                    .attributes
+                    .get("brightness")
+                    == Some(&AttributeValue::Integer(33))
+                {
+                    break;
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stable debounce executes automation");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duration_trigger_requires_condition_to_hold() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "duration.lua",
+            r#"return {
+                id = "duration_trigger",
+                name = "Duration Trigger",
+                trigger = {
+                    type = "weather_state",
+                    device_id = "test:weather",
+                    attribute = "temperature_outdoor",
+                    above = 25.0,
+                    duration_secs = 1,
+                },
+                execute = function(ctx, event)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 66,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig { event_bus_capacity: 32 },
+        ));
+        runtime
+            .registry()
+            .upsert(numeric_device("test:weather", "temperature_outdoor", 24.0))
+            .await
+            .expect("sensor upsert succeeds");
+        runtime.registry().upsert(target_device("test:device")).await.expect("target exists");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let runner = AutomationRunner::new(catalog);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        runtime
+            .registry()
+            .upsert(numeric_device("test:weather", "temperature_outdoor", 26.0))
+            .await
+            .expect("high temperature update succeeds");
+        sleep(Duration::from_millis(1200)).await;
+
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("target device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(66))
         );
 
         task.abort();
@@ -2400,7 +3434,7 @@ mod tests {
                 .expect("valid time"),
         );
 
-        let next = next_scheduled_fire_after(automation, Some(state_store), now)
+        let next = next_scheduled_fire_after(automation, Some(state_store), now, TriggerContext::default())
             .await
             .flatten()
             .expect("next resumed schedule exists");
