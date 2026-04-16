@@ -9,6 +9,7 @@ use serde_json::Value as JsonValue;
 use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
 use smart_home_core::bus::EventBus;
 use smart_home_core::config::AdapterConfig;
+use smart_home_core::http::{external_http_client, send_with_retry};
 use smart_home_core::invoke::{InvokeRequest, InvokeResponse};
 use smart_home_core::model::AttributeValue;
 use smart_home_core::registry::DeviceRegistry;
@@ -40,15 +41,15 @@ pub struct OllamaAdapter {
 }
 
 impl OllamaAdapter {
-    pub fn new(config: OllamaConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: OllamaConfig) -> Result<Self> {
+        Ok(Self {
+            client: external_http_client()?,
             config,
-        }
+        })
     }
 
     #[cfg(test)]
-    fn with_base_url(config: OllamaConfig, base_url: impl Into<String>) -> Self {
+    fn with_base_url(config: OllamaConfig, base_url: impl Into<String>) -> Result<Self> {
         let mut config = config;
         config.base_url = base_url.into();
         Self::new(config)
@@ -112,124 +113,114 @@ impl OllamaAdapter {
     }
 
     async fn generate(&self, payload: GeneratePayload) -> Result<OllamaGenerateResponse> {
-        self.client
-            .post(format!("{}/api/generate", self.base_url()))
-            .json(&GenerateRequest {
-                model: payload.model,
-                prompt: payload.prompt,
-                suffix: payload.suffix,
-                system: payload.system,
-                template: payload.template,
-                format: payload.format,
-                options: payload.options,
-                keep_alive: payload.keep_alive,
-                raw: payload.raw,
-                images: payload.images,
-                stream: false,
-            })
-            .send()
-            .await
-            .context("failed to request Ollama generate")?
-            .error_for_status()
-            .context("Ollama generate returned an error status")?
+        send_with_retry(
+            self.client
+                .post(format!("{}/api/generate", self.base_url()))
+                .json(&GenerateRequest {
+                    model: payload.model,
+                    prompt: payload.prompt,
+                    suffix: payload.suffix,
+                    system: payload.system,
+                    template: payload.template,
+                    format: payload.format,
+                    options: payload.options,
+                    keep_alive: payload.keep_alive,
+                    raw: payload.raw,
+                    images: payload.images,
+                    stream: false,
+                }),
+            "Ollama generate",
+        )
+        .await?
             .json::<OllamaGenerateResponse>()
             .await
             .context("failed to parse Ollama generate response")
     }
 
     async fn chat(&self, payload: ChatPayload) -> Result<OllamaChatResponse> {
-        self.client
-            .post(format!("{}/api/chat", self.base_url()))
-            .json(&ChatRequest {
-                model: payload.model,
-                messages: payload.messages,
-                format: payload.format,
-                options: payload.options,
-                keep_alive: payload.keep_alive,
-                tools: payload.tools,
-                stream: false,
-            })
-            .send()
-            .await
-            .context("failed to request Ollama chat")?
-            .error_for_status()
-            .context("Ollama chat returned an error status")?
+        send_with_retry(
+            self.client
+                .post(format!("{}/api/chat", self.base_url()))
+                .json(&ChatRequest {
+                    model: payload.model,
+                    messages: payload.messages,
+                    format: payload.format,
+                    options: payload.options,
+                    keep_alive: payload.keep_alive,
+                    tools: payload.tools,
+                    stream: false,
+                }),
+            "Ollama chat",
+        )
+        .await?
             .json::<OllamaChatResponse>()
             .await
             .context("failed to parse Ollama chat response")
     }
 
     async fn embeddings(&self, payload: EmbeddingsPayload) -> Result<OllamaEmbeddingsResponse> {
-        self.client
-            .post(format!("{}/api/embed", self.base_url()))
-            .json(&EmbedRequest {
-                model: payload.model,
-                input: payload.input,
-                keep_alive: payload.keep_alive,
-                options: payload.options,
-                truncate: payload.truncate,
-            })
-            .send()
-            .await
-            .context("failed to request Ollama embeddings")?
-            .error_for_status()
-            .context("Ollama embeddings returned an error status")?
+        send_with_retry(
+            self.client
+                .post(format!("{}/api/embed", self.base_url()))
+                .json(&EmbedRequest {
+                    model: payload.model,
+                    input: payload.input,
+                    keep_alive: payload.keep_alive,
+                    options: payload.options,
+                    truncate: payload.truncate,
+                }),
+            "Ollama embeddings",
+        )
+        .await?
             .json::<OllamaEmbeddingsResponse>()
             .await
             .context("failed to parse Ollama embeddings response")
     }
 
     async fn tags(&self) -> Result<OllamaModelsResponse> {
-        self.client
-            .get(format!("{}/api/tags", self.base_url()))
-            .send()
-            .await
-            .context("failed to request Ollama tags")?
-            .error_for_status()
-            .context("Ollama tags returned an error status")?
+        send_with_retry(
+            self.client.get(format!("{}/api/tags", self.base_url())),
+            "Ollama tags",
+        )
+        .await?
             .json::<OllamaModelsResponse>()
             .await
             .context("failed to parse Ollama tags response")
     }
 
     async fn running_models(&self) -> Result<OllamaModelsResponse> {
-        self.client
-            .get(format!("{}/api/ps", self.base_url()))
-            .send()
-            .await
-            .context("failed to request Ollama running models")?
-            .error_for_status()
-            .context("Ollama running models returned an error status")?
+        send_with_retry(
+            self.client.get(format!("{}/api/ps", self.base_url())),
+            "Ollama running models",
+        )
+        .await?
             .json::<OllamaModelsResponse>()
             .await
             .context("failed to parse Ollama running models response")
     }
 
     async fn show(&self, payload: ShowPayload) -> Result<OllamaShowResponse> {
-        self.client
-            .post(format!("{}/api/show", self.base_url()))
-            .json(&ShowRequest {
-                model: payload.model,
-                verbose: payload.verbose,
-            })
-            .send()
-            .await
-            .context("failed to request Ollama show")?
-            .error_for_status()
-            .context("Ollama show returned an error status")?
+        send_with_retry(
+            self.client
+                .post(format!("{}/api/show", self.base_url()))
+                .json(&ShowRequest {
+                    model: payload.model,
+                    verbose: payload.verbose,
+                }),
+            "Ollama show",
+        )
+        .await?
             .json::<OllamaShowResponse>()
             .await
             .context("failed to parse Ollama show response")
     }
 
     async fn version(&self) -> Result<OllamaVersionResponse> {
-        self.client
-            .get(format!("{}/api/version", self.base_url()))
-            .send()
-            .await
-            .context("failed to request Ollama version")?
-            .error_for_status()
-            .context("Ollama version returned an error status")?
+        send_with_retry(
+            self.client.get(format!("{}/api/version", self.base_url())),
+            "Ollama version",
+        )
+        .await?
             .json::<OllamaVersionResponse>()
             .await
             .context("failed to parse Ollama version response")
@@ -254,7 +245,7 @@ impl AdapterFactory for OllamaFactory {
             return Ok(None);
         }
 
-        Ok(Some(Box::new(OllamaAdapter::new(config))))
+        Ok(Some(Box::new(OllamaAdapter::new(config)?)))
     }
 }
 
@@ -1072,6 +1063,7 @@ mod tests {
             },
             server.uri(),
         )
+        .expect("adapter builds")
     }
 
     async fn invoke(

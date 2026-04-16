@@ -10,6 +10,7 @@ use smart_home_core::capability::{
 };
 use smart_home_core::config::AdapterConfig;
 use smart_home_core::event::Event;
+use smart_home_core::http::{external_http_client, send_with_retry};
 use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
 use smart_home_core::registry::DeviceRegistry;
 use std::collections::HashMap;
@@ -48,14 +49,14 @@ pub struct OpenMeteoAdapter {
 }
 
 impl OpenMeteoAdapter {
-    pub fn new(config: OpenMeteoConfig) -> Self {
+    pub fn new(config: OpenMeteoConfig) -> Result<Self> {
         let poll_interval = config.test_poll_interval_ms.map(Duration::from_millis);
         let base_url = config.base_url.clone();
 
         Self::with_options(config, base_url, poll_interval)
     }
 
-    pub fn with_base_url(config: OpenMeteoConfig, base_url: impl Into<String>) -> Self {
+    pub fn with_base_url(config: OpenMeteoConfig, base_url: impl Into<String>) -> Result<Self> {
         Self::with_options(config, base_url, None)
     }
 
@@ -63,14 +64,14 @@ impl OpenMeteoAdapter {
         config: OpenMeteoConfig,
         base_url: impl Into<String>,
         poll_interval: Option<Duration>,
-    ) -> Self {
-        Self {
-            client: Client::new(),
+    ) -> Result<Self> {
+        Ok(Self {
+            client: external_http_client()?,
             poll_interval: poll_interval
                 .unwrap_or_else(|| Duration::from_secs(config.poll_interval_secs)),
             config,
             base_url: base_url.into(),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -78,7 +79,7 @@ impl OpenMeteoAdapter {
         config: OpenMeteoConfig,
         base_url: impl Into<String>,
         poll_interval: Duration,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::with_options(config, base_url, Some(poll_interval))
     }
 
@@ -116,22 +117,20 @@ impl OpenMeteoAdapter {
     }
 
     async fn fetch_weather(&self) -> Result<CurrentWeather> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/v1/forecast",
-                self.base_url.trim_end_matches('/')
-            ))
-            .query(&[
-                ("latitude", self.config.latitude.to_string()),
-                ("longitude", self.config.longitude.to_string()),
-                ("current_weather", "true".to_string()),
-            ])
-            .send()
-            .await
-            .context("failed to request Open-Meteo forecast")?
-            .error_for_status()
-            .context("Open-Meteo returned an error status")?;
+        let response = send_with_retry(
+            self.client
+                .get(format!(
+                    "{}/v1/forecast",
+                    self.base_url.trim_end_matches('/')
+                ))
+                .query(&[
+                    ("latitude", self.config.latitude.to_string()),
+                    ("longitude", self.config.longitude.to_string()),
+                    ("current_weather", "true".to_string()),
+                ]),
+            "Open-Meteo forecast",
+        )
+        .await?;
 
         let body: ForecastResponse = response
             .json()
@@ -168,7 +167,7 @@ impl AdapterFactory for OpenMeteoFactory {
             return Ok(None);
         }
 
-        Ok(Some(Box::new(OpenMeteoAdapter::new(config))))
+        Ok(Some(Box::new(OpenMeteoAdapter::new(config)?)))
     }
 }
 
@@ -366,7 +365,7 @@ mod tests {
         }])
         .await;
 
-        let adapter = OpenMeteoAdapter::with_base_url(adapter_config(), server.base_url());
+        let adapter = OpenMeteoAdapter::with_base_url(adapter_config(), server.base_url())?;
         let bus = EventBus::new(16);
         let registry = DeviceRegistry::new(bus);
 
@@ -415,7 +414,7 @@ mod tests {
             adapter_config(),
             server.base_url(),
             Duration::from_millis(25),
-        ));
+        )?);
         let bus = EventBus::new(16);
         let registry = DeviceRegistry::new(bus.clone());
         let mut subscriber = bus.subscribe();
@@ -484,7 +483,7 @@ mod tests {
         ])
         .await;
 
-        let adapter = OpenMeteoAdapter::with_base_url(adapter_config(), server.base_url());
+        let adapter = OpenMeteoAdapter::with_base_url(adapter_config(), server.base_url())?;
         let bus = EventBus::new(16);
         let registry = DeviceRegistry::new(bus);
 

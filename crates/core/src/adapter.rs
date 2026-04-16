@@ -19,7 +19,9 @@ pub trait Adapter: Send + Sync + 'static {
     /// - Adapters must not share state with other adapters.
     /// - Adapters must publish `Event::AdapterStarted` at the beginning of `run`.
     /// - Adapters must publish `Event::SystemError` on non-recoverable failures before returning `Err`.
-    /// - Reconnection backoff must be exponential with a maximum of 60 seconds.
+    /// - Polling adapters should retry on their configured poll cadence unless
+    ///   they document a different policy; the core trait does not require
+    ///   exponential backoff.
     async fn run(&self, registry: DeviceRegistry, bus: EventBus) -> anyhow::Result<()>;
 
     /// Handle a command for a device owned by this adapter.

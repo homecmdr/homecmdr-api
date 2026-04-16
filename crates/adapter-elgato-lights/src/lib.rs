@@ -12,6 +12,7 @@ use smart_home_core::capability::{BRIGHTNESS, COLOR_TEMPERATURE, POWER, STATE};
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::AdapterConfig;
 use smart_home_core::event::Event;
+use smart_home_core::http::{external_http_client, send_with_retry};
 use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
 use smart_home_core::registry::DeviceRegistry;
 use tokio::time::{sleep, Duration};
@@ -45,18 +46,18 @@ pub struct ElgatoLightsAdapter {
 }
 
 impl ElgatoLightsAdapter {
-    pub fn new(config: ElgatoLightsConfig) -> Self {
+    pub fn new(config: ElgatoLightsConfig) -> Result<Self> {
         let poll_interval = config
             .test_poll_interval_ms
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_secs(config.poll_interval_secs));
 
-        Self {
-            client: Client::new(),
+        Ok(Self {
+            client: external_http_client()?,
             config,
             poll_interval,
             known_lights: RwLock::new(HashSet::new()),
-        }
+        })
     }
 
     async fn poll_once(&self, registry: &DeviceRegistry) -> Result<()> {
@@ -91,33 +92,30 @@ impl ElgatoLightsAdapter {
     }
 
     async fn fetch_lights(&self) -> Result<ElgatoLightsResponse> {
-        self.client
-            .get(format!(
+        send_with_retry(
+            self.client.get(format!(
                 "{}/elgato/lights",
                 self.config.base_url.trim_end_matches('/')
-            ))
-            .send()
-            .await
-            .context("failed to request Elgato light state")?
-            .error_for_status()
-            .context("Elgato light API returned an error status")?
+            )),
+            "Elgato light state",
+        )
+        .await?
             .json()
             .await
             .context("failed to parse Elgato light state response")
     }
 
     async fn update_lights(&self, request: &ElgatoLightsResponse) -> Result<()> {
-        self.client
-            .put(format!(
-                "{}/elgato/lights",
-                self.config.base_url.trim_end_matches('/')
-            ))
-            .json(request)
-            .send()
-            .await
-            .context("failed to update Elgato light state")?
-            .error_for_status()
-            .context("Elgato light update returned an error status")?;
+        send_with_retry(
+            self.client
+                .put(format!(
+                    "{}/elgato/lights",
+                    self.config.base_url.trim_end_matches('/')
+                ))
+                .json(request),
+            "Elgato light update",
+        )
+        .await?;
 
         Ok(())
     }
@@ -205,7 +203,7 @@ impl AdapterFactory for ElgatoLightsFactory {
             return Ok(None);
         }
 
-        Ok(Some(Box::new(ElgatoLightsAdapter::new(config))))
+        Ok(Some(Box::new(ElgatoLightsAdapter::new(config)?)))
     }
 }
 
@@ -605,7 +603,8 @@ mod tests {
             body: "{\"numberOfLights\":1,\"lights\":[{\"on\":1,\"brightness\":20,\"temperature\":213}]}",
         }])
         .await;
-        let adapter = ElgatoLightsAdapter::new(adapter_config(server.base_url()));
+        let adapter = ElgatoLightsAdapter::new(adapter_config(server.base_url()))
+            .expect("adapter builds");
         let registry = DeviceRegistry::new(EventBus::new(16));
 
         adapter.poll_once(&registry).await.expect("poll succeeds");
@@ -655,7 +654,8 @@ mod tests {
             },
         ])
         .await;
-        let adapter = ElgatoLightsAdapter::new(adapter_config(server.base_url()));
+        let adapter = ElgatoLightsAdapter::new(adapter_config(server.base_url()))
+            .expect("adapter builds");
         let registry = DeviceRegistry::new(EventBus::new(16));
 
         adapter
@@ -713,7 +713,8 @@ mod tests {
             body: "{\"numberOfLights\":1,\"lights\":[{\"on\":1,\"brightness\":20,\"temperature\":213}]}",
         }])
         .await;
-        let adapter = ElgatoLightsAdapter::new(adapter_config(server.base_url()));
+        let adapter = ElgatoLightsAdapter::new(adapter_config(server.base_url()))
+            .expect("adapter builds");
         let registry = DeviceRegistry::new(EventBus::new(16));
 
         adapter
@@ -753,7 +754,9 @@ mod tests {
             body: "{\"numberOfLights\":1,\"lights\":[{\"on\":0,\"brightness\":10,\"temperature\":170}]}",
         }])
         .await;
-        let adapter = Arc::new(ElgatoLightsAdapter::new(adapter_config(server.base_url())));
+        let adapter = Arc::new(
+            ElgatoLightsAdapter::new(adapter_config(server.base_url())).expect("adapter builds"),
+        );
         let bus = EventBus::new(16);
         let registry = DeviceRegistry::new(bus.clone());
         let mut subscriber = bus.subscribe();

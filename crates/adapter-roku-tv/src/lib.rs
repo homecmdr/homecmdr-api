@@ -11,6 +11,7 @@ use smart_home_core::capability::{POWER, STATE};
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::AdapterConfig;
 use smart_home_core::event::Event;
+use smart_home_core::http::{external_http_client, send_with_retry};
 use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
 use smart_home_core::registry::DeviceRegistry;
 use tokio::time::{sleep, Duration};
@@ -44,31 +45,31 @@ pub struct RokuTvAdapter {
 }
 
 impl RokuTvAdapter {
-    pub fn new(config: RokuTvConfig) -> Self {
+    pub fn new(config: RokuTvConfig) -> Result<Self> {
         let poll_interval = config
             .test_poll_interval_ms
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_secs(config.poll_interval_secs));
 
-        Self {
-            client: Client::new(),
+        Ok(Self {
+            client: external_http_client()?,
             base_url: format!("http://{}:8060", config.ip_address.trim()),
             poll_interval,
-        }
+        })
     }
 
     #[cfg(test)]
-    fn with_base_url(config: RokuTvConfig, base_url: impl Into<String>) -> Self {
+    fn with_base_url(config: RokuTvConfig, base_url: impl Into<String>) -> Result<Self> {
         let poll_interval = config
             .test_poll_interval_ms
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_secs(config.poll_interval_secs));
 
-        Self {
-            client: Client::new(),
+        Ok(Self {
+            client: external_http_client()?,
             poll_interval,
             base_url: base_url.into(),
-        }
+        })
     }
 
     async fn poll_once(&self, registry: &DeviceRegistry) -> Result<()> {
@@ -85,14 +86,12 @@ impl RokuTvAdapter {
     }
 
     async fn fetch_device_info(&self) -> Result<RokuDeviceInfo> {
-        let body = self
-            .client
-            .get(format!("{}/query/device-info", self.base_url()))
-            .send()
-            .await
-            .context("failed to request Roku device info")?
-            .error_for_status()
-            .context("Roku device-info returned an error status")?
+        let body = send_with_retry(
+            self.client
+                .get(format!("{}/query/device-info", self.base_url())),
+            "Roku device info",
+        )
+        .await?
             .text()
             .await
             .context("failed to read Roku device-info response")?;
@@ -101,13 +100,12 @@ impl RokuTvAdapter {
     }
 
     async fn send_keypress(&self, key: &str) -> Result<()> {
-        self.client
-            .post(format!("{}/keypress/{key}", self.base_url()))
-            .send()
-            .await
-            .with_context(|| format!("failed to send Roku keypress '{key}'"))?
-            .error_for_status()
-            .with_context(|| format!("Roku keypress '{key}' returned an error status"))?;
+        send_with_retry(
+            self.client
+                .post(format!("{}/keypress/{key}", self.base_url())),
+            &format!("Roku keypress '{key}'"),
+        )
+        .await?;
 
         Ok(())
     }
@@ -165,7 +163,7 @@ impl AdapterFactory for RokuTvFactory {
             return Ok(None);
         }
 
-        Ok(Some(Box::new(RokuTvAdapter::new(config))))
+        Ok(Some(Box::new(RokuTvAdapter::new(config)?)))
     }
 }
 
@@ -428,7 +426,8 @@ mod tests {
         let adapter = RokuTvAdapter::with_base_url(
             adapter_config(server.addr.ip().to_string()),
             format!("http://{}", server.addr),
-        );
+        )
+        .expect("adapter builds");
 
         adapter.poll_once(&registry).await.expect("poll succeeds");
 
@@ -472,7 +471,8 @@ mod tests {
         let adapter = RokuTvAdapter::with_base_url(
             adapter_config(server.addr.ip().to_string()),
             format!("http://{}", server.addr),
-        );
+        )
+        .expect("adapter builds");
 
         adapter
             .poll_once(&registry)

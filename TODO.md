@@ -22,8 +22,8 @@ These areas are already present and should not be re-planned as greenfield work:
 - [x] Add bounded automation concurrency, execution timeouts, and clear failure reporting for stuck or slow Lua runs.
 - [x] Add recovery behavior for automation event-bus lag so missed triggers are handled intentionally instead of only logging a warning.
 - [x] Add graceful shutdown for persistence so the process can drain or flush pending writes before exit.
-- [ ] Align adapter retry behavior with one clear policy: either implement exponential backoff in adapters or update the trait/docs to match the fixed-sleep design.
-- [ ] Add explicit HTTP client timeouts and retry policy for external adapters.
+- [x] Align adapter retry behavior with one clear policy: either implement exponential backoff in adapters or update the trait/docs to match the fixed-sleep design.
+- [x] Add explicit HTTP client timeouts and retry policy for external adapters.
 - [ ] Decide and enforce a canonical policy for unknown device attributes so registry validation and command validation are consistent.
 - [ ] Add failure-mode tests for adapter outages, persistence lag, automation lag recovery, slow Lua execution, and shutdown behavior.
 
