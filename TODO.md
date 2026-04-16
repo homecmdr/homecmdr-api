@@ -20,7 +20,7 @@ These areas are already present and should not be re-planned as greenfield work:
 - [x] Track automation runner health, including last run result, last error, and dropped-event warnings.
 - [x] Make event-triggered automations non-blocking so one slow Lua script or adapter invoke does not stall later automations.
 - [x] Add bounded automation concurrency, execution timeouts, and clear failure reporting for stuck or slow Lua runs.
-- [ ] Add recovery behavior for automation event-bus lag so missed triggers are handled intentionally instead of only logging a warning.
+- [x] Add recovery behavior for automation event-bus lag so missed triggers are handled intentionally instead of only logging a warning.
 - [ ] Add graceful shutdown for persistence so the process can drain or flush pending writes before exit.
 - [ ] Align adapter retry behavior with one clear policy: either implement exponential backoff in adapters or update the trait/docs to match the fixed-sleep design.
 - [ ] Add explicit HTTP client timeouts and retry policy for external adapters.

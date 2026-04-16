@@ -8,7 +8,7 @@ use chrono::Utc;
 use mlua::{Function, Lua};
 use serde::Serialize;
 use smart_home_core::event::Event;
-use smart_home_core::model::AttributeValue;
+use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId};
 use smart_home_core::runtime::Runtime;
 use smart_home_lua_host::{
     attribute_to_lua_value, evaluate_module, LuaExecutionContext, LuaRuntimeOptions,
@@ -204,6 +204,15 @@ async fn run_event_trigger_loop(
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "automation event trigger loop lagged behind");
+                recover_lagged_event_automations(
+                    &mut executions,
+                    runtime.clone(),
+                    &automations,
+                    scripts_root.clone(),
+                    execution.clone(),
+                    skipped,
+                );
+                while executions.try_join_next().is_some() {}
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
@@ -316,6 +325,37 @@ fn spawn_automation_execution(
     });
 }
 
+fn recover_lagged_event_automations(
+    executions: &mut JoinSet<()>,
+    runtime: Arc<Runtime>,
+    automations: &[Automation],
+    scripts_root: Option<PathBuf>,
+    execution: ExecutionControl,
+    skipped: u64,
+) {
+    for automation in automations {
+        let Trigger::DeviceStateChange { device_id, .. } = &automation.trigger else {
+            continue;
+        };
+
+        let Some(device) = runtime.registry().get(&DeviceId(device_id.clone())) else {
+            continue;
+        };
+
+        if let Some(event_value) = automation_event_from_device_snapshot(automation, &device, skipped)
+        {
+            spawn_automation_execution(
+                executions,
+                automation.clone(),
+                runtime.clone(),
+                event_value,
+                scripts_root.clone(),
+                execution.clone(),
+            );
+        }
+    }
+}
+
 fn execute_automation(
     automation: &Automation,
     runtime: Arc<Runtime>,
@@ -378,35 +418,110 @@ fn automation_event_from_runtime_event(
             }
         }
 
-        return Some(AttributeValue::Object(HashMap::from([
-            (
-                "type".to_string(),
-                AttributeValue::Text("device_state_change".to_string()),
-            ),
-            ("device_id".to_string(), AttributeValue::Text(id.0.clone())),
-            (
-                "attribute".to_string(),
-                AttributeValue::Text(attribute_name.clone()),
-            ),
-            ("value".to_string(), value.clone()),
-            (
-                "attributes".to_string(),
-                AttributeValue::Object(attributes.clone()),
-            ),
-        ])));
+        return Some(device_state_change_event(
+            &id.0,
+            attributes,
+            Some(attribute_name.as_str()),
+            Some(value.clone()),
+            None,
+        ));
     }
 
-    Some(AttributeValue::Object(HashMap::from([
+    Some(device_state_change_event(
+        &id.0,
+        attributes,
+        None,
+        None,
+        None,
+    ))
+}
+
+fn automation_event_from_device_snapshot(
+    automation: &Automation,
+    device: &Device,
+    skipped: u64,
+) -> Option<AttributeValue> {
+    let Trigger::DeviceStateChange {
+        device_id,
+        attribute,
+        equals,
+    } = &automation.trigger
+    else {
+        return None;
+    };
+
+    if device.id.0 != *device_id {
+        return None;
+    }
+
+    if let Some(attribute_name) = attribute {
+        let value = device.attributes.get(attribute_name)?;
+        if let Some(expected) = equals {
+            if value != expected {
+                return None;
+            }
+        }
+
+        return Some(device_state_change_event(
+            &device.id.0,
+            &device.attributes,
+            Some(attribute_name.as_str()),
+            Some(value.clone()),
+            Some(skipped),
+        ));
+    }
+
+    Some(device_state_change_event(
+        &device.id.0,
+        &device.attributes,
+        None,
+        None,
+        Some(skipped),
+    ))
+}
+
+fn device_state_change_event(
+    device_id: &str,
+    attributes: &Attributes,
+    attribute_name: Option<&str>,
+    value: Option<AttributeValue>,
+    recovered_skipped: Option<u64>,
+) -> AttributeValue {
+    let mut event = HashMap::from([
         (
             "type".to_string(),
             AttributeValue::Text("device_state_change".to_string()),
         ),
-        ("device_id".to_string(), AttributeValue::Text(id.0.clone())),
+        (
+            "device_id".to_string(),
+            AttributeValue::Text(device_id.to_string()),
+        ),
         (
             "attributes".to_string(),
             AttributeValue::Object(attributes.clone()),
         ),
-    ])))
+    ]);
+
+    if let Some(attribute_name) = attribute_name {
+        event.insert(
+            "attribute".to_string(),
+            AttributeValue::Text(attribute_name.to_string()),
+        );
+    }
+
+    if let Some(value) = value {
+        event.insert("value".to_string(), value);
+    }
+
+    if let Some(skipped) = recovered_skipped {
+        event.insert("recovered".to_string(), AttributeValue::Bool(true));
+        event.insert(
+            "skipped_events".to_string(),
+            AttributeValue::Integer(skipped as i64),
+        );
+    }
+
+    AttributeValue::Object(event)
 }
 
 fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> Result<Automation> {
@@ -1067,6 +1182,103 @@ mod tests {
                 .get("brightness"),
             Some(&AttributeValue::Integer(7))
         );
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lagged_event_runner_recovers_matching_device_state_from_registry_snapshot() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "recover.lua",
+            r#"return {
+                id = "recover_check",
+                name = "Recover Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    if event.recovered == true then
+                        ctx:command("test:device", {
+                            capability = "brightness",
+                            action = "set",
+                            value = event.skipped_events,
+                        })
+                    end
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 1,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor upsert succeeds");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target device exists");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let runner = AutomationRunner::new(catalog);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runner.run(runtime).await;
+            }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+
+        runtime.bus().publish(Event::DeviceSeen {
+            id: DeviceId("test:noise-1".to_string()),
+            last_seen: Utc::now(),
+        });
+        runtime.bus().publish(Event::DeviceSeen {
+            id: DeviceId("test:noise-2".to_string()),
+            last_seen: Utc::now(),
+        });
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("matching device state is updated in registry");
+
+        let recovered_value = timeout(Duration::from_secs(2), async {
+            loop {
+                let brightness = runtime
+                    .registry()
+                    .get(&DeviceId("test:device".to_string()))
+                    .expect("target device exists")
+                    .attributes
+                    .get("brightness")
+                    .cloned();
+
+                if let Some(AttributeValue::Integer(value)) = brightness {
+                    if value > 0 {
+                        break value;
+                    }
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lag recovery should execute automation");
+
+        assert!(recovered_value >= 1);
 
         task.abort();
         let _ = task.await;
