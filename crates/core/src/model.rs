@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId(pub String);
 
+/// Unique identifier for a room.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RoomId(pub String);
+
 /// The kind of device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +29,8 @@ pub type Attributes = HashMap<String, AttributeValue>;
 pub struct Device {
     /// Stable unique device identifier.
     pub id: DeviceId,
+    /// Optional room assignment for this device.
+    pub room_id: Option<RoomId>,
     /// High-level device category.
     pub kind: DeviceKind,
     /// Current device state values.
@@ -35,6 +41,15 @@ pub struct Device {
     pub updated_at: DateTime<Utc>,
     /// Timestamp of the most recent successful observation.
     pub last_seen: DateTime<Utc>,
+}
+
+/// A logical room that devices can be assigned to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Room {
+    /// Stable unique room identifier.
+    pub id: RoomId,
+    /// Human-readable room name.
+    pub name: String,
 }
 
 /// Typed attribute values.
@@ -54,8 +69,6 @@ pub enum AttributeValue {
 pub struct Metadata {
     /// Adapter or subsystem that produced this device.
     pub source: String,
-    /// Optional physical or logical device location.
-    pub location: Option<String>,
     /// Optional accuracy or confidence value.
     pub accuracy: Option<f64>,
     /// Vendor-defined extra metadata preserved as JSON.

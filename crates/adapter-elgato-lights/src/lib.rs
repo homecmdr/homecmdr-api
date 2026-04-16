@@ -282,7 +282,6 @@ fn build_device(index: usize, light: ElgatoLight, previous: Option<&Device>) -> 
     ]);
     let metadata = Metadata {
         source: ADAPTER_NAME.to_string(),
-        location: None,
         accuracy: None,
         vendor_specific: HashMap::from([(
             "light_index".to_string(),
@@ -300,6 +299,7 @@ fn build_device(index: usize, light: ElgatoLight, previous: Option<&Device>) -> 
 
     Device {
         id: device_id(index),
+        room_id: previous.and_then(|device| device.room_id.clone()),
         kind: DeviceKind::Light,
         attributes,
         metadata,

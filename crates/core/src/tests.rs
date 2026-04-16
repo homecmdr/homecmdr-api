@@ -23,7 +23,7 @@ use crate::capability::{
 };
 use crate::command::DeviceCommand;
 use crate::event::Event;
-use crate::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
+use crate::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId};
 use crate::registry::DeviceRegistry;
 use crate::config::Config;
 use crate::runtime::{Runtime, RuntimeConfig};
@@ -99,11 +99,11 @@ fn sample_device(id: &str, attribute_name: &str, value: AttributeValue) -> Devic
 
     Device {
         id: DeviceId(id.to_string()),
+        room_id: None,
         kind: DeviceKind::Sensor,
         attributes,
         metadata: Metadata {
             source: "test".to_string(),
-            location: Some("lab".to_string()),
             accuracy: Some(1.0),
             vendor_specific: HashMap::new(),
         },
@@ -143,11 +143,11 @@ fn device_round_trips_through_json() {
 
     let device = Device {
         id: DeviceId("open_meteo:temperature_outdoor".to_string()),
+        room_id: None,
         kind: DeviceKind::Sensor,
         attributes,
         metadata: Metadata {
             source: "open_meteo".to_string(),
-            location: Some("outdoor".to_string()),
             accuracy: Some(0.95),
             vendor_specific,
         },
@@ -388,6 +388,47 @@ async fn restore_loads_devices_without_publishing_events() {
 }
 
 #[tokio::test]
+async fn assigning_device_to_room_updates_registry() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let room = Room {
+        id: RoomId("outside".to_string()),
+        name: "Outside".to_string(),
+    };
+    let device = sample_device(
+        "test:roomed",
+        TEMPERATURE_OUTDOOR,
+        measurement_value(23.0, "celsius"),
+    );
+
+    registry.upsert_room(room.clone()).await;
+    registry.upsert(device.clone()).await.expect("device insert succeeds");
+    registry
+        .assign_device_to_room(&device.id, Some(room.id.clone()))
+        .await
+        .expect("assignment succeeds");
+
+    assert_eq!(registry.list_devices_in_room(&room.id).len(), 1);
+    assert_eq!(registry.get(&device.id).expect("device exists").room_id, Some(room.id));
+}
+
+#[tokio::test]
+async fn upserting_device_with_unknown_room_is_rejected() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let mut device = sample_device(
+        "test:unknown-room",
+        TEMPERATURE_OUTDOOR,
+        measurement_value(20.0, "celsius"),
+    );
+    device.room_id = Some(RoomId("missing".to_string()));
+
+    let error = registry.upsert(device).await.expect_err("unknown room should fail");
+
+    assert!(error.to_string().contains("references unknown room 'missing'"));
+}
+
+#[tokio::test]
 async fn restore_rejects_invalid_device_shape() {
     let bus = EventBus::new(16);
     let registry = DeviceRegistry::new(bus);
@@ -526,6 +567,7 @@ async fn registry_accepts_valid_light_capabilities() {
     let registry = DeviceRegistry::new(bus);
     let device = Device {
         id: DeviceId("elgato:light:1".to_string()),
+        room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([
             (BRIGHTNESS.to_string(), AttributeValue::Integer(50)),
@@ -569,7 +611,6 @@ async fn registry_accepts_valid_light_capabilities() {
         ]),
         metadata: Metadata {
             source: "test".to_string(),
-            location: Some("desk".to_string()),
             accuracy: None,
             vendor_specific: HashMap::new(),
         },
@@ -588,11 +629,11 @@ async fn registry_rejects_invalid_brightness_percentage() {
     let registry = DeviceRegistry::new(bus);
     let invalid = Device {
         id: DeviceId("elgato:light:bad-brightness".to_string()),
+        room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([(BRIGHTNESS.to_string(), AttributeValue::Integer(101))]),
         metadata: Metadata {
             source: "test".to_string(),
-            location: None,
             accuracy: None,
             vendor_specific: HashMap::new(),
         },
@@ -611,6 +652,7 @@ async fn registry_rejects_invalid_color_temperature_unit_or_range() {
     let registry = DeviceRegistry::new(bus);
     let invalid = Device {
         id: DeviceId("elgato:light:bad-temp".to_string()),
+        room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([(
             COLOR_TEMPERATURE.to_string(),
@@ -621,7 +663,6 @@ async fn registry_rejects_invalid_color_temperature_unit_or_range() {
         )]),
         metadata: Metadata {
             source: "test".to_string(),
-            location: None,
             accuracy: None,
             vendor_specific: HashMap::new(),
         },
@@ -643,11 +684,11 @@ async fn registry_rejects_invalid_hex_color_shape() {
     let registry = DeviceRegistry::new(bus);
     let invalid = Device {
         id: DeviceId("elgato:light:bad-hex".to_string()),
+        room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([(COLOR_HEX.to_string(), AttributeValue::Text("orange".to_string()))]),
         metadata: Metadata {
             source: "test".to_string(),
-            location: None,
             accuracy: None,
             vendor_specific: HashMap::new(),
         },

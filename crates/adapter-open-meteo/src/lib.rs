@@ -210,7 +210,6 @@ fn build_device(vendor_id: &str, attributes: Attributes, previous: Option<&Devic
     let now = Utc::now();
     let metadata = Metadata {
         source: ADAPTER_NAME.to_string(),
-        location: Some("outdoor".to_string()),
         accuracy: None,
         vendor_specific: HashMap::new(),
     };
@@ -225,6 +224,7 @@ fn build_device(vendor_id: &str, attributes: Attributes, previous: Option<&Devic
 
     Device {
         id: DeviceId(format!("{ADAPTER_NAME}:{vendor_id}")),
+        room_id: previous.and_then(|device| device.room_id.clone()),
         kind: DeviceKind::Sensor,
         attributes,
         metadata,
@@ -426,8 +426,15 @@ mod tests {
             }
         );
 
-        let error_event = subscriber.recv().await.expect("system error event");
-        assert!(matches!(error_event, Event::SystemError { .. }));
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(subscriber.recv().await.expect("system error event"), Event::SystemError { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("system error event arrives in time");
 
         timeout(Duration::from_secs(2), async {
             loop {

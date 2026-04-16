@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use smart_home_core::model::{Attributes, Device, DeviceId, DeviceKind, Metadata};
+use smart_home_core::model::{Attributes, Device, DeviceId, DeviceKind, Metadata, Room, RoomId};
 use smart_home_core::store::DeviceStore;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -11,11 +11,19 @@ use sqlx::{Row, SqlitePool};
 const CREATE_DEVICES_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS devices (
     device_id TEXT PRIMARY KEY,
+    room_id TEXT REFERENCES rooms(id) ON DELETE SET NULL,
     kind TEXT NOT NULL,
     attributes_json TEXT NOT NULL,
     metadata_json TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_seen TEXT NOT NULL
+)
+"#;
+
+const CREATE_ROOMS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS rooms (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL
 )
 "#;
 
@@ -43,6 +51,11 @@ impl SqliteDeviceStore {
     }
 
     pub async fn initialize(&self) -> Result<()> {
+        sqlx::query(CREATE_ROOMS_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite rooms table")?;
+
         sqlx::query(CREATE_DEVICES_TABLE_SQL)
             .execute(&self.pool)
             .await
@@ -57,7 +70,7 @@ impl DeviceStore for SqliteDeviceStore {
     async fn load_all_devices(&self) -> Result<Vec<Device>> {
         let rows = sqlx::query(
             r#"
-            SELECT device_id, kind, attributes_json, metadata_json, updated_at, last_seen
+            SELECT device_id, room_id, kind, attributes_json, metadata_json, updated_at, last_seen
             FROM devices
             ORDER BY device_id
             "#,
@@ -69,6 +82,21 @@ impl DeviceStore for SqliteDeviceStore {
         rows.into_iter().map(device_from_row).collect()
     }
 
+    async fn load_all_rooms(&self) -> Result<Vec<Room>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name
+            FROM rooms
+            ORDER BY id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load rooms from SQLite")?;
+
+        rows.into_iter().map(room_from_row).collect()
+    }
+
     async fn save_device(&self, device: &Device) -> Result<()> {
         let attributes_json = serde_json::to_string(&device.attributes)
             .with_context(|| format!("failed to serialize attributes for '{}'", device.id.0))?;
@@ -77,9 +105,10 @@ impl DeviceStore for SqliteDeviceStore {
 
         sqlx::query(
             r#"
-            INSERT INTO devices (device_id, kind, attributes_json, metadata_json, updated_at, last_seen)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO devices (device_id, room_id, kind, attributes_json, metadata_json, updated_at, last_seen)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(device_id) DO UPDATE SET
+                room_id = excluded.room_id,
                 kind = excluded.kind,
                 attributes_json = excluded.attributes_json,
                 metadata_json = excluded.metadata_json,
@@ -88,6 +117,7 @@ impl DeviceStore for SqliteDeviceStore {
             "#,
         )
         .bind(&device.id.0)
+        .bind(device.room_id.as_ref().map(|id| id.0.as_str()))
         .bind(device_kind_to_str(&device.kind))
         .bind(attributes_json)
         .bind(metadata_json)
@@ -100,12 +130,40 @@ impl DeviceStore for SqliteDeviceStore {
         Ok(())
     }
 
+    async fn save_room(&self, room: &Room) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO rooms (id, name)
+            VALUES (?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name
+            "#,
+        )
+        .bind(&room.id.0)
+        .bind(&room.name)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to save room '{}' to SQLite", room.id.0))?;
+
+        Ok(())
+    }
+
     async fn delete_device(&self, id: &DeviceId) -> Result<()> {
         sqlx::query("DELETE FROM devices WHERE device_id = ?1")
             .bind(&id.0)
             .execute(&self.pool)
             .await
             .with_context(|| format!("failed to delete device '{}' from SQLite", id.0))?;
+
+        Ok(())
+    }
+
+    async fn delete_room(&self, id: &RoomId) -> Result<()> {
+        sqlx::query("DELETE FROM rooms WHERE id = ?1")
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete room '{}' from SQLite", id.0))?;
 
         Ok(())
     }
@@ -142,6 +200,7 @@ fn sqlite_path(database_url: &str) -> Option<&Path> {
 
 fn device_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Device> {
     let id = row.get::<String, _>("device_id");
+    let room_id = row.get::<Option<String>, _>("room_id").map(RoomId);
     let kind = device_kind_from_str(&row.get::<String, _>("kind"))
         .with_context(|| format!("invalid device kind for '{id}'"))?;
     let attributes: Attributes = serde_json::from_str(&row.get::<String, _>("attributes_json"))
@@ -157,11 +216,19 @@ fn device_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Device> {
 
     Ok(Device {
         id: DeviceId(id),
+        room_id,
         kind,
         attributes,
         metadata,
         updated_at,
         last_seen,
+    })
+}
+
+fn room_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Room> {
+    Ok(Room {
+        id: RoomId(row.get::<String, _>("id")),
+        name: row.get::<String, _>("name"),
     })
 }
 
@@ -201,6 +268,7 @@ mod tests {
 
         Device {
             id: DeviceId(id.to_string()),
+            room_id: Some(RoomId("lab".to_string())),
             kind: DeviceKind::Sensor,
             attributes: HashMap::from([
                 (
@@ -211,7 +279,6 @@ mod tests {
             ]),
             metadata: Metadata {
                 source: "test".to_string(),
-                location: Some("lab".to_string()),
                 accuracy: Some(0.9),
                 vendor_specific,
             },
@@ -236,6 +303,13 @@ mod tests {
     #[tokio::test]
     async fn save_and_load_single_device() {
         let store = temp_store().await;
+        store
+            .save_room(&Room {
+                id: RoomId("lab".to_string()),
+                name: "Lab".to_string(),
+            })
+            .await
+            .expect("save room succeeds");
         let device = sample_device("test:one", 20.0);
 
         store.save_device(&device).await.expect("save succeeds");
@@ -246,6 +320,13 @@ mod tests {
     #[tokio::test]
     async fn save_overwrites_existing_device_by_id() {
         let store = temp_store().await;
+        store
+            .save_room(&Room {
+                id: RoomId("lab".to_string()),
+                name: "Lab".to_string(),
+            })
+            .await
+            .expect("save room succeeds");
         let original = sample_device("test:one", 20.0);
         let updated = sample_device("test:one", 21.5);
 
@@ -258,6 +339,13 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_device_by_id() {
         let store = temp_store().await;
+        store
+            .save_room(&Room {
+                id: RoomId("lab".to_string()),
+                name: "Lab".to_string(),
+            })
+            .await
+            .expect("save room succeeds");
         let device = sample_device("test:one", 20.0);
 
         store.save_device(&device).await.expect("save succeeds");
@@ -272,6 +360,13 @@ mod tests {
     #[tokio::test]
     async fn load_multiple_devices() {
         let store = temp_store().await;
+        store
+            .save_room(&Room {
+                id: RoomId("lab".to_string()),
+                name: "Lab".to_string(),
+            })
+            .await
+            .expect("save room succeeds");
         let device_a = sample_device("test:a", 20.0);
         let device_b = sample_device("test:b", 21.0);
 
@@ -282,5 +377,36 @@ mod tests {
             store.load_all_devices().await.expect("load succeeds"),
             vec![device_a, device_b]
         );
+    }
+
+    #[tokio::test]
+    async fn save_and_load_rooms() {
+        let store = temp_store().await;
+        let room = Room {
+            id: RoomId("outside".to_string()),
+            name: "Outside".to_string(),
+        };
+
+        store.save_room(&room).await.expect("save room succeeds");
+
+        assert_eq!(store.load_all_rooms().await.expect("load rooms succeeds"), vec![room]);
+    }
+
+    #[tokio::test]
+    async fn deleting_room_clears_device_assignment() {
+        let store = temp_store().await;
+        let room = Room {
+            id: RoomId("lab".to_string()),
+            name: "Lab".to_string(),
+        };
+        let mut device = sample_device("test:one", 20.0);
+
+        store.save_room(&room).await.expect("save room succeeds");
+        store.save_device(&device).await.expect("save device succeeds");
+        store.delete_room(&room.id).await.expect("delete room succeeds");
+
+        device.room_id = None;
+        assert!(store.load_all_rooms().await.expect("load rooms succeeds").is_empty());
+        assert_eq!(store.load_all_devices().await.expect("load devices succeeds"), vec![device]);
     }
 }

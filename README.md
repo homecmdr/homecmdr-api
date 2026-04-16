@@ -3,6 +3,7 @@
 Smart Home is a Rust workspace for a small home-automation runtime with:
 
 - an in-memory device registry as the hot read path
+- first-class rooms for logical grouping
 - an HTTP API for device inspection
 - a WebSocket event stream for live updates
 - adapter-driven device updates
@@ -28,6 +29,7 @@ smart-home/
 ## Current Persistence Model
 
 - `DeviceRegistry` remains the in-memory runtime state used by the API and WebSocket paths.
+- Rooms and device-to-room assignments are part of the same current-state model.
 - Persistence stores latest known device state, not event history.
 - Startup hydrates the registry from SQLite before adapters begin polling.
 - Live device changes are persisted asynchronously after the registry is updated.
@@ -93,6 +95,7 @@ Startup fails clearly when:
 The API accepts canonical device commands at:
 
 - `POST /devices/{id}/command`
+- `POST /rooms/{id}/command`
 
 Command payloads are normalized across adapters:
 
@@ -125,6 +128,54 @@ Examples:
 Validation happens in `core` before an adapter sees the command.
 Adapters translate canonical commands into vendor-specific payloads.
 
+## Rooms
+
+Rooms are first-class runtime objects.
+
+- Devices carry an optional `room_id`.
+- Rooms are persisted independently from devices.
+- Adapters do not own room assignment, so room changes survive adapter refreshes.
+- Outdoor devices can be assigned to any room the user creates, such as `outside`, `garden`, or `yard`.
+
+Current room endpoints:
+
+- `GET /rooms`
+- `POST /rooms`
+- `GET /rooms/{id}`
+- `GET /rooms/{id}/devices`
+- `POST /rooms/{id}/command`
+- `POST /devices/{id}/room`
+
+Create a room:
+
+```bash
+curl -X POST http://127.0.0.1:3000/rooms \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"outside","name":"Outside"}'
+```
+
+Assign a device to a room:
+
+```bash
+curl -X POST http://127.0.0.1:3000/devices/elgato_lights:light:0/room \
+  -H 'Content-Type: application/json' \
+  -d '{"room_id":"outside"}'
+```
+
+List all devices in a room:
+
+```bash
+curl http://127.0.0.1:3000/rooms/outside/devices
+```
+
+Send one command to every device in a room:
+
+```bash
+curl -X POST http://127.0.0.1:3000/rooms/outside/command \
+  -H 'Content-Type: application/json' \
+  -d '{"capability":"power","action":"off"}'
+```
+
 ## Elgato Lights Adapter
 
 `adapter-elgato-lights` polls the Elgato Light HTTP API and exposes one `DeviceKind::Light` per light index.
@@ -138,6 +189,18 @@ Canonical state exposed for each Elgato light:
 
 `color_temperature` is canonicalized to `kelvin` in the public API.
 The adapter converts between canonical kelvin values and the Elgato API temperature scale internally.
+Room assignment is preserved across adapter refreshes.
+
+## Open-Meteo Adapter
+
+`adapter-open-meteo` publishes weather devices as sensors.
+
+- temperature outdoor
+- wind speed
+- wind direction
+
+These devices start with no room assignment.
+Assign them through the room API if you want them grouped with outdoor lights, cameras, or other devices.
 
 Default config entry:
 
@@ -230,8 +293,15 @@ Useful endpoints:
 
 - `GET /health`
 - `GET /adapters`
+- `GET /rooms`
+- `POST /rooms`
+- `GET /rooms/{id}`
+- `GET /rooms/{id}/devices`
+- `POST /rooms/{id}/command`
 - `GET /devices`
 - `GET /devices/{id}`
+- `POST /devices/{id}/room`
+- `POST /devices/{id}/command`
 - `GET /events`
 
 ## Default Persistence Config
@@ -251,7 +321,7 @@ Behavior:
 - `enabled = true` turns on startup hydration and background persistence.
 - `backend = "sqlite"` uses the implemented SQLite store.
 - `database_url` points to the local SQLite file.
-- `auto_create = true` creates the database file and `devices` table if missing.
+- `auto_create = true` creates the database file plus the `rooms` and `devices` tables if missing.
 
 The default database path is relative to the workspace root when you run the API there.
 
@@ -263,7 +333,8 @@ On first startup, the app will create:
 
 - the parent directory for the SQLite file if needed
 - the SQLite database file if missing
-- the `devices` table used for current device state
+- the `rooms` table used for room state
+- the `devices` table used for current device state and room assignment
 
 If you want to inspect the database manually:
 
@@ -274,13 +345,16 @@ sqlite3 data/smart-home.db
 Example query:
 
 ```sql
-SELECT device_id, kind, updated_at FROM devices ORDER BY device_id;
+SELECT device_id, room_id, kind, updated_at FROM devices ORDER BY device_id;
 ```
 
 ## Persistence Semantics
 
 The persistence layer is intentionally current-state only.
 
+- `RoomAdded` and `RoomUpdated` write the room record.
+- `RoomRemoved` deletes the room record.
+- `DeviceRoomChanged` writes the updated device record.
 - `DeviceAdded` writes the full device record.
 - `DeviceStateChanged` reads the full canonical device from the registry, then writes it.
 - `DeviceRemoved` deletes the device record.
@@ -292,6 +366,32 @@ This means:
 - SQLite is the recovery copy used during startup.
 - a sudden crash may still lose the newest in-memory update if it was not flushed yet.
 
+## Timestamp Semantics
+
+Each device now carries two timestamps:
+
+- `updated_at`: the last meaningful state change
+- `last_seen`: the last successful observation from an adapter
+
+Examples:
+
+- if a light changes from `power = "on"` to `power = "off"`, both `updated_at` and `last_seen` move forward
+- if a polling adapter sees the exact same state again, only `last_seen` moves forward
+
+This allows the system to track freshness without treating every poll as a real state transition.
+
+## Event Semantics
+
+WebSocket clients connected to `/events` only receive meaningful runtime events.
+
+- `device.state_changed` is emitted when device state actually changes
+- `device.room_changed` is emitted when a device is reassigned between rooms
+- `room.added`, `room.updated`, and `room.removed` are emitted for room lifecycle changes
+- repeated identical polls do not emit `device.state_changed`
+- internal `last_seen` refreshes are persisted but filtered out of the WebSocket stream
+
+This keeps polling adapters such as Open-Meteo and Elgato Lights from spamming the event stream when the observed state is unchanged.
+
 ## Restart Recovery
 
 Restart flow:
@@ -299,10 +399,12 @@ Restart flow:
 1. load config
 2. create the SQLite device store
 3. create the runtime and registry
-4. load persisted devices from SQLite
-5. restore them into the in-memory registry without publishing live device events
-6. start the persistence worker
-7. start adapters and HTTP/WebSocket serving
+4. load persisted rooms from SQLite
+5. restore rooms into the in-memory registry
+6. load persisted devices from SQLite
+7. restore them into the in-memory registry without publishing live device events
+8. start the persistence worker
+9. start adapters and HTTP/WebSocket serving
 
 This allows previously persisted devices to appear in `/devices` immediately after restart, before a new adapter poll cycle runs.
 
