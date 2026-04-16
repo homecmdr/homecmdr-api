@@ -14,12 +14,12 @@ use tokio::time::{sleep, Duration};
 use crate::adapter::Adapter;
 use crate::bus::EventBus;
 use crate::capability::{
-    accumulation_value, capability_definition, light_capability, measurement_value,
-    weather_capability, CapabilitySchema, AVAILABILITY_VALUES, BRIGHTNESS, CLOUD_COVERAGE,
-    COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB, COLOR_TEMPERATURE, COLOR_XY,
-    EFFECT, ILLUMINANCE, LED_INDICATION, LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, POWER,
-    POWER_VALUES, STATE, TEMPERATURE_OUTDOOR, TRANSITION, WEATHER_CAPABILITIES, WIND_DIRECTION,
-    WIND_SPEED,
+    accumulation_value, capability_definition, is_custom_attribute_key, light_capability,
+    measurement_value, weather_capability, CapabilitySchema, AVAILABILITY_VALUES, BRIGHTNESS,
+    CLOUD_COVERAGE, COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB,
+    COLOR_TEMPERATURE, COLOR_XY, EFFECT, ILLUMINANCE, LED_INDICATION, LIGHT_CAPABILITIES,
+    LIGHT_EFFECT_VALUES, POWER, POWER_VALUES, STATE, TEMPERATURE_OUTDOOR, TRANSITION,
+    WEATHER_CAPABILITIES, WIND_DIRECTION, WIND_SPEED,
 };
 use crate::command::DeviceCommand;
 use crate::config::Config;
@@ -130,13 +130,13 @@ fn device_round_trips_through_json() {
         TEMPERATURE_OUTDOOR.to_string(),
         measurement_value(21.5, "celsius"),
     );
-    attributes.insert("online".to_string(), AttributeValue::Bool(true));
+    attributes.insert(STATE.to_string(), AttributeValue::Text("online".to_string()));
     attributes.insert(
-        "label".to_string(),
+        "custom.open_meteo.label".to_string(),
         AttributeValue::Text("patio".to_string()),
     );
     attributes.insert(WIND_DIRECTION.to_string(), AttributeValue::Integer(225));
-    attributes.insert("extra".to_string(), AttributeValue::Null);
+    attributes.insert("custom.open_meteo.extra".to_string(), AttributeValue::Null);
 
     let mut vendor_specific = HashMap::new();
     vendor_specific.insert(
@@ -644,6 +644,20 @@ fn capability_helpers_build_expected_shapes() {
     );
 }
 
+#[test]
+fn custom_attribute_keys_require_adapter_namespace() {
+    assert!(is_custom_attribute_key("custom.open_meteo.label"));
+    assert!(is_custom_attribute_key("custom.roku_tv.input_source"));
+    assert!(is_custom_attribute_key("custom.elgato_lights.effect_profile.active"));
+
+    assert!(!is_custom_attribute_key("custom"));
+    assert!(!is_custom_attribute_key("custom."));
+    assert!(!is_custom_attribute_key("custom.label"));
+    assert!(!is_custom_attribute_key("label.custom"));
+    assert!(!is_custom_attribute_key("custom.open-meteo.label"));
+    assert!(!is_custom_attribute_key("custom.open_meteo.Label"));
+}
+
 #[tokio::test]
 async fn registry_accepts_valid_light_capabilities() {
     let bus = EventBus::new(16);
@@ -815,6 +829,76 @@ async fn registry_rejects_invalid_hex_color_shape() {
     assert!(error
         .to_string()
         .contains("expected hex color string like '#ff8800'"));
+}
+
+#[tokio::test]
+async fn registry_accepts_custom_attribute_keys() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let device = Device {
+        id: DeviceId("test:custom-attributes".to_string()),
+        room_id: None,
+        kind: DeviceKind::Sensor,
+        attributes: HashMap::from([
+            (
+                TEMPERATURE_OUTDOOR.to_string(),
+                measurement_value(21.5, "celsius"),
+            ),
+            (
+                "custom.open_meteo.station_label".to_string(),
+                AttributeValue::Text("patio".to_string()),
+            ),
+        ]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            accuracy: None,
+            vendor_specific: HashMap::from([(
+                "station_id".to_string(),
+                serde_json::json!("abc123"),
+            )]),
+        },
+        updated_at: Utc::now(),
+        last_seen: Utc::now(),
+    };
+
+    registry
+        .upsert(device.clone())
+        .await
+        .expect("custom namespaced attributes should validate");
+
+    assert_eq!(registry.get(&device.id), Some(device));
+}
+
+#[tokio::test]
+async fn registry_rejects_unknown_non_custom_attribute_keys() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let invalid = Device {
+        id: DeviceId("test:unknown-attribute".to_string()),
+        room_id: None,
+        kind: DeviceKind::Sensor,
+        attributes: HashMap::from([(
+            "label".to_string(),
+            AttributeValue::Text("patio".to_string()),
+        )]),
+        metadata: Metadata {
+            source: "test".to_string(),
+            accuracy: None,
+            vendor_specific: HashMap::new(),
+        },
+        updated_at: Utc::now(),
+        last_seen: Utc::now(),
+    };
+
+    let error = registry
+        .upsert(invalid)
+        .await
+        .expect_err("unknown plain attribute should fail");
+
+    assert!(error.to_string().contains("unknown attribute 'label'"));
+    assert!(error
+        .to_string()
+        .contains("custom.<adapter>.<field>"));
 }
 
 #[test]

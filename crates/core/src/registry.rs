@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 
 use crate::bus::EventBus;
-use crate::capability::{capability_definition, CapabilitySchema};
+use crate::capability::{capability_definition, is_custom_attribute_key, CapabilitySchema};
 use crate::event::Event;
 use crate::model::{AttributeValue, Device, DeviceId, Room, RoomId};
 
@@ -245,6 +245,11 @@ fn validate_attributes(device: &Device) -> Result<()> {
                     device.id.0
                 )
             })?;
+        } else if !is_custom_attribute_key(key) {
+            anyhow::bail!(
+                "unknown attribute '{key}' on '{}'; use a canonical capability key, a 'custom.<adapter>.<field>' key, or metadata.vendor_specific for vendor data",
+                device.id.0
+            );
         }
     }
 

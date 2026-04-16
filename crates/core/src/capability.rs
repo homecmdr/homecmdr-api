@@ -54,6 +54,7 @@ pub const ILLUMINANCE: &str = "illuminance";
 pub const LED_INDICATION: &str = "led_indication";
 pub const POWER: &str = "power";
 pub const STATE: &str = "state";
+pub const CUSTOM_ATTRIBUTE_PREFIX: &str = "custom.";
 
 pub const COLOR_MODE_VALUES: [&str; 5] = ["color_temp", "rgb", "xy", "hs", "white"];
 pub const LIGHT_EFFECT_VALUES: [&str; 5] = ["none", "flash", "strobe", "colorloop", "random"];
@@ -269,6 +270,24 @@ pub fn capability_definition(key: &str) -> Option<&'static CapabilityDefinition>
         .iter()
         .flat_map(|capabilities| capabilities.iter())
         .find(|capability| capability.key == key)
+}
+
+pub fn is_custom_attribute_key(key: &str) -> bool {
+    let Some(suffix) = key.strip_prefix(CUSTOM_ATTRIBUTE_PREFIX) else {
+        return false;
+    };
+
+    let segments = suffix.split('.').collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return false;
+    }
+
+    segments.iter().all(|segment| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    })
 }
 
 pub fn action_requires_value(action: &str) -> bool {
