@@ -1052,7 +1052,7 @@ mod tests {
     use store_sql::SqliteDeviceStore;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, Notify};
     use tokio::time::timeout;
     use tokio_tungstenite::connect_async;
 
@@ -1064,6 +1064,105 @@ mod tests {
     }
 
     struct CommandAdapter;
+
+    #[derive(Default)]
+    struct LaggyMemoryStore {
+        devices: Mutex<HashMap<DeviceId, Device>>,
+        rooms: Mutex<HashMap<RoomId, Room>>,
+        first_save_started: Notify,
+        first_save_seen: Mutex<bool>,
+        delay_first_save: Mutex<bool>,
+    }
+
+    impl LaggyMemoryStore {
+        fn new() -> Self {
+            Self {
+                devices: Mutex::new(HashMap::new()),
+                rooms: Mutex::new(HashMap::new()),
+                first_save_started: Notify::new(),
+                first_save_seen: Mutex::new(false),
+                delay_first_save: Mutex::new(true),
+            }
+        }
+
+        async fn wait_for_first_save_started(&self) {
+            if *self.first_save_seen.lock().expect("first save lock") {
+                return;
+            }
+
+            self.first_save_started.notified().await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DeviceStore for LaggyMemoryStore {
+        async fn load_all_devices(&self) -> anyhow::Result<Vec<Device>> {
+            let mut devices = self
+                .devices
+                .lock()
+                .expect("devices lock")
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            devices.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+            Ok(devices)
+        }
+
+        async fn load_all_rooms(&self) -> anyhow::Result<Vec<Room>> {
+            let mut rooms = self
+                .rooms
+                .lock()
+                .expect("rooms lock")
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            rooms.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+            Ok(rooms)
+        }
+
+        async fn save_device(&self, device: &Device) -> anyhow::Result<()> {
+            let should_delay = {
+                let mut seen = self.first_save_seen.lock().expect("first save lock");
+                if !*seen {
+                    *seen = true;
+                    self.first_save_started.notify_waiters();
+                }
+
+                let mut delay = self.delay_first_save.lock().expect("delay lock");
+                let should_delay = *delay;
+                *delay = false;
+                should_delay
+            };
+
+            if should_delay {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            self.devices
+                .lock()
+                .expect("devices lock")
+                .insert(device.id.clone(), device.clone());
+            Ok(())
+        }
+
+        async fn save_room(&self, room: &Room) -> anyhow::Result<()> {
+            self.rooms
+                .lock()
+                .expect("rooms lock")
+                .insert(room.id.clone(), room.clone());
+            Ok(())
+        }
+
+        async fn delete_device(&self, id: &DeviceId) -> anyhow::Result<()> {
+            self.devices.lock().expect("devices lock").remove(id);
+            Ok(())
+        }
+
+        async fn delete_room(&self, id: &RoomId) -> anyhow::Result<()> {
+            self.rooms.lock().expect("rooms lock").remove(id);
+            Ok(())
+        }
+    }
 
     #[async_trait::async_trait]
     impl Adapter for CommandAdapter {
@@ -1385,6 +1484,62 @@ mod tests {
 
         let _ = shutdown.send(());
         handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn monitor_runtime_health_marks_adapter_outage_as_degraded() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let health = HealthState::new(&["open_meteo".to_string()], false, false);
+        health.adapter_started("open_meteo");
+        health.mark_startup_complete();
+
+        let monitor_task = {
+            let runtime = runtime.clone();
+            let health = health.clone();
+            tokio::spawn(async move {
+                monitor_runtime_health(runtime, health).await;
+            })
+        };
+
+        tokio::task::yield_now().await;
+
+        runtime.bus().publish(Event::SystemError {
+            message: "open_meteo poll failed: timeout".to_string(),
+        });
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let response = health.response();
+                if response
+                    .adapters
+                    .iter()
+                    .any(|adapter| adapter.name == "open_meteo" && adapter.status == "error")
+                {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("adapter outage should degrade health");
+
+        let response = health.response();
+        assert_eq!(response.status, "degraded");
+        assert!(!response.ready);
+        assert_eq!(response.adapters[0].status, "error");
+        assert_eq!(
+            response.adapters[0].message.as_deref(),
+            Some("open_meteo poll failed: timeout")
+        );
+
+        monitor_task.abort();
+        let _ = monitor_task.await;
     }
 
     #[tokio::test]
@@ -2103,6 +2258,81 @@ mod tests {
             store.load_all_devices().await.expect("devices load"),
             vec![device]
         );
+    }
+
+    #[tokio::test]
+    async fn persistence_worker_recovers_from_lag_by_reconciling_latest_registry_state() {
+        let store = Arc::new(LaggyMemoryStore::new());
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 1,
+            },
+        ));
+        let health = HealthState::new(&[], true, false);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let persistence_task = {
+            let runtime = runtime.clone();
+            let store: Arc<dyn DeviceStore> = store.clone();
+            let health = health.clone();
+            tokio::spawn(async move {
+                run_persistence_worker(runtime, store, health, shutdown_rx).await;
+            })
+        };
+        tokio::task::yield_now().await;
+
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:lagged",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("initial device upsert succeeds");
+        store.wait_for_first_save_started().await;
+
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:lagged",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(21.0, "celsius"),
+            ))
+            .await
+            .expect("second device upsert succeeds");
+        let latest = sample_device(
+            "test:lagged",
+            TEMPERATURE_OUTDOOR,
+            measurement_value(22.0, "celsius"),
+        );
+        runtime
+            .registry()
+            .upsert(latest.clone())
+            .await
+            .expect("third device upsert succeeds");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if store
+                    .load_all_devices()
+                    .await
+                    .expect("load succeeds")
+                    == vec![latest.clone()]
+                {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lag recovery should reconcile latest registry state");
+
+        assert_eq!(health.response().persistence.status, "ok");
+
+        let _ = shutdown_tx.send(());
+        let _ = persistence_task.await;
     }
 
     #[tokio::test]

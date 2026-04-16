@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use mlua::{Function, Lua};
+use mlua::{Function, HookTriggers, Lua, VmState};
 use serde::Serialize;
 use smart_home_core::event::Event;
 use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId};
@@ -266,10 +267,13 @@ async fn run_interval_trigger_loop(
                 runtime_clone,
                 event,
                 scripts_root_clone.as_deref(),
+                timeout_duration,
             )
         });
 
-        match timeout(timeout_duration, join_handle).await {
+        tokio::pin!(join_handle);
+
+        match timeout(timeout_duration, &mut join_handle).await {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(error))) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "interval automation execution failed");
@@ -278,6 +282,7 @@ async fn run_interval_trigger_loop(
                 tracing::error!(automation = %automation.summary.id, error = %error, "interval automation task failed");
             }
             Err(_) => {
+                join_handle.abort();
                 tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "interval automation execution timed out");
             }
         }
@@ -307,10 +312,13 @@ fn spawn_automation_execution(
                 runtime,
                 event,
                 scripts_root.as_deref(),
+                timeout_duration,
             )
         });
 
-        match timeout(timeout_duration, join_handle).await {
+        tokio::pin!(join_handle);
+
+        match timeout(timeout_duration, &mut join_handle).await {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(error))) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "automation execution failed");
@@ -319,6 +327,7 @@ fn spawn_automation_execution(
                 tracing::error!(automation = %automation.summary.id, error = %error, "automation task failed");
             }
             Err(_) => {
+                join_handle.abort();
                 tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "automation execution timed out");
             }
         }
@@ -361,6 +370,7 @@ fn execute_automation(
     runtime: Arc<Runtime>,
     event: AttributeValue,
     scripts_root: Option<&Path>,
+    timeout_duration: Duration,
 ) -> Result<()> {
     let source = fs::read_to_string(&automation.path).with_context(|| {
         format!(
@@ -369,6 +379,7 @@ fn execute_automation(
         )
     })?;
     let lua = Lua::new();
+    install_execution_timeout_hook(&lua, timeout_duration);
     let module = evaluate_automation_module(&lua, &source, &automation.path, scripts_root)?;
     let execute = module.get::<Function>("execute").map_err(|error| {
         anyhow::anyhow!(
@@ -387,6 +398,20 @@ fn execute_automation(
             automation.summary.id
         )
     })
+}
+
+fn install_execution_timeout_hook(lua: &Lua, timeout_duration: Duration) {
+    let started = Instant::now();
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(10_000),
+        move |_lua, _debug| {
+            if started.elapsed() >= timeout_duration {
+                Err(mlua::Error::runtime("automation execution timed out"))
+            } else {
+                Ok(VmState::Continue)
+            }
+        },
+    );
 }
 
 fn automation_event_from_runtime_event(
@@ -705,6 +730,8 @@ mod tests {
 
     use super::*;
 
+    const RAIN_ATTRIBUTE: &str = "custom.test.rain";
+
     struct CommandAdapter;
 
     #[async_trait::async_trait]
@@ -762,7 +789,7 @@ mod tests {
             id: DeviceId(id.to_string()),
             room_id: None,
             kind: DeviceKind::Sensor,
-            attributes: HashMap::from([("rain".to_string(), AttributeValue::Bool(wet))]),
+            attributes: HashMap::from([(RAIN_ATTRIBUTE.to_string(), AttributeValue::Bool(wet))]),
             metadata: Metadata {
                 source: "test".to_string(),
                 accuracy: None,
@@ -801,7 +828,7 @@ mod tests {
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
-                    attribute = "rain",
+                    attribute = "custom.test.rain",
                     equals = true,
                 },
                 execute = function(ctx, event)
@@ -826,7 +853,7 @@ mod tests {
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
-                    attribute = "rain",
+                    attribute = "custom.test.rain",
                     equals = true,
                 },
                 execute = function(ctx, event)
@@ -950,21 +977,22 @@ mod tests {
 
         let catalog =
             AutomationCatalog::load_from_directory(&dir, Some(scripts_dir)).expect("catalog loads");
-        let runner = AutomationRunner::new(catalog);
-        let runtime_for_runner = runtime.clone();
-        let task = tokio::spawn(async move {
-            runner.run(runtime_for_runner).await;
-        });
+        let automation = catalog
+            .automations
+            .first()
+            .expect("script-backed automation exists");
 
-        sleep(Duration::from_millis(25)).await;
-
-        runtime
-            .registry()
-            .upsert(sample_device("test:rain", true))
-            .await
-            .expect("sensor change succeeds");
-
-        sleep(Duration::from_millis(100)).await;
+        execute_automation(
+            automation,
+            runtime.clone(),
+            AttributeValue::Object(HashMap::from([(
+                "value".to_string(),
+                AttributeValue::Bool(true),
+            )])),
+            catalog.scripts_root.as_deref(),
+            Duration::from_secs(2),
+        )
+        .expect("script-backed automation executes successfully");
 
         assert_eq!(
             runtime
@@ -975,9 +1003,6 @@ mod tests {
                 .get("brightness"),
             Some(&AttributeValue::Integer(55))
         );
-
-        task.abort();
-        let _ = task.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -992,7 +1017,7 @@ mod tests {
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
-                    attribute = "rain",
+                    attribute = "custom.test.rain",
                     equals = true,
                 },
                 execute = function(ctx, event)
@@ -1016,7 +1041,7 @@ mod tests {
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
-                    attribute = "rain",
+                    attribute = "custom.test.rain",
                     equals = true,
                 },
                 execute = function(ctx, event)
@@ -1103,7 +1128,7 @@ mod tests {
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
-                    attribute = "rain",
+                    attribute = "custom.test.rain",
                     equals = true,
                 },
                 execute = function(ctx, event)
@@ -1199,7 +1224,7 @@ mod tests {
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
-                    attribute = "rain",
+                    attribute = "custom.test.rain",
                     equals = true,
                 },
                 execute = function(ctx, event)
@@ -1282,5 +1307,72 @@ mod tests {
 
         task.abort();
         let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_lua_execution_times_out_before_mutating_state() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "slow.lua",
+            r#"return {
+                id = "slow_timeout",
+                name = "Slow Timeout",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    local started = os.clock()
+                    while os.clock() - started < 0.25 do
+                    end
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 77,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target device exists");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let automation = catalog
+            .automations
+            .first()
+            .cloned()
+            .expect("automation exists");
+        let error = execute_automation(
+            &automation,
+            runtime.clone(),
+            AttributeValue::Object(HashMap::new()),
+            None,
+            Duration::from_millis(50),
+        )
+        .expect_err("slow Lua execution should time out");
+
+        assert!(error.to_string().contains("automation execution timed out"));
+        assert_eq!(
+            runtime
+                .registry()
+                .get(&DeviceId("test:device".to_string()))
+                .expect("target device exists")
+                .attributes
+                .get("brightness"),
+            Some(&AttributeValue::Integer(0))
+        );
     }
 }
