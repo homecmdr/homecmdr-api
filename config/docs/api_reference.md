@@ -6,6 +6,10 @@ Base URL by default:
 
 - `http://127.0.0.1:3000`
 
+This comes from `api.bind_address` in `config/default.toml`.
+
+Replace `127.0.0.1:3000` in the examples below if you changed `api.bind_address`.
+
 ## Conventions
 
 - request and response bodies are JSON unless stated otherwise

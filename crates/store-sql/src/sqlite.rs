@@ -8,8 +8,8 @@ use smart_home_core::model::{
     AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
 };
 use smart_home_core::store::{
-    AttributeHistoryEntry, AutomationExecutionHistoryEntry, AutomationRuntimeState, CommandAuditEntry,
-    DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
+    AttributeHistoryEntry, AutomationExecutionHistoryEntry, AutomationRuntimeState,
+    CommandAuditEntry, DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -204,9 +204,9 @@ impl SqliteDeviceStore {
             .context("failed to read SQLite schema version")?
             .map(|row| row.get::<String, _>("value"))
             .map(|value| {
-                value.parse::<i64>().with_context(|| {
-                    format!("invalid SQLite schema version value '{value}'")
-                })
+                value
+                    .parse::<i64>()
+                    .with_context(|| format!("invalid SQLite schema version value '{value}'"))
             })
             .transpose()?
             .unwrap_or(0);
@@ -336,7 +336,11 @@ impl SqliteDeviceStore {
         .transpose()
     }
 
-    async fn persist_history_if_needed(&self, device: &Device, previous: Option<&Device>) -> Result<()> {
+    async fn persist_history_if_needed(
+        &self,
+        device: &Device,
+        previous: Option<&Device>,
+    ) -> Result<()> {
         if !self.history.enabled {
             return Ok(());
         }
@@ -453,7 +457,9 @@ impl SqliteDeviceStore {
     }
 
     fn should_record_scene_execution(&self, entry: &SceneExecutionHistoryEntry) -> bool {
-        if self.history.selection.adapter_names.is_empty() && self.history.selection.capabilities.is_empty() {
+        if self.history.selection.adapter_names.is_empty()
+            && self.history.selection.capabilities.is_empty()
+        {
             return true;
         }
 
@@ -467,7 +473,9 @@ impl SqliteDeviceStore {
             return false;
         }
 
-        if self.history.selection.capabilities.is_empty() && self.history.selection.adapter_names.is_empty() {
+        if self.history.selection.capabilities.is_empty()
+            && self.history.selection.adapter_names.is_empty()
+        {
             return true;
         }
 
@@ -478,7 +486,12 @@ impl SqliteDeviceStore {
 
     fn selection_allows_device(&self, device_id: &str, adapter_name: &str) -> bool {
         let device_match = self.history.selection.device_ids.is_empty()
-            || self.history.selection.device_ids.iter().any(|candidate| candidate == device_id);
+            || self
+                .history
+                .selection
+                .device_ids
+                .iter()
+                .any(|candidate| candidate == device_id);
         let adapter_match = self.history.selection.adapter_names.is_empty()
             || self
                 .history
@@ -510,9 +523,13 @@ impl SqliteDeviceStore {
         let attribute = fields.get("attribute").and_then(attribute_text);
 
         let device_match = match device_id {
-            Some(device_id) => self.selection_allows_device(device_id, device_adapter_name(device_id)),
-            None => self.history.selection.device_ids.is_empty()
-                && self.history.selection.adapter_names.is_empty(),
+            Some(device_id) => {
+                self.selection_allows_device(device_id, device_adapter_name(device_id))
+            }
+            None => {
+                self.history.selection.device_ids.is_empty()
+                    && self.history.selection.adapter_names.is_empty()
+            }
         };
         let capability_match = match attribute {
             Some(attribute) => self.selection_allows_capability(attribute),
@@ -586,7 +603,8 @@ impl DeviceStore for SqliteDeviceStore {
         .await
         .with_context(|| format!("failed to save device '{}' to SQLite", device.id.0))?;
 
-        self.persist_history_if_needed(device, previous.as_ref()).await?;
+        self.persist_history_if_needed(device, previous.as_ref())
+            .await?;
 
         Ok(())
     }
@@ -773,7 +791,12 @@ impl DeviceStore for SqliteDeviceStore {
         .bind(results_json)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("failed to save scene execution history for '{}'", entry.scene_id))?;
+        .with_context(|| {
+            format!(
+                "failed to save scene execution history for '{}'",
+                entry.scene_id
+            )
+        })?;
 
         Ok(())
     }
@@ -807,7 +830,10 @@ impl DeviceStore for SqliteDeviceStore {
         rows.into_iter().map(scene_history_from_row).collect()
     }
 
-    async fn save_automation_execution(&self, entry: &AutomationExecutionHistoryEntry) -> Result<()> {
+    async fn save_automation_execution(
+        &self,
+        entry: &AutomationExecutionHistoryEntry,
+    ) -> Result<()> {
         if !self.history.enabled || !self.should_record_automation_execution(entry) {
             return Ok(());
         }
@@ -910,7 +936,12 @@ impl DeviceStore for SqliteDeviceStore {
         .bind(state.last_scheduled_at.map(|value| value.to_rfc3339()))
         .execute(&self.pool)
         .await
-        .with_context(|| format!("failed to save automation runtime state for '{}'", state.automation_id))?;
+        .with_context(|| {
+            format!(
+                "failed to save automation runtime state for '{}'",
+                state.automation_id
+            )
+        })?;
 
         Ok(())
     }
@@ -1120,7 +1151,10 @@ fn attribute_text(value: &AttributeValue) -> Option<&str> {
 }
 
 fn device_adapter_name(device_id: &str) -> &str {
-    device_id.split_once(':').map(|(adapter, _)| adapter).unwrap_or(device_id)
+    device_id
+        .split_once(':')
+        .map(|(adapter, _)| adapter)
+        .unwrap_or(device_id)
 }
 
 #[cfg(test)]
@@ -1304,9 +1338,15 @@ mod tests {
         let device = sample_device("test:one", 20.0);
         store.save_device(&device).await.expect("save succeeds");
 
-        store.delete_room(&room.id).await.expect("delete room succeeds");
+        store
+            .delete_room(&room.id)
+            .await
+            .expect("delete room succeeds");
 
-        let devices = store.load_all_devices().await.expect("load devices succeeds");
+        let devices = store
+            .load_all_devices()
+            .await
+            .expect("load devices succeeds");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].room_id, None);
     }
@@ -1326,8 +1366,14 @@ mod tests {
         let first = sample_device_with_timestamp("test:one", 20.0, first_at);
         let second = sample_device_with_timestamp("test:one", 21.5, second_at);
 
-        store.save_device(&first).await.expect("first save succeeds");
-        store.save_device(&second).await.expect("second save succeeds");
+        store
+            .save_device(&first)
+            .await
+            .expect("first save succeeds");
+        store
+            .save_device(&second)
+            .await
+            .expect("second save succeeds");
 
         let device_history = store
             .load_device_history(&first.id, None, None, 10)
@@ -1344,7 +1390,10 @@ mod tests {
             .expect("attribute history loads");
         assert_eq!(attribute_history.len(), 2);
         assert_eq!(attribute_history[0].observed_at, second_at);
-        assert_eq!(attribute_history[0].value, second.attributes[TEMPERATURE_OUTDOOR]);
+        assert_eq!(
+            attribute_history[0].value,
+            second.attributes[TEMPERATURE_OUTDOOR]
+        );
         assert_eq!(attribute_history[1].observed_at, first_at);
     }
 
@@ -1363,7 +1412,10 @@ mod tests {
         let mut seen_again = first.clone();
         seen_again.last_seen = Utc::now();
 
-        store.save_device(&first).await.expect("first save succeeds");
+        store
+            .save_device(&first)
+            .await
+            .expect("first save succeeds");
         store
             .save_device(&seen_again)
             .await
@@ -1398,15 +1450,15 @@ mod tests {
             .await
             .expect("save room succeeds");
 
-        let old = sample_device_with_timestamp(
-            "test:one",
-            20.0,
-            Utc::now() - ChronoDuration::minutes(5),
-        );
+        let old =
+            sample_device_with_timestamp("test:one", 20.0, Utc::now() - ChronoDuration::minutes(5));
         let fresh = sample_device_with_timestamp("test:one", 21.0, Utc::now());
 
         store.save_device(&old).await.expect("old save succeeds");
-        store.save_device(&fresh).await.expect("fresh save succeeds");
+        store
+            .save_device(&fresh)
+            .await
+            .expect("fresh save succeeds");
 
         let device_history = store
             .load_device_history(&fresh.id, None, None, 10)
@@ -1555,8 +1607,14 @@ mod tests {
         let allowed = sample_device_with_timestamp("test:allowed", 20.0, Utc::now());
         let blocked = sample_device_with_timestamp("test:blocked", 21.0, Utc::now());
 
-        store.save_device(&allowed).await.expect("allowed save succeeds");
-        store.save_device(&blocked).await.expect("blocked save succeeds");
+        store
+            .save_device(&allowed)
+            .await
+            .expect("allowed save succeeds");
+        store
+            .save_device(&blocked)
+            .await
+            .expect("blocked save succeeds");
 
         assert_eq!(
             store

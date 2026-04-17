@@ -1,0 +1,34 @@
+# Zigbee2MQTT Adapter
+
+MQTT-backed adapter for Zigbee2MQTT devices.
+
+## V1 Scope
+
+Supported device classes:
+
+- bulbs with `state`, `brightness`, `color`, `color_mode`, and `color_temp`
+- smart plugs with `state`, `power`, `energy`, `energy_today`, `energy_yesterday`, `energy_month`, `voltage`, and `current`
+
+Supported commands:
+
+- bulbs: `power`, `brightness`, `color_xy`, `color_temperature`
+- plugs: `power`
+
+## Config
+
+```toml
+[adapters.zigbee2mqtt]
+enabled = true
+server = "mqtt://127.0.0.1:1883"
+base_topic = "zigbee2mqtt"
+client_id = "smart-home-zigbee2mqtt"
+keepalive_secs = 30
+command_timeout_secs = 5
+```
+
+Optional credentials:
+
+```toml
+username = "mqtt-user"
+password = "mqtt-password"
+```

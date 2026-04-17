@@ -132,9 +132,9 @@ impl OllamaAdapter {
             "Ollama generate",
         )
         .await?
-            .json::<OllamaGenerateResponse>()
-            .await
-            .context("failed to parse Ollama generate response")
+        .json::<OllamaGenerateResponse>()
+        .await
+        .context("failed to parse Ollama generate response")
     }
 
     async fn chat(&self, payload: ChatPayload) -> Result<OllamaChatResponse> {
@@ -153,9 +153,9 @@ impl OllamaAdapter {
             "Ollama chat",
         )
         .await?
-            .json::<OllamaChatResponse>()
-            .await
-            .context("failed to parse Ollama chat response")
+        .json::<OllamaChatResponse>()
+        .await
+        .context("failed to parse Ollama chat response")
     }
 
     async fn embeddings(&self, payload: EmbeddingsPayload) -> Result<OllamaEmbeddingsResponse> {
@@ -172,9 +172,9 @@ impl OllamaAdapter {
             "Ollama embeddings",
         )
         .await?
-            .json::<OllamaEmbeddingsResponse>()
-            .await
-            .context("failed to parse Ollama embeddings response")
+        .json::<OllamaEmbeddingsResponse>()
+        .await
+        .context("failed to parse Ollama embeddings response")
     }
 
     async fn tags(&self) -> Result<OllamaModelsResponse> {
@@ -183,9 +183,9 @@ impl OllamaAdapter {
             "Ollama tags",
         )
         .await?
-            .json::<OllamaModelsResponse>()
-            .await
-            .context("failed to parse Ollama tags response")
+        .json::<OllamaModelsResponse>()
+        .await
+        .context("failed to parse Ollama tags response")
     }
 
     async fn running_models(&self) -> Result<OllamaModelsResponse> {
@@ -194,9 +194,9 @@ impl OllamaAdapter {
             "Ollama running models",
         )
         .await?
-            .json::<OllamaModelsResponse>()
-            .await
-            .context("failed to parse Ollama running models response")
+        .json::<OllamaModelsResponse>()
+        .await
+        .context("failed to parse Ollama running models response")
     }
 
     async fn show(&self, payload: ShowPayload) -> Result<OllamaShowResponse> {
@@ -210,9 +210,9 @@ impl OllamaAdapter {
             "Ollama show",
         )
         .await?
-            .json::<OllamaShowResponse>()
-            .await
-            .context("failed to parse Ollama show response")
+        .json::<OllamaShowResponse>()
+        .await
+        .context("failed to parse Ollama show response")
     }
 
     async fn version(&self) -> Result<OllamaVersionResponse> {
@@ -221,9 +221,9 @@ impl OllamaAdapter {
             "Ollama version",
         )
         .await?
-            .json::<OllamaVersionResponse>()
-            .await
-            .context("failed to parse Ollama version response")
+        .json::<OllamaVersionResponse>()
+        .await
+        .context("failed to parse Ollama version response")
     }
 
     fn base_url(&self) -> &str {

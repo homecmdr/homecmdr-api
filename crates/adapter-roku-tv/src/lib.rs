@@ -94,7 +94,9 @@ impl RokuTvAdapter {
     }
 
     async fn fetch_active_app(&self) -> Result<Option<RokuActiveApp>> {
-        let body = self.get_text("/query/active-app", "Roku active app").await?;
+        let body = self
+            .get_text("/query/active-app", "Roku active app")
+            .await?;
         Ok(parse_active_app(&body))
     }
 
@@ -124,8 +126,7 @@ impl RokuTvAdapter {
 
     async fn get_text(&self, path: &str, operation: &str) -> Result<String> {
         send_with_retry(
-            self.client
-                .get(format!("{}{}", self.base_url(), path)),
+            self.client.get(format!("{}{}", self.base_url(), path)),
             operation,
         )
         .await?
@@ -179,7 +180,8 @@ impl RokuTvAdapter {
             .await?
             .into_iter()
             .find(|candidate| {
-                candidate.id == app_selector || normalize_token(&candidate.name) == normalized_selector
+                candidate.id == app_selector
+                    || normalize_token(&candidate.name) == normalized_selector
             })
             .with_context(|| format!("Roku app '{app_selector}' was not found"))?;
 
@@ -196,7 +198,11 @@ impl RokuTvAdapter {
             return Ok(false);
         }
 
-        match (command.capability.as_str(), command.action.as_str(), command.value.as_ref()) {
+        match (
+            command.capability.as_str(),
+            command.action.as_str(),
+            command.value.as_ref(),
+        ) {
             (POWER, "on", _) => self.send_keypress("PowerOn").await?,
             (POWER, "off", _) => self.send_keypress("PowerOff").await?,
             (POWER, "toggle", _) => self.send_keypress("Power").await?,
@@ -374,7 +380,10 @@ fn build_device(state: RokuState, previous: Option<&Device>) -> Device {
         vendor_specific.insert("model_name".to_string(), serde_json::json!(model));
     }
     if let Some(active_app) = state.active_app {
-        vendor_specific.insert("active_app_id".to_string(), serde_json::json!(active_app.id));
+        vendor_specific.insert(
+            "active_app_id".to_string(),
+            serde_json::json!(active_app.id),
+        );
         vendor_specific.insert(
             "active_app_is_screensaver".to_string(),
             serde_json::json!(active_app.is_screensaver),
@@ -386,7 +395,10 @@ fn build_device(state: RokuState, previous: Option<&Device>) -> Device {
             serde_json::json!(media_player.state),
         );
         if let Some(plugin_id) = media_player.plugin_id {
-            vendor_specific.insert("media_player_plugin_id".to_string(), serde_json::json!(plugin_id));
+            vendor_specific.insert(
+                "media_player_plugin_id".to_string(),
+                serde_json::json!(plugin_id),
+            );
         }
     }
 
@@ -679,9 +691,7 @@ mod tests {
     }
 
     fn active_app_xml(app_id: &str, name: &str) -> String {
-        format!(
-            "<active-app><app id=\"{app_id}\" version=\"1.0.0\">{name}</app></active-app>"
-        )
+        format!("<active-app><app id=\"{app_id}\" version=\"1.0.0\">{name}</app></active-app>")
     }
 
     fn screensaver_xml(app_id: &str, name: &str) -> String {

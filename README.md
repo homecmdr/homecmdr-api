@@ -167,13 +167,15 @@ From the workspace root:
 cargo run -p api -- --config config/default.toml
 ```
 
-The API binds to `127.0.0.1:3000`.
+The API binds to `api.bind_address` from `config/default.toml` by default. The shipped default is `127.0.0.1:3000`.
 
 See full endpoint details in:
 
 - `config/docs/api_reference.md`
 
 ## Typical API Tasks
+
+Replace `127.0.0.1:3000` in the examples below if you changed `api.bind_address`.
 
 ### Get all devices
 

@@ -3,9 +3,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::extract::Query;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
 use axum::http::StatusCode;
@@ -22,7 +22,7 @@ use smart_home_automations::{
 };
 use smart_home_core::adapter::{registered_adapter_factories, Adapter};
 use smart_home_core::capability::{
-    CapabilitySchema, CAPABILITY_OWNERSHIP, CapabilityOwnershipPolicy, ALL_CAPABILITIES,
+    CapabilityOwnershipPolicy, CapabilitySchema, ALL_CAPABILITIES, CAPABILITY_OWNERSHIP,
 };
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
@@ -30,8 +30,8 @@ use smart_home_core::event::Event;
 use smart_home_core::model::{DeviceId, Room, RoomId};
 use smart_home_core::runtime::Runtime;
 use smart_home_core::store::{
-    AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry,
-    DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry, SceneStepResult,
+    AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry, DeviceHistoryEntry,
+    DeviceStore, SceneExecutionHistoryEntry, SceneStepResult,
 };
 use smart_home_scenes::{SceneCatalog, SceneExecutionResult, SceneSummary};
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
@@ -382,10 +382,13 @@ impl HealthState {
             .entry(adapter.to_string())
             .or_insert_with(|| AdapterHealth::starting("adapter not started"));
         status.current.set_error(message.clone());
-        status.last_error = status.current.last_updated.map(|observed_at| AdapterErrorSnapshot {
-            message,
-            observed_at,
-        });
+        status.last_error = status
+            .current
+            .last_updated
+            .map(|observed_at| AdapterErrorSnapshot {
+                message,
+                observed_at,
+            });
     }
 
     fn runtime_error(&self, message: impl Into<String>) {
@@ -450,13 +453,16 @@ impl HealthState {
 
     fn adapter_detail(&self, adapter: &str) -> Option<AdapterDetailResponse> {
         let snapshot = self.read();
-        snapshot.adapters.get(adapter).map(|status| AdapterDetailResponse {
-            name: adapter.to_string(),
-            runtime_status: status.current.status.clone(),
-            health: status.current.clone(),
-            last_success: status.last_success,
-            last_error: status.last_error.clone(),
-        })
+        snapshot
+            .adapters
+            .get(adapter)
+            .map(|status| AdapterDetailResponse {
+                name: adapter.to_string(),
+                runtime_status: status.current.status.clone(),
+                health: status.current.clone(),
+                last_success: status.last_success,
+                last_error: status.last_error.clone(),
+            })
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HealthSnapshot> {
@@ -494,10 +500,7 @@ impl HistorySettings {
         if limit > self.max_limit {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "history query limit must be <= {}",
-                    self.max_limit
-                ),
+                format!("history query limit must be <= {}", self.max_limit),
             ));
         }
 
@@ -593,13 +596,15 @@ async fn main() -> Result<()> {
             .context("failed to restore persisted devices into registry")?;
     }
 
-    let automation_observer = device_store.clone().and_then(|store| {
-        if config.persistence.history.enabled {
-            Some(Arc::new(StoreAutomationObserver { store }) as Arc<dyn AutomationExecutionObserver>)
-        } else {
-            None
-        }
-    });
+    let automation_observer =
+        device_store.clone().and_then(|store| {
+            if config.persistence.history.enabled {
+                Some(Arc::new(StoreAutomationObserver { store })
+                    as Arc<dyn AutomationExecutionObserver>)
+            } else {
+                None
+            }
+        });
     let trigger_context = trigger_context_from_config(&config);
     let automation_runner = if let Some(observer) = automation_observer.clone() {
         let runner = AutomationRunner::new((*automations).clone())
@@ -611,8 +616,8 @@ async fn main() -> Result<()> {
             runner
         }
     } else {
-        let runner = AutomationRunner::new((*automations).clone())
-            .with_trigger_context(trigger_context);
+        let runner =
+            AutomationRunner::new((*automations).clone()).with_trigger_context(trigger_context);
         if let Some(store) = device_store.clone() {
             runner.with_state_store(store)
         } else {
@@ -621,21 +626,19 @@ async fn main() -> Result<()> {
     };
     let automation_control = Arc::new(automation_runner.controller());
 
-    let app = app(
-        AppState {
-            runtime: runtime.clone(),
-            scenes,
-            automations: automations.clone(),
-            automation_control: automation_control.clone(),
-            trigger_context,
-            health: health.clone(),
-            store: device_store.clone(),
-            history: HistorySettings::from_config(&config),
-        },
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let app = app(AppState {
+        runtime: runtime.clone(),
+        scenes,
+        automations: automations.clone(),
+        automation_control: automation_control.clone(),
+        trigger_context,
+        health: health.clone(),
+        store: device_store.clone(),
+        history: HistorySettings::from_config(&config),
+    });
+    let listener = tokio::net::TcpListener::bind(&config.api.bind_address)
         .await
-        .context("failed to bind API listener")?;
+        .with_context(|| format!("failed to bind API listener on {}", config.api.bind_address))?;
 
     let (persistence_shutdown_tx, persistence_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut persistence_shutdown_tx = Some(persistence_shutdown_tx);
@@ -867,7 +870,10 @@ async fn run_persistence_worker(
         match event {
             Ok(Event::DeviceAdded { device }) => {
                 if let Err(error) = store.save_device(&device).await {
-                    health.persistence_error(format!("failed to persist added device '{}': {error}", device.id.0));
+                    health.persistence_error(format!(
+                        "failed to persist added device '{}': {error}",
+                        device.id.0
+                    ));
                     tracing::error!(device_id = %device.id.0, error = %error, "failed to persist added device");
                 } else {
                     health.persistence_ok();
@@ -876,7 +882,10 @@ async fn run_persistence_worker(
             Ok(Event::DeviceRoomChanged { id, .. }) => {
                 if let Some(device) = runtime.registry().get(&id) {
                     if let Err(error) = store.save_device(&device).await {
-                        health.persistence_error(format!("failed to persist room change for '{}': {error}", id.0));
+                        health.persistence_error(format!(
+                            "failed to persist room change for '{}': {error}",
+                            id.0
+                        ));
                         tracing::error!(device_id = %id.0, error = %error, "failed to persist device room change");
                     } else {
                         health.persistence_ok();
@@ -886,7 +895,10 @@ async fn run_persistence_worker(
             Ok(Event::DeviceStateChanged { id, .. }) => {
                 if let Some(device) = runtime.registry().get(&id) {
                     if let Err(error) = store.save_device(&device).await {
-                        health.persistence_error(format!("failed to persist state change for '{}': {error}", id.0));
+                        health.persistence_error(format!(
+                            "failed to persist state change for '{}': {error}",
+                            id.0
+                        ));
                         tracing::error!(device_id = %id.0, error = %error, "failed to persist device state change");
                     } else {
                         health.persistence_ok();
@@ -897,7 +909,10 @@ async fn run_persistence_worker(
             }
             Ok(Event::DeviceRemoved { id }) => {
                 if let Err(error) = store.delete_device(&id).await {
-                    health.persistence_error(format!("failed to delete persisted device '{}': {error}", id.0));
+                    health.persistence_error(format!(
+                        "failed to delete persisted device '{}': {error}",
+                        id.0
+                    ));
                     tracing::error!(device_id = %id.0, error = %error, "failed to delete persisted device");
                 } else {
                     health.persistence_ok();
@@ -906,7 +921,10 @@ async fn run_persistence_worker(
             Ok(Event::DeviceSeen { id, .. }) => {
                 if let Some(device) = runtime.registry().get(&id) {
                     if let Err(error) = store.save_device(&device).await {
-                        health.persistence_error(format!("failed to persist last_seen for '{}': {error}", id.0));
+                        health.persistence_error(format!(
+                            "failed to persist last_seen for '{}': {error}",
+                            id.0
+                        ));
                         tracing::error!(device_id = %id.0, error = %error, "failed to persist device last_seen update");
                     } else {
                         health.persistence_ok();
@@ -915,7 +933,10 @@ async fn run_persistence_worker(
             }
             Ok(Event::RoomAdded { room } | Event::RoomUpdated { room }) => {
                 if let Err(error) = store.save_room(&room).await {
-                    health.persistence_error(format!("failed to persist room '{}': {error}", room.id.0));
+                    health.persistence_error(format!(
+                        "failed to persist room '{}': {error}",
+                        room.id.0
+                    ));
                     tracing::error!(room_id = %room.id.0, error = %error, "failed to persist room");
                 } else {
                     health.persistence_ok();
@@ -1059,7 +1080,10 @@ fn app(state: AppState) -> Router {
         .route("/automations/{id}", get(get_automation))
         .route("/automations/{id}/enabled", post(set_automation_enabled))
         .route("/automations/{id}/validate", post(validate_automation))
-        .route("/automations/{id}/execute", post(execute_automation_manually))
+        .route(
+            "/automations/{id}/execute",
+            post(execute_automation_manually),
+        )
         .route("/scenes/{id}/history", get(get_scene_history))
         .route("/scenes/{id}/execute", post(execute_scene))
         .route("/automations/{id}/history", get(get_automation_history))
@@ -1245,7 +1269,12 @@ async fn execute_automation_manually(
 
     let execution = state
         .automation_control
-        .execute(&id, state.runtime.clone(), trigger_payload, state.trigger_context)
+        .execute(
+            &id,
+            state.runtime.clone(),
+            trigger_payload,
+            state.trigger_context,
+        )
         .map_err(|error| {
             if error.to_string().contains("not found") {
                 ApiError::not_found(error.to_string())
@@ -1525,7 +1554,11 @@ async fn command_device(
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
 
     let command_to_run = command.clone();
-    match state.runtime.command_device(&device_id, command_to_run).await {
+    match state
+        .runtime
+        .command_device(&device_id, command_to_run)
+        .await
+    {
         Ok(true) => {
             persist_command_audit(
                 &state,
@@ -1680,10 +1713,7 @@ async fn events(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl Int
 
 fn history_store(state: &AppState) -> Result<Arc<dyn DeviceStore>, ApiError> {
     if !state.history.enabled {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "history is disabled",
-        ));
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "history is disabled"));
     }
 
     state.store.clone().ok_or_else(|| {
@@ -1707,7 +1737,11 @@ fn ensure_history_query_range(query: &HistoryQuery) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn ensure_device_exists(state: &AppState, device_id: &DeviceId, raw_id: &str) -> Result<(), ApiError> {
+fn ensure_device_exists(
+    state: &AppState,
+    device_id: &DeviceId,
+    raw_id: &str,
+) -> Result<(), ApiError> {
     if state.runtime.registry().get(device_id).is_none() {
         return Err(ApiError::not_found(format!("device '{raw_id}' not found")));
     }
@@ -2151,7 +2185,11 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|entry| start.map(|value| entry.observed_at >= value).unwrap_or(true))
+                .filter(|entry| {
+                    start
+                        .map(|value| entry.observed_at >= value)
+                        .unwrap_or(true)
+                })
                 .filter(|entry| end.map(|value| entry.observed_at <= value).unwrap_or(true))
                 .rev()
                 .take(limit)
@@ -2175,7 +2213,11 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|entry| start.map(|value| entry.observed_at >= value).unwrap_or(true))
+                .filter(|entry| {
+                    start
+                        .map(|value| entry.observed_at >= value)
+                        .unwrap_or(true)
+                })
                 .filter(|entry| end.map(|value| entry.observed_at <= value).unwrap_or(true))
                 .rev()
                 .take(limit)
@@ -2209,7 +2251,11 @@ mod tests {
                         .map(|value| &entry.device_id == value)
                         .unwrap_or(true)
                 })
-                .filter(|entry| start.map(|value| entry.recorded_at >= value).unwrap_or(true))
+                .filter(|entry| {
+                    start
+                        .map(|value| entry.recorded_at >= value)
+                        .unwrap_or(true)
+                })
                 .filter(|entry| end.map(|value| entry.recorded_at <= value).unwrap_or(true))
                 .collect::<Vec<_>>();
             entries.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at));
@@ -2245,7 +2291,11 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|entry| start.map(|value| entry.executed_at >= value).unwrap_or(true))
+                .filter(|entry| {
+                    start
+                        .map(|value| entry.executed_at >= value)
+                        .unwrap_or(true)
+                })
                 .filter(|entry| end.map(|value| entry.executed_at <= value).unwrap_or(true))
                 .collect::<Vec<_>>();
             entries.sort_by(|a, b| b.executed_at.cmp(&a.executed_at));
@@ -2281,7 +2331,11 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|entry| start.map(|value| entry.executed_at >= value).unwrap_or(true))
+                .filter(|entry| {
+                    start
+                        .map(|value| entry.executed_at >= value)
+                        .unwrap_or(true)
+                })
                 .filter(|entry| end.map(|value| entry.executed_at <= value).unwrap_or(true))
                 .collect::<Vec<_>>();
             entries.sort_by(|a, b| b.executed_at.cmp(&a.executed_at));
@@ -2511,7 +2565,10 @@ mod tests {
 
     fn test_health(adapter_names: &[&str]) -> HealthState {
         let health = HealthState::new(
-            &adapter_names.iter().map(|name| (*name).to_string()).collect::<Vec<_>>(),
+            &adapter_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>(),
             false,
             false,
         );
@@ -2572,7 +2629,9 @@ mod tests {
             runtime,
             scenes: empty_scenes(),
             automations: automations.clone(),
-            automation_control: Arc::new(AutomationRunner::new((*automations).clone()).controller()),
+            automation_control: Arc::new(
+                AutomationRunner::new((*automations).clone()).controller(),
+            ),
             trigger_context: TriggerContext::default(),
             health: test_health(&["open_meteo"]),
             store: None,
@@ -2605,7 +2664,9 @@ mod tests {
             runtime,
             scenes,
             automations: automations.clone(),
-            automation_control: Arc::new(AutomationRunner::new((*automations).clone()).controller()),
+            automation_control: Arc::new(
+                AutomationRunner::new((*automations).clone()).controller(),
+            ),
             trigger_context: TriggerContext::default(),
             health: test_health(&["open_meteo"]),
             store: None,
@@ -2639,7 +2700,9 @@ mod tests {
             runtime,
             scenes: empty_scenes(),
             automations: automations.clone(),
-            automation_control: Arc::new(AutomationRunner::new((*automations).clone()).controller()),
+            automation_control: Arc::new(
+                AutomationRunner::new((*automations).clone()).controller(),
+            ),
             trigger_context: TriggerContext::default(),
             health: test_health(&["open_meteo"]),
             store: Some(store),
@@ -3004,9 +3067,8 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes = Arc::new(
-            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
-        );
+        let scenes =
+            Arc::new(SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"));
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime, scenes).await;
 
         let response = reqwest::get(format!("http://{addr}/scenes"))
@@ -3048,7 +3110,8 @@ mod tests {
             }"#,
         )]);
         let automations = Arc::new(
-            AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
+            AutomationCatalog::load_from_directory(&automation_dir, None)
+                .expect("automations load"),
         );
         let automation_control =
             Arc::new(AutomationRunner::new((*automations).clone()).controller());
@@ -3081,7 +3144,10 @@ mod tests {
             .expect("automations request succeeds");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response.json::<Value>().await.expect("automations json body");
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("automations json body");
         assert_eq!(body.as_array().expect("automations array").len(), 1);
         assert_eq!(body[0]["id"], "rain_check");
         assert_eq!(body[0]["trigger_type"], "device_state_change");
@@ -3135,7 +3201,8 @@ mod tests {
             }"#,
         )]);
         let automations = Arc::new(
-            AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
+            AutomationCatalog::load_from_directory(&automation_dir, None)
+                .expect("automations load"),
         );
         let observer = Arc::new(RecordingAutomationObserver::default())
             as Arc<dyn AutomationExecutionObserver>;
@@ -3237,10 +3304,7 @@ mod tests {
             .await
             .expect("manual execute request succeeds");
         assert_eq!(execute.status(), StatusCode::OK);
-        let execute_body = execute
-            .json::<Value>()
-            .await
-            .expect("execute json body");
+        let execute_body = execute.json::<Value>().await.expect("execute json body");
         assert_eq!(execute_body["status"], "skipped");
         assert_eq!(
             runtime
@@ -3274,10 +3338,7 @@ mod tests {
             .await
             .expect("manual execute request succeeds");
         assert_eq!(execute.status(), StatusCode::OK);
-        let execute_body = execute
-            .json::<Value>()
-            .await
-            .expect("execute json body");
+        let execute_body = execute.json::<Value>().await.expect("execute json body");
         assert_eq!(execute_body["status"], "ok");
         assert_eq!(execute_body["results"][0]["target"], "test:device");
 
@@ -3455,10 +3516,16 @@ mod tests {
             .expect("adapter detail request succeeds");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response.json::<Value>().await.expect("adapter detail json body");
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("adapter detail json body");
         assert_eq!(body["name"], "open_meteo");
         assert_eq!(body["runtime_status"], "error");
-        assert_eq!(body["last_error"]["message"], "open_meteo poll failed: timeout");
+        assert_eq!(
+            body["last_error"]["message"],
+            "open_meteo poll failed: timeout"
+        );
 
         let _ = shutdown_tx.send(());
         handle.await.expect("server task completes");
@@ -3496,9 +3563,8 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes = Arc::new(
-            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
-        );
+        let scenes =
+            Arc::new(SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"));
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime.clone(), scenes).await;
 
         let response = reqwest::Client::new()
@@ -3592,8 +3658,14 @@ mod tests {
             TEMPERATURE_OUTDOOR.to_string(),
             measurement_value(21.5, "celsius"),
         );
-        store.save_device(&first).await.expect("first save succeeds");
-        store.save_device(&second).await.expect("second save succeeds");
+        store
+            .save_device(&first)
+            .await
+            .expect("first save succeeds");
+        store
+            .save_device(&second)
+            .await
+            .expect("second save succeeds");
 
         let runtime = Arc::new(Runtime::new(
             Vec::new(),
@@ -3610,8 +3682,7 @@ mod tests {
             .restore(vec![second.clone()])
             .expect("restore succeeds");
 
-        let (addr, shutdown, handle) =
-            spawn_test_server_with_store(runtime, store, true).await;
+        let (addr, shutdown, handle) = spawn_test_server_with_store(runtime, store, true).await;
 
         let response = reqwest::get(format!(
             "http://{addr}/devices/test:history/history?limit=1"
@@ -3623,7 +3694,10 @@ mod tests {
         let body = response.json::<Value>().await.expect("history json body");
         assert_eq!(body["device_id"], "test:history");
         assert_eq!(body["entries"].as_array().expect("entries array").len(), 1);
-        assert_eq!(body["entries"][0]["device"]["attributes"][TEMPERATURE_OUTDOOR]["value"], 21.5);
+        assert_eq!(
+            body["entries"][0]["device"]["attributes"][TEMPERATURE_OUTDOOR]["value"],
+            21.5
+        );
 
         let _ = shutdown.send(());
         handle.await.expect("server task completes");
@@ -3661,8 +3735,14 @@ mod tests {
             TEMPERATURE_OUTDOOR.to_string(),
             measurement_value(22.0, "celsius"),
         );
-        store.save_device(&first).await.expect("first save succeeds");
-        store.save_device(&second).await.expect("second save succeeds");
+        store
+            .save_device(&first)
+            .await
+            .expect("first save succeeds");
+        store
+            .save_device(&second)
+            .await
+            .expect("second save succeeds");
 
         let runtime = Arc::new(Runtime::new(
             Vec::new(),
@@ -3675,8 +3755,7 @@ mod tests {
             .restore(vec![second.clone()])
             .expect("restore succeeds");
 
-        let (addr, shutdown, handle) =
-            spawn_test_server_with_store(runtime, store, true).await;
+        let (addr, shutdown, handle) = spawn_test_server_with_store(runtime, store, true).await;
 
         let response = reqwest::Client::new()
             .get(format!(
@@ -3771,7 +3850,10 @@ mod tests {
             .await
             .expect("command audit request succeeds");
         assert_eq!(audit.status(), StatusCode::OK);
-        let body = audit.json::<Value>().await.expect("command audit json body");
+        let body = audit
+            .json::<Value>()
+            .await
+            .expect("command audit json body");
         assert_eq!(body["entries"].as_array().expect("entries array").len(), 1);
         assert_eq!(body["entries"][0]["device_id"], "test:device");
         assert_eq!(body["entries"][0]["status"], "ok");
@@ -3826,9 +3908,8 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes = Arc::new(
-            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
-        );
+        let scenes =
+            Arc::new(SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"));
 
         let app = app(AppState {
             runtime: runtime.clone(),
@@ -3882,7 +3963,10 @@ mod tests {
             .await
             .expect("scene history request succeeds");
         assert_eq!(history.status(), StatusCode::OK);
-        let body = history.json::<Value>().await.expect("scene history json body");
+        let body = history
+            .json::<Value>()
+            .await
+            .expect("scene history json body");
         assert_eq!(body["scene_id"], "set_brightness");
         assert_eq!(body["entries"].as_array().expect("entries array").len(), 1);
         assert_eq!(body["entries"][0]["status"], "ok");
@@ -3930,7 +4014,8 @@ mod tests {
             }"#,
         )]);
         let automations = Arc::new(
-            AutomationCatalog::load_from_directory(&automation_dir, None).expect("automations load"),
+            AutomationCatalog::load_from_directory(&automation_dir, None)
+                .expect("automations load"),
         );
 
         let runtime = Arc::new(Runtime::new(
@@ -3958,8 +4043,9 @@ mod tests {
             .await
             .expect("target exists");
 
-        let observer = Arc::new(StoreAutomationObserver { store: store.clone() })
-            as Arc<dyn AutomationExecutionObserver>;
+        let observer = Arc::new(StoreAutomationObserver {
+            store: store.clone(),
+        }) as Arc<dyn AutomationExecutionObserver>;
         let runner = AutomationRunner::new((*automations).clone()).with_observer(observer);
         let runtime_for_runner = runtime.clone();
         let automation_task = tokio::spawn(async move {
@@ -4470,7 +4556,10 @@ mod tests {
         let _ = shutdown_tx.send(());
         let _ = persistence_task.await;
 
-        assert_eq!(store.load_all_rooms().await.expect("rooms load"), vec![room]);
+        assert_eq!(
+            store.load_all_rooms().await.expect("rooms load"),
+            vec![room]
+        );
         assert_eq!(
             store.load_all_devices().await.expect("devices load"),
             vec![device]
@@ -4531,12 +4620,7 @@ mod tests {
 
         timeout(Duration::from_secs(2), async {
             loop {
-                if store
-                    .load_all_devices()
-                    .await
-                    .expect("load succeeds")
-                    == vec![latest.clone()]
-                {
+                if store.load_all_devices().await.expect("load succeeds") == vec![latest.clone()] {
                     break;
                 }
 
@@ -4655,7 +4739,7 @@ mod tests {
     #[test]
     fn build_adapters_rejects_unknown_adapter_config() {
         let config = test_config(serde_json::Map::from_iter([(
-            "zigbee2mqtt".to_string(),
+            "made_up_adapter".to_string(),
             serde_json::json!({
                 "enabled": true,
                 "base_url": "http://localhost:8080"
@@ -4668,7 +4752,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "no adapter factory registered for 'zigbee2mqtt'"
+            "no adapter factory registered for 'made_up_adapter'"
         );
     }
 }

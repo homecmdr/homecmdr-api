@@ -136,7 +136,11 @@ impl UserData for LuaExecutionContext {
         });
 
         methods.add_method("get_room", |lua, this, room_id: String| {
-            let Some(room) = this.runtime.registry().get_room(&smart_home_core::model::RoomId(room_id)) else {
+            let Some(room) = this
+                .runtime
+                .registry()
+                .get_room(&smart_home_core::model::RoomId(room_id))
+            else {
                 return Ok(Value::Nil);
             };
 
@@ -196,10 +200,7 @@ impl UserData for LuaExecutionContext {
 
 fn device_to_attribute_value(device: &Device) -> AttributeValue {
     AttributeValue::Object(HashMap::from([
-        (
-            "id".to_string(),
-            AttributeValue::Text(device.id.0.clone()),
-        ),
+        ("id".to_string(), AttributeValue::Text(device.id.0.clone())),
         (
             "room_id".to_string(),
             match &device.room_id {
@@ -278,12 +279,9 @@ fn json_value_to_attribute_value(value: &serde_json::Value) -> AttributeValue {
             }
         }
         serde_json::Value::String(value) => AttributeValue::Text(value.clone()),
-        serde_json::Value::Array(values) => AttributeValue::Array(
-            values
-                .iter()
-                .map(json_value_to_attribute_value)
-                .collect(),
-        ),
+        serde_json::Value::Array(values) => {
+            AttributeValue::Array(values.iter().map(json_value_to_attribute_value).collect())
+        }
         serde_json::Value::Object(fields) => AttributeValue::Object(
             fields
                 .iter()
@@ -528,7 +526,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use smart_home_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId};
+    use smart_home_core::model::{
+        AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
+    };
     use smart_home_core::runtime::{Runtime, RuntimeConfig};
 
     fn temp_dir() -> PathBuf {

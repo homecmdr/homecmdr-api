@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+adapter-zigbee2mqtt = { path = "../adapter-zigbee2mqtt" }
 adapter-elgato-lights = { path = "../adapter-elgato-lights" }
 adapter-ollama = { path = "../adapter-ollama" }
 adapter-open-meteo = { path = "../adapter-open-meteo" }

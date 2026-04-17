@@ -101,7 +101,9 @@ mod tests {
 
     impl MockServer {
         async fn start(responses: Vec<MockResponse>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock server");
             let addr = listener.local_addr().expect("get mock server address");
             let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
             let request_count = Arc::new(Mutex::new(0_usize));

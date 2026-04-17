@@ -1,6 +1,9 @@
 [runtime]
 event_bus_capacity = 1024
 
+[api]
+bind_address = "127.0.0.1:3001"
+
 [locale]
 timezone = "UTC"
 
@@ -51,11 +54,19 @@ base_url = "http://127.0.0.1:9123"
 poll_interval_secs = 30
 
 [adapters.roku_tv]
-enabled = false
+enabled = true
 ip_address = "192.168.1.114"
 poll_interval_secs = 30
 
 [adapters.ollama]
-enabled = false
+enabled = true
 base_url = "http://127.0.0.1:11434"
 model = "llava"
+
+[adapters.zigbee2mqtt]
+enabled = true
+server = "mqtt://127.0.0.1:1883"
+base_topic = "zigbee2mqtt"
+client_id = "smart-home-zigbee2mqtt"
+keepalive_secs = 30
+command_timeout_secs = 5

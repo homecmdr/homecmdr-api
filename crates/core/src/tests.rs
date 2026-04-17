@@ -16,19 +16,17 @@ use crate::bus::EventBus;
 use crate::capability::{
     accumulation_value, capability_definition, is_custom_attribute_key, light_capability,
     measurement_value, weather_capability, CapabilitySchema, AIR_QUALITY, AIR_QUALITY_VALUES,
-    AVAILABILITY_VALUES, BATTERY, BRIGHTNESS, CAPABILITY_OWNERSHIP, CLOUD_COVERAGE, CO2,
-    COLOR_HEX, COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB, COLOR_TEMPERATURE,
-    COLOR_XY, CONTACT, CONTACT_VALUES, COVER_POSITION, COVER_TILT, CURRENT, DOOR,
-    EFFECT, ENERGY_MONTH, ENERGY_TODAY, ENERGY_TOTAL, ENERGY_YESTERDAY, ENTRY_STATE_VALUES,
-    FAN_MODE, GARAGE_DOOR,
-    HVAC_MODE, HVAC_MODE_VALUES, HVAC_STATE, HVAC_STATE_VALUES, HUMIDITY, ILLUMINANCE,
-    LED_INDICATION, LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, LOCK, LOCK_VALUES,
-    MEDIA_APP, MEDIA_PLAYBACK, MEDIA_PLAYBACK_VALUES, MEDIA_SOURCE, MEDIA_TITLE, MOTION,
-    MOTION_VALUES, MUTED, OCCUPANCY, OCCUPANCY_VALUES, POWER, POWER_CONSUMPTION,
-    POWER_VALUES,
-    PRESET_MODE, PRESSURE, SENSOR_CAPABILITIES, SMOKE, STATE, SWING_MODE, TARGET_TEMPERATURE,
-    TEMPERATURE, TEMPERATURE_OUTDOOR, TRANSITION, VOLTAGE, WATER_LEAK, WEATHER_CAPABILITIES,
-    WIND_DIRECTION, WIND_SPEED, VOLUME,
+    AVAILABILITY_VALUES, BATTERY, BRIGHTNESS, CAPABILITY_OWNERSHIP, CLOUD_COVERAGE, CO2, COLOR_HEX,
+    COLOR_HS, COLOR_MODE, COLOR_MODE_VALUES, COLOR_RGB, COLOR_TEMPERATURE, COLOR_XY, CONTACT,
+    CONTACT_VALUES, COVER_POSITION, COVER_TILT, CURRENT, DOOR, EFFECT, ENERGY_MONTH, ENERGY_TODAY,
+    ENERGY_TOTAL, ENERGY_YESTERDAY, ENTRY_STATE_VALUES, FAN_MODE, GARAGE_DOOR, HUMIDITY, HVAC_MODE,
+    HVAC_MODE_VALUES, HVAC_STATE, HVAC_STATE_VALUES, ILLUMINANCE, LED_INDICATION,
+    LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, LOCK, LOCK_VALUES, MEDIA_APP, MEDIA_PLAYBACK,
+    MEDIA_PLAYBACK_VALUES, MEDIA_SOURCE, MEDIA_TITLE, MOTION, MOTION_VALUES, MUTED, OCCUPANCY,
+    OCCUPANCY_VALUES, POWER, POWER_CONSUMPTION, POWER_VALUES, PRESET_MODE, PRESSURE,
+    SENSOR_CAPABILITIES, SMOKE, STATE, SWING_MODE, TARGET_TEMPERATURE, TEMPERATURE,
+    TEMPERATURE_OUTDOOR, TRANSITION, VOLTAGE, VOLUME, WATER_LEAK, WEATHER_CAPABILITIES,
+    WIND_DIRECTION, WIND_SPEED,
 };
 use crate::command::DeviceCommand;
 use crate::config::Config;
@@ -139,7 +137,10 @@ fn device_round_trips_through_json() {
         TEMPERATURE_OUTDOOR.to_string(),
         measurement_value(21.5, "celsius"),
     );
-    attributes.insert(STATE.to_string(), AttributeValue::Text("online".to_string()));
+    attributes.insert(
+        STATE.to_string(),
+        AttributeValue::Text("online".to_string()),
+    );
     attributes.insert(
         "custom.open_meteo.label".to_string(),
         AttributeValue::Text("patio".to_string()),
@@ -306,9 +307,9 @@ async fn upserting_existing_device_publishes_state_changed() {
 
     assert_eq!(
         subscriber
-        .recv()
-        .await
-        .expect("device updated event received"),
+            .recv()
+            .await
+            .expect("device updated event received"),
         Event::DeviceStateChanged {
             id: updated.id.clone(),
             attributes: updated.attributes.clone(),
@@ -665,7 +666,10 @@ fn expanded_capabilities_are_discoverable_and_typed() {
         (MEDIA_SOURCE, CapabilitySchema::String),
         (MEDIA_TITLE, CapabilitySchema::String),
         (MEDIA_APP, CapabilitySchema::String),
-        (MEDIA_PLAYBACK, CapabilitySchema::Enum(&MEDIA_PLAYBACK_VALUES)),
+        (
+            MEDIA_PLAYBACK,
+            CapabilitySchema::Enum(&MEDIA_PLAYBACK_VALUES),
+        ),
         (LOCK, CapabilitySchema::Enum(&LOCK_VALUES)),
         (DOOR, CapabilitySchema::Enum(&ENTRY_STATE_VALUES)),
         (COVER_POSITION, CapabilitySchema::Percentage),
@@ -708,7 +712,10 @@ fn capability_domains_and_ownership_policy_are_consistent() {
         "device.attributes.<capability_key>"
     );
     assert_eq!(CAPABILITY_OWNERSHIP.custom_attribute_prefix, "custom.");
-    assert_eq!(CAPABILITY_OWNERSHIP.vendor_metadata_field, "metadata.vendor_specific");
+    assert_eq!(
+        CAPABILITY_OWNERSHIP.vendor_metadata_field,
+        "metadata.vendor_specific"
+    );
     assert_eq!(CAPABILITY_OWNERSHIP.rules.len(), 4);
 }
 
@@ -749,21 +756,48 @@ async fn registry_accepts_expanded_canonical_capabilities() {
             (HUMIDITY.to_string(), measurement_value(48.0, "percent")),
             (PRESSURE.to_string(), measurement_value(1013.2, "hpa")),
             (CO2.to_string(), measurement_value(640.0, "ppm")),
-            (AIR_QUALITY.to_string(), AttributeValue::Text("good".to_string())),
-            (MOTION.to_string(), AttributeValue::Text("clear".to_string())),
-            (CONTACT.to_string(), AttributeValue::Text("closed".to_string())),
-            (OCCUPANCY.to_string(), AttributeValue::Text("occupied".to_string())),
+            (
+                AIR_QUALITY.to_string(),
+                AttributeValue::Text("good".to_string()),
+            ),
+            (
+                MOTION.to_string(),
+                AttributeValue::Text("clear".to_string()),
+            ),
+            (
+                CONTACT.to_string(),
+                AttributeValue::Text("closed".to_string()),
+            ),
+            (
+                OCCUPANCY.to_string(),
+                AttributeValue::Text("occupied".to_string()),
+            ),
             (SMOKE.to_string(), AttributeValue::Bool(false)),
             (WATER_LEAK.to_string(), AttributeValue::Bool(false)),
             (
                 TARGET_TEMPERATURE.to_string(),
                 measurement_value(22.0, "celsius"),
             ),
-            (HVAC_MODE.to_string(), AttributeValue::Text("auto".to_string())),
-            (HVAC_STATE.to_string(), AttributeValue::Text("heating".to_string())),
-            (FAN_MODE.to_string(), AttributeValue::Text("medium".to_string())),
-            (SWING_MODE.to_string(), AttributeValue::Text("vertical".to_string())),
-            (PRESET_MODE.to_string(), AttributeValue::Text("home".to_string())),
+            (
+                HVAC_MODE.to_string(),
+                AttributeValue::Text("auto".to_string()),
+            ),
+            (
+                HVAC_STATE.to_string(),
+                AttributeValue::Text("heating".to_string()),
+            ),
+            (
+                FAN_MODE.to_string(),
+                AttributeValue::Text("medium".to_string()),
+            ),
+            (
+                SWING_MODE.to_string(),
+                AttributeValue::Text("vertical".to_string()),
+            ),
+            (
+                PRESET_MODE.to_string(),
+                AttributeValue::Text("home".to_string()),
+            ),
             (
                 POWER_CONSUMPTION.to_string(),
                 measurement_value(87.5, "watt"),
@@ -796,7 +830,10 @@ async fn registry_accepts_expanded_canonical_capabilities() {
                 MEDIA_TITLE.to_string(),
                 AttributeValue::Text("Nature Documentary".to_string()),
             ),
-            (MEDIA_APP.to_string(), AttributeValue::Text("plex".to_string())),
+            (
+                MEDIA_APP.to_string(),
+                AttributeValue::Text("plex".to_string()),
+            ),
             (
                 MEDIA_PLAYBACK.to_string(),
                 AttributeValue::Text("playing".to_string()),
@@ -873,7 +910,9 @@ fn device_command_rejects_reset_with_value() {
 fn custom_attribute_keys_require_adapter_namespace() {
     assert!(is_custom_attribute_key("custom.open_meteo.label"));
     assert!(is_custom_attribute_key("custom.roku_tv.input_source"));
-    assert!(is_custom_attribute_key("custom.elgato_lights.effect_profile.active"));
+    assert!(is_custom_attribute_key(
+        "custom.elgato_lights.effect_profile.active"
+    ));
 
     assert!(!is_custom_attribute_key("custom"));
     assert!(!is_custom_attribute_key("custom."));
@@ -1121,9 +1160,7 @@ async fn registry_rejects_unknown_non_custom_attribute_keys() {
         .expect_err("unknown plain attribute should fail");
 
     assert!(error.to_string().contains("unknown attribute 'label'"));
-    assert!(error
-        .to_string()
-        .contains("custom.<adapter>.<field>"));
+    assert!(error.to_string().contains("custom.<adapter>.<field>"));
 }
 
 #[test]

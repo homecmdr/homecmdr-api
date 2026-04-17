@@ -399,9 +399,9 @@ fn validate_color_temperature(value: &AttributeValue) -> std::result::Result<(),
     };
 
     match unit {
-        "mireds" if (153..=500).contains(&temp_value) => Ok(()),
+        "mireds" if (153..=556).contains(&temp_value) => Ok(()),
         "kelvin" if (2200..=7000).contains(&temp_value) => Ok(()),
-        "mireds" => Err("color temperature in mireds must be between 153 and 500"),
+        "mireds" => Err("color temperature in mireds must be between 153 and 556"),
         "kelvin" => Err("color temperature in kelvin must be between 2200 and 7000"),
         _ => Err("color temperature requires string 'unit' of 'mireds' or 'kelvin'"),
     }

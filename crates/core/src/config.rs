@@ -11,6 +11,8 @@ use crate::runtime::RuntimeConfig;
 pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub api: ApiConfig,
+    #[serde(default)]
     pub locale: LocaleConfig,
     pub logging: LoggingConfig,
     #[serde(default)]
@@ -33,6 +35,12 @@ pub type AdaptersConfig = HashMap<String, AdapterConfig>;
 #[derive(Debug, Deserialize)]
 pub struct LoggingConfig {
     pub level: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiConfig {
+    #[serde(default = "default_api_bind_address")]
+    pub bind_address: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +100,14 @@ impl Default for LocaleConfig {
     fn default() -> Self {
         Self {
             timezone: default_timezone(),
+        }
+    }
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            bind_address: default_api_bind_address(),
         }
     }
 }
@@ -182,6 +198,10 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.api.bind_address.trim().is_empty() {
+            bail!("api.bind_address is required");
+        }
+
         if self.persistence.enabled
             && self
                 .persistence
@@ -237,6 +257,10 @@ fn default_history_query_limit() -> usize {
 
 fn default_timezone() -> String {
     "UTC".to_string()
+}
+
+fn default_api_bind_address() -> String {
+    "127.0.0.1:3000".to_string()
 }
 
 fn default_history_max_query_limit() -> usize {
