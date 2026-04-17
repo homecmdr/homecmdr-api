@@ -1,0 +1,32 @@
+meta {
+  name: Execute Automation
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/automations/:id/execute
+}
+
+params:path {
+  id: {{automationId}}
+}
+
+headers {
+  content-type: application/json
+}
+
+body {
+  {
+    "trigger_payload": {
+      "type": "manual"
+    }
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

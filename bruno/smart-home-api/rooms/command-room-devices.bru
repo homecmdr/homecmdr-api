@@ -1,0 +1,31 @@
+meta {
+  name: Command Room Devices
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/rooms/:id/command
+}
+
+params:path {
+  id: {{roomId}}
+}
+
+headers {
+  content-type: application/json
+}
+
+body {
+  {
+    "capability": "power",
+    "action": "off"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

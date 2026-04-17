@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::Path;
 use axum::extract::Query;
+use axum::extract::RawQuery;
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
 use axum::http::StatusCode;
@@ -1450,8 +1451,31 @@ async fn list_room_devices(
     ))
 }
 
-async fn list_devices(State(state): State<AppState>) -> Json<Vec<smart_home_core::model::Device>> {
-    Json(state.runtime.registry().list())
+async fn list_devices(
+    State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
+) -> Json<Vec<smart_home_core::model::Device>> {
+    let ids = requested_device_ids(raw_query.as_deref());
+    if ids.is_empty() {
+        return Json(state.runtime.registry().list());
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let devices = ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .filter_map(|id| state.runtime.registry().get(&DeviceId(id)))
+        .collect();
+
+    Json(devices)
+}
+
+fn requested_device_ids(raw_query: Option<&str>) -> Vec<String> {
+    raw_query
+        .into_iter()
+        .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+        .filter_map(|(key, value)| (key == "ids").then(|| value.into_owned()))
+        .collect()
 }
 
 async fn get_device(
@@ -1997,7 +2021,7 @@ mod tests {
     use futures_util::StreamExt;
     use reqwest::StatusCode;
     use serde_json::Value;
-    use smart_home_core::capability::{measurement_value, TEMPERATURE_OUTDOOR};
+    use smart_home_core::capability::{measurement_value, TEMPERATURE_OUTDOOR, WIND_SPEED};
     use smart_home_core::command::DeviceCommand;
     use smart_home_core::config::{Config, HistoryConfig, PersistenceBackend};
     use smart_home_core::model::{
@@ -2512,6 +2536,9 @@ mod tests {
             runtime: RuntimeConfig {
                 event_bus_capacity: 16,
             },
+            api: smart_home_core::config::ApiConfig {
+                bind_address: "127.0.0.1:3001".to_string(),
+            },
             locale: smart_home_core::config::LocaleConfig::default(),
             logging: smart_home_core::config::LoggingConfig {
                 level: "info".to_string(),
@@ -2861,6 +2888,95 @@ mod tests {
         let body = response.json::<Value>().await.expect("devices JSON body");
         assert_eq!(body.as_array().expect("devices array").len(), 1);
         assert_eq!(body[0]["id"], Value::String("test:device".to_string()));
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn devices_endpoint_can_filter_by_multiple_ids_in_request_order() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:first",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(22.0, "celsius"),
+            ))
+            .await
+            .expect("first test device upsert succeeds");
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:second",
+                WIND_SPEED,
+                measurement_value(11.5, "km/h"),
+            ))
+            .await
+            .expect("second test device upsert succeeds");
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+
+        let response = reqwest::get(format!(
+            "http://{addr}/devices?ids=test:second&ids=test:first"
+        ))
+        .await
+        .expect("filtered devices request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("filtered devices JSON body");
+        let ids: Vec<&str> = body
+            .as_array()
+            .expect("filtered devices array")
+            .iter()
+            .filter_map(|device| device["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["test:second", "test:first"]);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn devices_endpoint_ignores_missing_ids_and_deduplicates_matches() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(22.0, "celsius"),
+            ))
+            .await
+            .expect("valid test device upsert succeeds");
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+
+        let response = reqwest::get(format!(
+            "http://{addr}/devices?ids=missing&ids=test:device&ids=test:device"
+        ))
+        .await
+        .expect("filtered devices request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("filtered devices JSON body");
+        let devices = body.as_array().expect("filtered devices array");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["id"], Value::String("test:device".to_string()));
 
         let _ = shutdown.send(());
         handle.await.expect("server task completes");
@@ -4676,6 +4792,9 @@ mod tests {
         let config = Config {
             runtime: RuntimeConfig {
                 event_bus_capacity: 16,
+            },
+            api: smart_home_core::config::ApiConfig {
+                bind_address: "127.0.0.1:3001".to_string(),
             },
             locale: smart_home_core::config::LocaleConfig::default(),
             logging: smart_home_core::config::LoggingConfig {

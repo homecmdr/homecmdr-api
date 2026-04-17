@@ -1,0 +1,16 @@
+meta {
+  name: Get Diagnostics
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/diagnostics
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

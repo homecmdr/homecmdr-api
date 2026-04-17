@@ -1,0 +1,20 @@
+meta {
+  name: Get Adapter
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/adapters/:id
+}
+
+params:path {
+  id: {{adapterId}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

@@ -1,0 +1,20 @@
+meta {
+  name: Get Scene History
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/scenes/:id/history
+}
+
+params:path {
+  id: {{sceneId}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

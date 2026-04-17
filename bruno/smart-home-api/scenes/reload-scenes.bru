@@ -1,0 +1,16 @@
+meta {
+  name: Reload Scenes
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/scenes/reload
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

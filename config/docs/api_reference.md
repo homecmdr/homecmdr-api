@@ -168,13 +168,25 @@ Current domains in the catalog include weather, lighting, sensor, climate, energ
 
 Returns all devices currently present in the in-memory registry.
 
+Optional query params:
+
+- `ids`: repeatable device ID filter; when provided, only matching devices are returned in the requested order
+
 Example:
 
 ```bash
 curl http://127.0.0.1:3000/devices
 ```
 
+Filtered example:
+
+```bash
+curl "http://127.0.0.1:3000/devices?ids=open_meteo:temperature_outdoor&ids=open_meteo:wind_speed"
+```
+
 This includes devices restored from persistence during startup.
+
+If an `ids` value does not match any current device, it is omitted from the response.
 
 ### `GET /devices/{id}`
 

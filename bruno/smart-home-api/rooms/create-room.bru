@@ -1,0 +1,27 @@
+meta {
+  name: Create Room
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/rooms
+}
+
+headers {
+  content-type: application/json
+}
+
+body {
+  {
+    "id": "living_room",
+    "name": "Living Room"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

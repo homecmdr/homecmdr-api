@@ -1,0 +1,30 @@
+meta {
+  name: Assign Device Room
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/devices/:id/room
+}
+
+params:path {
+  id: {{deviceId}}
+}
+
+headers {
+  content-type: application/json
+}
+
+body {
+  {
+    "room_id": "{{roomId}}"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

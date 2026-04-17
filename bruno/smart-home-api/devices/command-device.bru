@@ -1,0 +1,31 @@
+meta {
+  name: Command Device
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/devices/:id/command
+}
+
+params:path {
+  id: {{deviceId}}
+}
+
+headers {
+  content-type: application/json
+}
+
+body {
+  {
+    "capability": "power",
+    "action": "toggle"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

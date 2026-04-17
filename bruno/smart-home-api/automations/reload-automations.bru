@@ -1,0 +1,16 @@
+meta {
+  name: Reload Automations
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/automations/reload
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}
