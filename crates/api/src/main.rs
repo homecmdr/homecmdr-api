@@ -937,24 +937,9 @@ fn history_selection_from_telemetry(selection: &TelemetrySelectionConfig) -> His
 }
 
 fn trigger_context_from_config(config: &Config) -> TriggerContext {
-    let Some(adapter_config) = config.adapters.get("open_meteo") else {
-        return TriggerContext {
-            latitude: None,
-            longitude: None,
-            timezone: config.locale.timezone.parse().ok(),
-        };
-    };
-    let Some(adapter) = adapter_config.as_object() else {
-        return TriggerContext {
-            latitude: None,
-            longitude: None,
-            timezone: config.locale.timezone.parse().ok(),
-        };
-    };
-
     TriggerContext {
-        latitude: adapter.get("latitude").and_then(|value| value.as_f64()),
-        longitude: adapter.get("longitude").and_then(|value| value.as_f64()),
+        latitude: config.locale.latitude,
+        longitude: config.locale.longitude,
         timezone: config.locale.timezone.parse().ok(),
     }
 }

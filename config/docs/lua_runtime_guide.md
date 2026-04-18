@@ -525,7 +525,7 @@ Fields:
 
 Behavior:
 
-- schedules from the configured location in `adapters.open_meteo.latitude` and `adapters.open_meteo.longitude`
+- schedules from the configured location in `locale.latitude` and `locale.longitude`
 - event payload includes `type`, `scheduled_at`, `offset_mins`, and `timezone`
 
 #### `sunset`
@@ -536,7 +536,7 @@ Fields:
 
 Behavior:
 
-- schedules from the configured location in `adapters.open_meteo.latitude` and `adapters.open_meteo.longitude`
+- schedules from the configured location in `locale.latitude` and `locale.longitude`
 - event payload includes `type`, `scheduled_at`, `offset_mins`, and `timezone`
 
 ## Conditions

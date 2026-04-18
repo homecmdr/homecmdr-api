@@ -56,6 +56,8 @@ pub struct ApiCorsConfig {
 pub struct LocaleConfig {
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +118,8 @@ impl Default for LocaleConfig {
     fn default() -> Self {
         Self {
             timezone: default_timezone(),
+            latitude: None,
+            longitude: None,
         }
     }
 }

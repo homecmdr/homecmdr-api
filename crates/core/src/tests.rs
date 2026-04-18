@@ -144,11 +144,14 @@ fn device_round_trips_through_json() {
         AttributeValue::Text("online".to_string()),
     );
     attributes.insert(
-        "custom.open_meteo.label".to_string(),
+        "custom.test_adapter.label".to_string(),
         AttributeValue::Text("patio".to_string()),
     );
     attributes.insert(WIND_DIRECTION.to_string(), AttributeValue::Integer(225));
-    attributes.insert("custom.open_meteo.extra".to_string(), AttributeValue::Null);
+    attributes.insert(
+        "custom.test_adapter.extra".to_string(),
+        AttributeValue::Null,
+    );
 
     let mut vendor_specific = HashMap::new();
     vendor_specific.insert(
@@ -157,12 +160,12 @@ fn device_round_trips_through_json() {
     );
 
     let device = Device {
-        id: DeviceId("open_meteo:temperature_outdoor".to_string()),
+        id: DeviceId("test_adapter:sensor:outdoor".to_string()),
         room_id: None,
         kind: DeviceKind::Sensor,
         attributes,
         metadata: Metadata {
-            source: "open_meteo".to_string(),
+            source: "test_adapter".to_string(),
             accuracy: Some(0.95),
             vendor_specific,
         },
@@ -1023,10 +1026,12 @@ fn device_command_rejects_reset_with_value() {
 
 #[test]
 fn custom_attribute_keys_require_adapter_namespace() {
-    assert!(is_custom_attribute_key("custom.open_meteo.label"));
-    assert!(is_custom_attribute_key("custom.roku_tv.input_source"));
+    assert!(is_custom_attribute_key("custom.test_adapter.label"));
     assert!(is_custom_attribute_key(
-        "custom.elgato_lights.effect_profile.active"
+        "custom.test_adapter_b.input_source"
+    ));
+    assert!(is_custom_attribute_key(
+        "custom.test_adapter_c.effect_profile.active"
     ));
 
     assert!(!is_custom_attribute_key("custom"));
@@ -1034,7 +1039,7 @@ fn custom_attribute_keys_require_adapter_namespace() {
     assert!(!is_custom_attribute_key("custom.label"));
     assert!(!is_custom_attribute_key("label.custom"));
     assert!(!is_custom_attribute_key("custom.open-meteo.label"));
-    assert!(!is_custom_attribute_key("custom.open_meteo.Label"));
+    assert!(!is_custom_attribute_key("custom.test_adapter.Label"));
 }
 
 #[tokio::test]
@@ -1042,7 +1047,7 @@ async fn registry_accepts_valid_light_capabilities() {
     let bus = EventBus::new(16);
     let registry = DeviceRegistry::new(bus);
     let device = Device {
-        id: DeviceId("elgato:light:1".to_string()),
+        id: DeviceId("test_adapter:light:1".to_string()),
         room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([
@@ -1119,7 +1124,7 @@ async fn registry_rejects_invalid_brightness_percentage() {
     let bus = EventBus::new(16);
     let registry = DeviceRegistry::new(bus);
     let invalid = Device {
-        id: DeviceId("elgato:light:bad-brightness".to_string()),
+        id: DeviceId("test_adapter:light:bad-brightness".to_string()),
         room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([(BRIGHTNESS.to_string(), AttributeValue::Integer(101))]),
@@ -1147,7 +1152,7 @@ async fn registry_rejects_invalid_color_temperature_unit_or_range() {
     let bus = EventBus::new(16);
     let registry = DeviceRegistry::new(bus);
     let invalid = Device {
-        id: DeviceId("elgato:light:bad-temp".to_string()),
+        id: DeviceId("test_adapter:light:bad-temp".to_string()),
         room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([(
@@ -1184,7 +1189,7 @@ async fn registry_rejects_invalid_hex_color_shape() {
     let bus = EventBus::new(16);
     let registry = DeviceRegistry::new(bus);
     let invalid = Device {
-        id: DeviceId("elgato:light:bad-hex".to_string()),
+        id: DeviceId("test_adapter:light:bad-hex".to_string()),
         room_id: None,
         kind: DeviceKind::Light,
         attributes: HashMap::from([(
@@ -1224,7 +1229,7 @@ async fn registry_accepts_custom_attribute_keys() {
                 measurement_value(21.5, "celsius"),
             ),
             (
-                "custom.open_meteo.station_label".to_string(),
+                "custom.test_adapter.station_label".to_string(),
                 AttributeValue::Text("patio".to_string()),
             ),
         ]),
@@ -1459,28 +1464,19 @@ fn config_loads_default_toml() {
     );
     assert!(!config.telemetry.enabled);
     assert!(config.telemetry.selection.device_ids.is_empty());
-    let open_meteo = config
-        .adapters
-        .get("open_meteo")
-        .expect("open_meteo adapter config exists");
-    assert_eq!(open_meteo["enabled"], serde_json::json!(true));
-    assert_eq!(open_meteo["latitude"], serde_json::json!(51.5));
-    assert_eq!(open_meteo["longitude"], serde_json::json!(-0.1));
-    assert_eq!(open_meteo["poll_interval_secs"], serde_json::json!(90));
-    let elgato = config
-        .adapters
-        .get("elgato_lights")
-        .expect("elgato_lights adapter config exists");
-    assert!(elgato["enabled"].is_boolean());
-    assert_eq!(
-        elgato["base_url"],
-        serde_json::json!("http://127.0.0.1:9123")
-    );
-    assert_eq!(elgato["poll_interval_secs"], serde_json::json!(30));
+    // Verify the adapters map is present and each entry is a JSON object — field-level
+    // assertions for specific adapters belong in each adapter crate's own tests.
+    assert!(!config.adapters.is_empty());
+    for (_name, value) in &config.adapters {
+        assert!(
+            value.is_object(),
+            "each adapter config entry must be a JSON object"
+        );
+    }
 }
 
 #[test]
-fn config_missing_required_field_returns_clear_error() {
+fn config_loads_arbitrary_adapter_config_as_generic_json() {
     let path = write_temp_config(
         r#"
 [runtime]
@@ -1489,24 +1485,28 @@ event_bus_capacity = 1024
 [logging]
 level = "info"
 
-[adapters.open_meteo]
+[adapters.test_adapter]
 enabled = true
-latitude = 51.5
-longitude = -0.1
+some_field = "hello"
+numeric_field = 42
 "#,
     );
 
     let config = Config::load_from_file(&path).expect("generic adapter config should load");
     let _ = fs::remove_file(&path);
 
-    let open_meteo = config
+    let adapter = config
         .adapters
-        .get("open_meteo")
-        .expect("open_meteo adapter config exists");
-    assert_eq!(open_meteo["enabled"], serde_json::json!(true));
-    assert_eq!(open_meteo["latitude"], serde_json::json!(51.5));
-    assert_eq!(open_meteo["longitude"], serde_json::json!(-0.1));
-    assert!(open_meteo.get("poll_interval_secs").is_none());
+        .get("test_adapter")
+        .expect("test_adapter config entry should exist");
+    assert!(
+        adapter.is_object(),
+        "adapter config should be a JSON object"
+    );
+    assert_eq!(adapter["enabled"], serde_json::json!(true));
+    assert_eq!(adapter["some_field"], serde_json::json!("hello"));
+    assert_eq!(adapter["numeric_field"], serde_json::json!(42));
+    assert!(adapter.get("absent_field").is_none());
 }
 
 #[test]
@@ -1524,11 +1524,9 @@ enabled = true
 backend = "sqlite"
 auto_create = true
 
-[adapters.open_meteo]
+[adapters.test_adapter]
 enabled = true
-latitude = 51.5
-longitude = -0.1
-poll_interval_secs = 90
+some_field = "value"
 "#,
     );
 

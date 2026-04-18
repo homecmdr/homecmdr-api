@@ -30,6 +30,7 @@ Adapter-specific docs:
 - `crates/adapter-elgato-lights/README.md`
 - `crates/adapter-ollama/README.md`
 - `crates/adapter-roku-tv/README.md`
+- `crates/adapter-zigbee2mqtt/README.md`
 
 External reference examples:
 
@@ -55,8 +56,11 @@ smart-home/
 │   ├── adapter-ollama/
 │   ├── adapter-open-meteo/
 │   ├── adapter-roku-tv/
+│   ├── adapter-zigbee2mqtt/
 │   ├── api/
+│   ├── automations/
 │   ├── core/
+│   ├── lua-host/
 │   ├── scenes/
 │   └── store-sql/
 └── README.md
@@ -153,16 +157,17 @@ Default config lives at:
 
 Current default config includes:
 
-- `scenes`
 - `open_meteo`
 - `elgato_lights`
 - `roku_tv`
+- `ollama`
+- `zigbee2mqtt`
 
 The default asset layout is:
 
 - `config/scenes/` for structured Lua scenes
-- `config/automations/` reserved for future automation assets
-- `config/scripts/` reserved for future free-form Lua scripts
+- `config/automations/` for event-driven Lua automations
+- `config/scripts/` for shared Lua helper modules (`require`-able from scenes and automations)
 
 ## Running The API
 
