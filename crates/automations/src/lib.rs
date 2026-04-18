@@ -54,6 +54,12 @@ pub struct AutomationExecutionResult {
     pub duration_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReloadError {
+    pub file: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AutomationControlState {
     enabled: HashMap<String, bool>,
@@ -298,6 +304,102 @@ impl AutomationCatalog {
         }
 
         automations.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
+        Ok(Self {
+            automations,
+            scripts_root,
+            control: Arc::new(RwLock::new(AutomationControlState::default())),
+            concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        })
+    }
+
+    pub fn reload_from_directory(
+        path: impl AsRef<Path>,
+        scripts_root: Option<PathBuf>,
+    ) -> std::result::Result<Self, Vec<ReloadError>> {
+        let path = path.as_ref();
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return Err(vec![ReloadError {
+                    file: path.display().to_string(),
+                    message: format!("failed to read automations directory: {error}"),
+                }]);
+            }
+        };
+
+        let mut files = Vec::new();
+        let mut errors = Vec::new();
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(ReloadError {
+                        file: path.display().to_string(),
+                        message: format!("failed to read automations directory entry: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    errors.push(ReloadError {
+                        file: entry.path().display().to_string(),
+                        message: format!("failed to inspect file type: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            if !file_type.is_file() {
+                continue;
+            }
+
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("lua") {
+                continue;
+            }
+
+            files.push(entry.path());
+        }
+
+        files.sort();
+
+        let mut automations = Vec::new();
+        let mut ids = HashMap::<String, PathBuf>::new();
+
+        for file in files {
+            match load_automation_file(&file, scripts_root.as_deref()) {
+                Ok(automation) => {
+                    let id = automation.summary.id.clone();
+                    if let Some(existing_path) = ids.insert(id.clone(), file.clone()) {
+                        errors.push(ReloadError {
+                            file: file.display().to_string(),
+                            message: format!(
+                                "duplicate automation id '{id}' (already defined in {})",
+                                existing_path.display()
+                            ),
+                        });
+                        continue;
+                    }
+                    automations.push(automation);
+                }
+                Err(error) => {
+                    errors.push(ReloadError {
+                        file: file.display().to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        automations.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
+
         Ok(Self {
             automations,
             scripts_root,

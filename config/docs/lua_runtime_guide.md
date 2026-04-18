@@ -229,7 +229,27 @@ Current rules:
 
 - module names must stay within `config/scripts/`
 - modules are cached by Lua's `require(...)` within a single Lua execution
-- there is no hot reload across runs
+- new scene/automation executions use a fresh Lua state, so script edits are
+  visible on subsequent executions
+
+## Manual Reload Workflow
+
+Scenes and automations support manual catalog reload via API endpoints:
+
+- `POST /scenes/reload`
+- `POST /automations/reload`
+
+Use reload when you change catalog-level fields such as:
+
+- scene/automation IDs and names
+- execution mode (`mode`)
+- automation trigger definitions (`trigger`) and conditions (`conditions`)
+
+Notes:
+
+- in-flight scene/automation executions continue on their current Lua context
+- new executions after a successful reload use the new catalog
+- if reload validation fails, the previous catalog remains active
 
 ## Scenes
 

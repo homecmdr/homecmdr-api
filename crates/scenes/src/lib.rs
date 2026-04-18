@@ -14,6 +14,12 @@ use smart_home_lua_host::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReloadError {
+    pub file: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SceneSummary {
     pub id: String,
     pub name: String,
@@ -314,6 +320,98 @@ impl SceneCatalog {
             if scenes.insert(scene_id.clone(), scene).is_some() {
                 bail!("duplicate scene id '{scene_id}'");
             }
+        }
+
+        Ok(Self {
+            scenes,
+            scripts_root,
+        })
+    }
+
+    pub fn reload_from_directory(
+        path: impl AsRef<Path>,
+        scripts_root: Option<PathBuf>,
+    ) -> std::result::Result<Self, Vec<ReloadError>> {
+        let path = path.as_ref();
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return Err(vec![ReloadError {
+                    file: path.display().to_string(),
+                    message: format!("failed to read scenes directory: {error}"),
+                }]);
+            }
+        };
+
+        let mut files = Vec::new();
+        let mut errors = Vec::new();
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(ReloadError {
+                        file: path.display().to_string(),
+                        message: format!("failed to read scenes directory entry: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    errors.push(ReloadError {
+                        file: entry.path().display().to_string(),
+                        message: format!("failed to inspect file type: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            if !file_type.is_file() {
+                continue;
+            }
+
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("lua") {
+                continue;
+            }
+
+            files.push(entry.path());
+        }
+
+        files.sort();
+
+        let mut scenes = HashMap::new();
+        let mut ids = HashMap::<String, PathBuf>::new();
+
+        for file in files {
+            match load_scene_file(&file, scripts_root.as_deref()) {
+                Ok(scene) => {
+                    let scene_id = scene.summary.id.clone();
+                    if let Some(existing_path) = ids.insert(scene_id.clone(), file.clone()) {
+                        errors.push(ReloadError {
+                            file: file.display().to_string(),
+                            message: format!(
+                                "duplicate scene id '{scene_id}' (already defined in {})",
+                                existing_path.display()
+                            ),
+                        });
+                        continue;
+                    }
+                    scenes.insert(scene_id, scene);
+                }
+                Err(error) => {
+                    errors.push(ReloadError {
+                        file: file.display().to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         Ok(Self {

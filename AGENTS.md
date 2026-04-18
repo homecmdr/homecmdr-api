@@ -34,7 +34,7 @@
 ## Runtime And Asset Gotchas
 
 - Default asset directories come from `config/default.toml`: `config/scenes`, `config/automations`, `config/scripts`.
-- Scenes and automations are loaded at API startup. `/scenes/reload` and `/automations/reload` intentionally return not implemented; restart the API after editing Lua assets.
+- Scenes and automations are loaded at API startup, and can be manually reloaded with `POST /scenes/reload` and `POST /automations/reload`.
 - `config/scripts` modules are loadable from scenes/automations with `require(...)`.
 - Current automation trigger types are implemented in code, not just docs: `device_state_change`, `weather_state`, `adapter_lifecycle`, `system_error`, `wall_clock`, `cron`, `sunrise`, `sunset`, `interval`.
 - Automation runner limits are hard-coded in `crates/automations/src/lib.rs`: max 8 concurrent runs, 10s execution timeout.

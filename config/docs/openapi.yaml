@@ -124,10 +124,14 @@ paths:
       tags: [Scenes]
       operationId: reloadScenes
       summary: Reload scenes
-      description: Currently not implemented; restart the API process to reload scenes.
+      description: Reloads scenes from disk and atomically swaps the in-memory scene catalog on success.
       responses:
-        '501':
-          $ref: '#/components/responses/ErrorResponse'
+        '200':
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
   /scenes/{id}/execute:
     post:
       tags: [Scenes]
@@ -190,10 +194,14 @@ paths:
       tags: [Automations]
       operationId: reloadAutomations
       summary: Reload automations
-      description: Currently not implemented; restart the API process to reload automations.
+      description: Reloads automations from disk and atomically swaps the in-memory automation catalog on success.
       responses:
-        '501':
-          $ref: '#/components/responses/ErrorResponse'
+        '200':
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
   /automations/{id}:
     get:
       tags: [Automations]
@@ -1073,6 +1081,33 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SceneStepResult'
+    ReloadError:
+      type: object
+      required: [file, message]
+      properties:
+        file:
+          type: string
+        message:
+          type: string
+    ReloadResponse:
+      type: object
+      required: [status, target, loaded_count, errors, duration_ms]
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        target:
+          type: string
+          enum: [scenes, automations]
+        loaded_count:
+          type: integer
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReloadError'
+        duration_ms:
+          type: integer
+          format: int64
     DeviceHistoryEntry:
       type: object
       required: [observed_at, device]

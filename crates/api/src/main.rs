@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
@@ -38,6 +39,7 @@ use smart_home_scenes::{
     SceneCatalog, SceneExecutionResult, SceneRunOutcome, SceneRunner, SceneSummary,
 };
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
+use tokio::sync::watch;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::Level;
 
@@ -140,13 +142,20 @@ struct GroupCommandResult {
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
-    scenes: SceneRunner,
-    automations: Arc<AutomationCatalog>,
-    automation_control: Arc<AutomationController>,
+    scenes: Arc<RwLock<SceneRunner>>,
+    automations: Arc<RwLock<Arc<AutomationCatalog>>>,
+    automation_control: Arc<RwLock<Arc<AutomationController>>>,
+    automation_runner_tx: watch::Sender<AutomationRunner>,
+    automation_observer: Option<Arc<dyn AutomationExecutionObserver>>,
     trigger_context: TriggerContext,
     health: HealthState,
     store: Option<Arc<dyn DeviceStore>>,
     history: HistorySettings,
+    scenes_enabled: bool,
+    automations_enabled: bool,
+    scenes_directory: String,
+    automations_directory: String,
+    scripts_root: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -160,6 +169,21 @@ struct HistorySettings {
 struct SceneExecuteResponse {
     status: &'static str,
     results: Vec<SceneExecutionResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReloadErrorDetail {
+    file: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReloadResponse {
+    status: &'static str,
+    target: &'static str,
+    loaded_count: usize,
+    errors: Vec<ReloadErrorDetail>,
+    duration_ms: u128,
 }
 
 type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<String>);
@@ -637,36 +661,35 @@ async fn main() -> Result<()> {
             }
         });
     let trigger_context = trigger_context_from_config(&config);
-    let automation_runner = if let Some(observer) = automation_observer.clone() {
-        let runner = AutomationRunner::new((*automations).clone())
-            .with_observer(observer)
-            .with_trigger_context(trigger_context);
-        if let Some(store) = device_store.clone() {
-            runner.with_state_store(store)
-        } else {
-            runner
-        }
-    } else {
-        let runner =
-            AutomationRunner::new((*automations).clone()).with_trigger_context(trigger_context);
-        if let Some(store) = device_store.clone() {
-            runner.with_state_store(store)
-        } else {
-            runner
-        }
-    };
+    let automation_runner = build_automation_runner(
+        (*automations).clone(),
+        automation_observer.clone(),
+        device_store.clone(),
+        trigger_context,
+    );
     let automation_control = Arc::new(automation_runner.controller());
+    let (automation_runner_tx, automation_runner_rx) = watch::channel(automation_runner.clone());
 
     let app = app(
         AppState {
             runtime: runtime.clone(),
-            scenes,
-            automations: automations.clone(),
-            automation_control: automation_control.clone(),
+            scenes: Arc::new(RwLock::new(scenes)),
+            automations: Arc::new(RwLock::new(automations.clone())),
+            automation_control: Arc::new(RwLock::new(automation_control.clone())),
+            automation_runner_tx,
+            automation_observer: automation_observer.clone(),
             trigger_context,
             health: health.clone(),
             store: device_store.clone(),
             history: HistorySettings::from_config(&config),
+            scenes_enabled: config.scenes.enabled,
+            automations_enabled: config.automations.enabled,
+            scenes_directory: config.scenes.directory.clone(),
+            automations_directory: config.automations.directory.clone(),
+            scripts_root: config
+                .scripts
+                .enabled
+                .then(|| PathBuf::from(&config.scripts.directory)),
         },
         &config,
     );
@@ -694,11 +717,41 @@ async fn main() -> Result<()> {
     let automation_task = {
         let runtime = runtime.clone();
         let health = health.clone();
-        let runner = automation_runner.clone();
+        let mut runner_rx = automation_runner_rx;
         tokio::spawn(async move {
             health.automations_ok();
-            runner.run(runtime).await;
-            health.automations_error("automation runner exited unexpectedly");
+            let mut active_task = {
+                let runtime = runtime.clone();
+                let initial = runner_rx.borrow().clone();
+                tokio::spawn(async move {
+                    initial.run(runtime).await;
+                })
+            };
+
+            loop {
+                tokio::select! {
+                    _ = &mut active_task => {
+                        health.automations_error("automation runner exited unexpectedly");
+                        break;
+                    }
+                    changed = runner_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        active_task.abort();
+                        let _ = active_task.await;
+
+                        let runtime = runtime.clone();
+                        let runner = runner_rx.borrow().clone();
+                        active_task = tokio::spawn(async move {
+                            runner.run(runtime).await;
+                        });
+                    }
+                }
+            }
+
+            active_task.abort();
+            let _ = active_task.await;
         })
     };
 
@@ -834,6 +887,85 @@ fn trigger_context_from_config(config: &Config) -> TriggerContext {
         longitude: adapter.get("longitude").and_then(|value| value.as_f64()),
         timezone: config.locale.timezone.parse().ok(),
     }
+}
+
+fn build_automation_runner(
+    catalog: AutomationCatalog,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
+    store: Option<Arc<dyn DeviceStore>>,
+    trigger_context: TriggerContext,
+) -> AutomationRunner {
+    let runner = if let Some(observer) = observer {
+        AutomationRunner::new(catalog)
+            .with_observer(observer)
+            .with_trigger_context(trigger_context)
+    } else {
+        AutomationRunner::new(catalog).with_trigger_context(trigger_context)
+    };
+
+    if let Some(store) = store {
+        runner.with_state_store(store)
+    } else {
+        runner
+    }
+}
+
+#[cfg(test)]
+fn make_state(
+    runtime: Arc<Runtime>,
+    scenes: SceneRunner,
+    automations: Arc<AutomationCatalog>,
+    trigger_context: TriggerContext,
+    health: HealthState,
+    store: Option<Arc<dyn DeviceStore>>,
+    history: HistorySettings,
+    scenes_enabled: bool,
+    automations_enabled: bool,
+    scenes_directory: String,
+    automations_directory: String,
+    scripts_root: Option<PathBuf>,
+) -> AppState {
+    let observer = if history.enabled {
+        store.clone().map(|store| {
+            Arc::new(StoreAutomationObserver { store }) as Arc<dyn AutomationExecutionObserver>
+        })
+    } else {
+        None
+    };
+    let runner = build_automation_runner(
+        (*automations).clone(),
+        observer.clone(),
+        store.clone(),
+        trigger_context,
+    );
+    let control = Arc::new(runner.controller());
+    let (automation_runner_tx, _automation_runner_rx) = watch::channel(runner);
+
+    AppState {
+        runtime,
+        scenes: Arc::new(RwLock::new(scenes)),
+        automations: Arc::new(RwLock::new(automations)),
+        automation_control: Arc::new(RwLock::new(control)),
+        automation_runner_tx,
+        automation_observer: observer,
+        trigger_context,
+        health,
+        store,
+        history,
+        scenes_enabled,
+        automations_enabled,
+        scenes_directory,
+        automations_directory,
+        scripts_root,
+    }
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|p| p.into_inner())
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|p| p.into_inner())
 }
 
 async fn monitor_runtime_health(runtime: Arc<Runtime>, health: HealthState) {
@@ -1288,6 +1420,14 @@ async fn list_capabilities() -> Json<CapabilityCatalogResponse> {
 
 async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse> {
     let health = state.health.response();
+    let scene_count = {
+        let runner = read_lock(&state.scenes);
+        runner.summaries().len()
+    };
+    let automation_count = {
+        let catalog = read_lock(&state.automations);
+        catalog.summaries().len()
+    };
 
     Json(DiagnosticsResponse {
         status: health.status.clone(),
@@ -1295,8 +1435,8 @@ async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse>
         devices: state.runtime.registry().list().len(),
         rooms: state.runtime.registry().list_rooms().len(),
         groups: state.runtime.registry().list_groups().len(),
-        scenes: state.scenes.summaries().len(),
-        automations: state.automations.summaries().len(),
+        scenes: scene_count,
+        automations: automation_count,
         history_enabled: state.history.enabled,
         default_history_limit: state.history.default_limit,
         max_history_limit: state.history.max_limit,
@@ -1308,29 +1448,141 @@ async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse>
 }
 
 async fn list_scenes(State(state): State<AppState>) -> Json<Vec<SceneSummary>> {
-    Json(state.scenes.summaries())
+    let runner = read_lock(&state.scenes);
+    Json(runner.summaries())
 }
 
-async fn reload_scenes() -> Result<StatusCode, ApiError> {
-    Err(ApiError::not_implemented(
-        "scene reload is not supported; restart the API process to reload scenes",
-    ))
+async fn reload_scenes(State(state): State<AppState>) -> Result<Json<ReloadResponse>, ApiError> {
+    if !state.scenes_enabled {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "scene reload is not supported when scenes are disabled",
+        ));
+    }
+
+    let started = Instant::now();
+    let scripts_root = state.scripts_root.clone();
+    match SceneCatalog::reload_from_directory(&state.scenes_directory, scripts_root) {
+        Ok(catalog) => {
+            let loaded_count = catalog.summaries().len();
+            let mut runner = write_lock(&state.scenes);
+            *runner = SceneRunner::new(catalog);
+            Ok(Json(ReloadResponse {
+                status: "ok",
+                target: "scenes",
+                loaded_count,
+                errors: Vec::new(),
+                duration_ms: started.elapsed().as_millis(),
+            }))
+        }
+        Err(errors) => Ok(Json(ReloadResponse {
+            status: "error",
+            target: "scenes",
+            loaded_count: 0,
+            errors: errors
+                .into_iter()
+                .map(|error| ReloadErrorDetail {
+                    file: error.file,
+                    message: error.message,
+                })
+                .collect(),
+            duration_ms: started.elapsed().as_millis(),
+        })),
+    }
 }
 
 async fn list_automations(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AutomationResponse>>, ApiError> {
+    let controller = {
+        let guard = read_lock(&state.automation_control);
+        guard.clone()
+    };
     let mut automations = Vec::new();
-    for summary in state.automation_control.summaries() {
+    for summary in controller.summaries() {
         automations.push(automation_response(&state, summary).await?);
     }
     Ok(Json(automations))
 }
 
-async fn reload_automations() -> Result<StatusCode, ApiError> {
-    Err(ApiError::not_implemented(
-        "automation reload is not supported; restart the API process to reload automations",
-    ))
+async fn reload_automations(
+    State(state): State<AppState>,
+) -> Result<Json<ReloadResponse>, ApiError> {
+    if !state.automations_enabled {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "automation reload is not supported when automations are disabled",
+        ));
+    }
+
+    let started = Instant::now();
+    let scripts_root = state.scripts_root.clone();
+    let previous_controller = {
+        let controller = read_lock(&state.automation_control);
+        controller.clone()
+    };
+    let previous_enabled = previous_controller
+        .summaries()
+        .into_iter()
+        .filter_map(|summary| {
+            previous_controller
+                .is_enabled(&summary.id)
+                .map(|enabled| (summary.id, enabled))
+        })
+        .collect::<Vec<_>>();
+
+    match AutomationCatalog::reload_from_directory(&state.automations_directory, scripts_root) {
+        Ok(catalog) => {
+            for (id, enabled) in previous_enabled {
+                if catalog.get(&id).is_some() {
+                    let _ = catalog.set_enabled(&id, enabled);
+                }
+            }
+
+            let loaded_count = catalog.summaries().len();
+            let runner = build_automation_runner(
+                catalog.clone(),
+                state.automation_observer.clone(),
+                state.store.clone(),
+                state.trigger_context,
+            );
+            let controller = Arc::new(runner.controller());
+
+            {
+                let mut catalog_guard = write_lock(&state.automations);
+                *catalog_guard = Arc::new(catalog);
+            }
+            {
+                let mut controller_guard = write_lock(&state.automation_control);
+                *controller_guard = controller;
+            }
+
+            if state.automation_runner_tx.send(runner).is_err() {
+                tracing::warn!("automation reload completed but no active runner supervisor was available to receive the updated runner");
+            }
+
+            Ok(Json(ReloadResponse {
+                status: "ok",
+                target: "automations",
+                loaded_count,
+                errors: Vec::new(),
+                duration_ms: started.elapsed().as_millis(),
+            }))
+        }
+        Err(errors) => Ok(Json(ReloadResponse {
+            status: "error",
+            target: "automations",
+            loaded_count: 0,
+            errors: errors
+                .into_iter()
+                .map(|error| ReloadErrorDetail {
+                    file: error.file,
+                    message: error.message,
+                })
+                .collect(),
+            duration_ms: started.elapsed().as_millis(),
+        })),
+    }
 }
 
 async fn get_automation(
@@ -1339,6 +1591,8 @@ async fn get_automation(
 ) -> Result<Json<AutomationResponse>, ApiError> {
     let summary = state
         .automation_control
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
         .get(&id)
         .ok_or_else(|| ApiError::not_found(format!("automation '{id}' not found")))?;
 
@@ -1350,8 +1604,11 @@ async fn set_automation_enabled(
     Path(id): Path<String>,
     Json(request): Json<AutomationEnabledRequest>,
 ) -> Result<Json<AutomationResponse>, ApiError> {
-    state
-        .automation_control
+    let controller = {
+        let guard = read_lock(&state.automation_control);
+        guard.clone()
+    };
+    controller
         .set_enabled(&id, request.enabled)
         .map_err(|error| {
             if error.to_string().contains("not found") {
@@ -1361,8 +1618,7 @@ async fn set_automation_enabled(
             }
         })?;
 
-    let summary = state
-        .automation_control
+    let summary = controller
         .get(&id)
         .ok_or_else(|| ApiError::not_found(format!("automation '{id}' not found")))?;
     Ok(Json(automation_response(&state, summary).await?))
@@ -1372,7 +1628,11 @@ async fn validate_automation(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<AutomationValidateResponse>, ApiError> {
-    let summary = state.automation_control.validate(&id).map_err(|error| {
+    let controller = {
+        let guard = read_lock(&state.automation_control);
+        guard.clone()
+    };
+    let summary = controller.validate(&id).map_err(|error| {
         if error.to_string().contains("not found") {
             ApiError::not_found(error.to_string())
         } else {
@@ -1398,8 +1658,11 @@ async fn execute_automation_manually(
         )]))
     });
 
-    let execution = state
-        .automation_control
+    let controller = {
+        let guard = read_lock(&state.automation_control);
+        guard.clone()
+    };
+    let execution = controller
         .execute(
             &id,
             state.runtime.clone(),
@@ -1427,8 +1690,11 @@ async fn execute_scene(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let executed_at = Utc::now();
-    let outcome = state
-        .scenes
+    let runner = {
+        let guard = read_lock(&state.scenes);
+        guard.clone()
+    };
+    let outcome = runner
         .execute(&id, state.runtime.clone())
         .await
         .map_err(|error| {
@@ -2243,11 +2509,10 @@ async fn automation_response(
         description: summary.description,
         trigger_type: summary.trigger_type,
         condition_count: summary.condition_count,
-        status: if state
-            .automation_control
-            .is_enabled(&automation_id)
-            .unwrap_or(true)
-        {
+        status: if {
+            let controller = read_lock(&state.automation_control);
+            controller.is_enabled(&automation_id).unwrap_or(true)
+        } {
             "enabled"
         } else {
             "disabled"
@@ -2985,20 +3250,48 @@ mod tests {
         runtime: Arc<Runtime>,
         config: Config,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-        let automations = Arc::new(AutomationCatalog::empty());
+        let scripts_root = config
+            .scripts
+            .enabled
+            .then(|| PathBuf::from(&config.scripts.directory));
+        let scenes = if config.scenes.enabled
+            && std::path::Path::new(&config.scenes.directory).exists()
+        {
+            SceneRunner::new(
+                SceneCatalog::load_from_directory(&config.scenes.directory, scripts_root.clone())
+                    .expect("test scenes load"),
+            )
+        } else {
+            empty_scenes()
+        };
+        let automations = if config.automations.enabled
+            && std::path::Path::new(&config.automations.directory).exists()
+        {
+            Arc::new(
+                AutomationCatalog::load_from_directory(
+                    &config.automations.directory,
+                    scripts_root.clone(),
+                )
+                .expect("test automations load"),
+            )
+        } else {
+            Arc::new(AutomationCatalog::empty())
+        };
         let app = app(
-            AppState {
+            make_state(
                 runtime,
-                scenes: empty_scenes(),
-                automations: automations.clone(),
-                automation_control: Arc::new(
-                    AutomationRunner::new((*automations).clone()).controller(),
-                ),
-                trigger_context: TriggerContext::default(),
-                health: test_health(&["open_meteo"]),
-                store: None,
-                history: history_settings(false),
-            },
+                scenes,
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                None,
+                history_settings(false),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                scripts_root,
+            ),
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3103,18 +3396,23 @@ mod tests {
         let automations = Arc::new(AutomationCatalog::empty());
         let config = test_config(serde_json::Map::new());
         let app = app(
-            AppState {
+            make_state(
                 runtime,
-                scenes: empty_scenes(),
-                automations: automations.clone(),
-                automation_control: Arc::new(
-                    AutomationRunner::new((*automations).clone()).controller(),
-                ),
-                trigger_context: TriggerContext::default(),
-                health: test_health(&["open_meteo"]),
-                store: None,
-                history: history_settings(false),
-            },
+                empty_scenes(),
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                None,
+                history_settings(false),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                config
+                    .scripts
+                    .enabled
+                    .then(|| PathBuf::from(&config.scripts.directory)),
+            ),
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3142,18 +3440,23 @@ mod tests {
         let automations = Arc::new(AutomationCatalog::empty());
         let config = test_config(serde_json::Map::new());
         let app = app(
-            AppState {
+            make_state(
                 runtime,
                 scenes,
-                automations: automations.clone(),
-                automation_control: Arc::new(
-                    AutomationRunner::new((*automations).clone()).controller(),
-                ),
-                trigger_context: TriggerContext::default(),
-                health: test_health(&["open_meteo"]),
-                store: None,
-                history: history_settings(false),
-            },
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                None,
+                history_settings(false),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                config
+                    .scripts
+                    .enabled
+                    .then(|| PathBuf::from(&config.scripts.directory)),
+            ),
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3182,18 +3485,23 @@ mod tests {
         let automations = Arc::new(AutomationCatalog::empty());
         let config = test_config(serde_json::Map::new());
         let app = app(
-            AppState {
+            make_state(
                 runtime,
-                scenes: empty_scenes(),
-                automations: automations.clone(),
-                automation_control: Arc::new(
-                    AutomationRunner::new((*automations).clone()).controller(),
-                ),
-                trigger_context: TriggerContext::default(),
-                health: test_health(&["open_meteo"]),
-                store: Some(store),
-                history: history_settings(history_enabled),
-            },
+                empty_scenes(),
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                Some(store),
+                history_settings(history_enabled),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                config
+                    .scripts
+                    .enabled
+                    .then(|| PathBuf::from(&config.scripts.directory)),
+            ),
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3906,16 +4214,24 @@ mod tests {
         let automation_control =
             Arc::new(AutomationRunner::new((*automations).clone()).controller());
         let config = test_config(serde_json::Map::new());
+        let (runner_tx, _runner_rx) = watch::channel(AutomationRunner::new((*automations).clone()));
         let app = app(
             AppState {
                 runtime,
-                scenes: empty_scenes(),
-                automations,
-                automation_control,
+                scenes: Arc::new(RwLock::new(empty_scenes())),
+                automations: Arc::new(RwLock::new(automations)),
+                automation_control: Arc::new(RwLock::new(automation_control)),
+                automation_runner_tx: runner_tx,
+                automation_observer: None,
                 trigger_context: TriggerContext::default(),
                 health: test_health(&["open_meteo"]),
                 store: None,
                 history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: true,
+                scenes_directory: String::new(),
+                automations_directory: automation_dir.to_string_lossy().to_string(),
+                scripts_root: None,
             },
             &config,
         );
@@ -4003,6 +4319,7 @@ mod tests {
         let automation_runner =
             AutomationRunner::new((*automations).clone()).with_observer(observer.clone());
         let automation_control = Arc::new(automation_runner.controller());
+        let (runner_tx, _runner_rx) = watch::channel(automation_runner.clone());
 
         let runtime = Arc::new(Runtime::new(
             vec![Box::new(CommandAdapter)],
@@ -4042,13 +4359,20 @@ mod tests {
         let app = app(
             AppState {
                 runtime: runtime.clone(),
-                scenes: empty_scenes(),
-                automations,
-                automation_control,
+                scenes: Arc::new(RwLock::new(empty_scenes())),
+                automations: Arc::new(RwLock::new(automations)),
+                automation_control: Arc::new(RwLock::new(automation_control)),
+                automation_runner_tx: runner_tx,
+                automation_observer: Some(observer),
                 trigger_context: TriggerContext::default(),
                 health: test_health(&["open_meteo"]),
                 store: None,
                 history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: true,
+                scenes_directory: String::new(),
+                automations_directory: automation_dir.to_string_lossy().to_string(),
+                scripts_root: None,
             },
             &config,
         );
@@ -4157,7 +4481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_endpoints_are_explicitly_restart_only() {
+    async fn reload_endpoints_return_structured_status() {
         let runtime = Arc::new(Runtime::new(
             Vec::new(),
             RuntimeConfig {
@@ -4173,28 +4497,28 @@ mod tests {
             .send()
             .await
             .expect("scene reload request succeeds");
-        assert_eq!(scene_reload.status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(
-            scene_reload
-                .json::<Value>()
-                .await
-                .expect("scene reload json body")["error"],
-            "scene reload is not supported; restart the API process to reload scenes"
-        );
+        assert_eq!(scene_reload.status(), StatusCode::OK);
+        let scene_body = scene_reload
+            .json::<Value>()
+            .await
+            .expect("scene reload json body");
+        assert_eq!(scene_body["target"], "scenes");
+        assert!(scene_body["status"] == "ok" || scene_body["status"] == "error");
+        assert!(scene_body["duration_ms"].is_number());
 
         let automation_reload = client
             .post(format!("http://{addr}/automations/reload"))
             .send()
             .await
             .expect("automation reload request succeeds");
-        assert_eq!(automation_reload.status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(
-            automation_reload
-                .json::<Value>()
-                .await
-                .expect("automation reload json body")["error"],
-            "automation reload is not supported; restart the API process to reload automations"
-        );
+        assert_eq!(automation_reload.status(), StatusCode::OK);
+        let automation_body = automation_reload
+            .json::<Value>()
+            .await
+            .expect("automation reload json body");
+        assert_eq!(automation_body["target"], "automations");
+        assert!(automation_body["status"] == "ok" || automation_body["status"] == "error");
+        assert!(automation_body["duration_ms"].is_number());
 
         let _ = shutdown.send(());
         handle.await.expect("server task completes");
@@ -4284,18 +4608,27 @@ mod tests {
         health.adapter_error("open_meteo", "open_meteo poll failed: timeout");
 
         let config = test_config(serde_json::Map::new());
+        let (runner_tx, _runner_rx) =
+            watch::channel(AutomationRunner::new(AutomationCatalog::empty()));
         let app = app(
             AppState {
                 runtime,
-                scenes: empty_scenes(),
-                automations: Arc::new(AutomationCatalog::empty()),
-                automation_control: Arc::new(
+                scenes: Arc::new(RwLock::new(empty_scenes())),
+                automations: Arc::new(RwLock::new(Arc::new(AutomationCatalog::empty()))),
+                automation_control: Arc::new(RwLock::new(Arc::new(
                     AutomationRunner::new(AutomationCatalog::empty()).controller(),
-                ),
+                ))),
+                automation_runner_tx: runner_tx,
+                automation_observer: None,
                 trigger_context: TriggerContext::default(),
                 health,
                 store: None,
                 history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: false,
+                scenes_directory: String::new(),
+                automations_directory: String::new(),
+                scripts_root: None,
             },
             &config,
         );
@@ -4330,6 +4663,67 @@ mod tests {
         );
 
         let _ = shutdown_tx.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn reload_automations_preserves_enabled_state_for_same_id() {
+        let automation_dir = write_temp_automation_dir(&[(
+            "rain.lua",
+            r#"return {
+                id = "rain_check",
+                name = "Rain Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                end
+            }"#,
+        )]);
+        let mut config = test_config(serde_json::Map::new());
+        config.automations.enabled = true;
+        config.automations.directory = automation_dir.to_string_lossy().to_string();
+
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
+
+        let client = reqwest::Client::new();
+
+        let disable = client
+            .post(format!("http://{addr}/automations/rain_check/enabled"))
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .expect("disable request succeeds");
+        assert_eq!(disable.status(), StatusCode::OK);
+
+        let reload = client
+            .post(format!("http://{addr}/automations/reload"))
+            .send()
+            .await
+            .expect("reload request succeeds");
+        assert_eq!(reload.status(), StatusCode::OK);
+        let reload_body = reload.json::<Value>().await.expect("reload json body");
+        assert_eq!(reload_body["status"], "ok");
+
+        let detail = client
+            .get(format!("http://{addr}/automations/rain_check"))
+            .send()
+            .await
+            .expect("detail request succeeds");
+        assert_eq!(detail.status(), StatusCode::OK);
+        let body = detail.json::<Value>().await.expect("detail json body");
+        assert_eq!(body["status"], "disabled");
+
+        let _ = shutdown.send(());
         handle.await.expect("server task completes");
     }
 
@@ -4716,18 +5110,27 @@ mod tests {
         );
 
         let config = test_config(serde_json::Map::new());
+        let (runner_tx, _runner_rx) =
+            watch::channel(AutomationRunner::new(AutomationCatalog::empty()));
         let app = app(
             AppState {
                 runtime: runtime.clone(),
-                scenes,
-                automations: Arc::new(AutomationCatalog::empty()),
-                automation_control: Arc::new(
+                scenes: Arc::new(RwLock::new(scenes)),
+                automations: Arc::new(RwLock::new(Arc::new(AutomationCatalog::empty()))),
+                automation_control: Arc::new(RwLock::new(Arc::new(
                     AutomationRunner::new(AutomationCatalog::empty()).controller(),
-                ),
+                ))),
+                automation_runner_tx: runner_tx,
+                automation_observer: None,
                 trigger_context: TriggerContext::default(),
                 health: test_health(&["open_meteo"]),
                 store: Some(store.clone()),
                 history: history_settings(true),
+                scenes_enabled: true,
+                automations_enabled: false,
+                scenes_directory: scene_dir.to_string_lossy().to_string(),
+                automations_directory: String::new(),
+                scripts_root: None,
             },
             &config,
         );
