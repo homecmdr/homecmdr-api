@@ -2963,7 +2963,7 @@ mod tests {
     use smart_home_core::bus::EventBus;
     use smart_home_core::command::DeviceCommand;
     use smart_home_core::model::{
-        AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
+        AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
     };
     use smart_home_core::registry::DeviceRegistry;
     use smart_home_core::runtime::{Runtime, RuntimeConfig};
@@ -3001,16 +3001,25 @@ mod tests {
         async fn load_all_rooms(&self) -> anyhow::Result<Vec<Room>> {
             Ok(Vec::new())
         }
+        async fn load_all_groups(&self) -> anyhow::Result<Vec<DeviceGroup>> {
+            Ok(Vec::new())
+        }
         async fn save_device(&self, _device: &Device) -> anyhow::Result<()> {
             Ok(())
         }
         async fn save_room(&self, _room: &Room) -> anyhow::Result<()> {
             Ok(())
         }
+        async fn save_group(&self, _group: &DeviceGroup) -> anyhow::Result<()> {
+            Ok(())
+        }
         async fn delete_device(&self, _id: &DeviceId) -> anyhow::Result<()> {
             Ok(())
         }
         async fn delete_room(&self, _id: &RoomId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_group(&self, _id: &GroupId) -> anyhow::Result<()> {
             Ok(())
         }
         async fn load_device_history(

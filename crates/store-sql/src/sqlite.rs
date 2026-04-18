@@ -5,7 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use smart_home_core::model::{
-    AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
+    AttributeValue, Attributes, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room,
+    RoomId,
 };
 use smart_home_core::store::{
     AttributeHistoryEntry, AutomationExecutionHistoryEntry, AutomationRuntimeState,
@@ -38,6 +39,27 @@ CREATE TABLE IF NOT EXISTS rooms (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL
 )
+"#;
+
+const CREATE_GROUPS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+)
+"#;
+
+const CREATE_GROUP_MEMBERS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+    member_order INTEGER NOT NULL,
+    PRIMARY KEY (group_id, device_id)
+)
+"#;
+
+const CREATE_GROUP_MEMBERS_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_group_members_group_order
+ON group_members(group_id, member_order)
 "#;
 
 const CREATE_DEVICE_HISTORY_TABLE_SQL: &str = r#"
@@ -134,6 +156,7 @@ CREATE TABLE IF NOT EXISTS automation_runtime_state (
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const SCHEMA_VERSION_V1: i64 = 1;
 const SCHEMA_VERSION_V2: i64 = 2;
+const SCHEMA_VERSION_V3: i64 = 3;
 
 #[derive(Debug, Clone)]
 pub struct SqliteHistoryConfig {
@@ -216,6 +239,9 @@ impl SqliteDeviceStore {
         }
         if schema_version < 2 {
             self.migrate_to_v2().await?;
+        }
+        if schema_version < 3 {
+            self.migrate_to_v3().await?;
         }
 
         Ok(())
@@ -313,6 +339,38 @@ impl SqliteDeviceStore {
         )
         .bind(SCHEMA_VERSION_KEY)
         .bind(SCHEMA_VERSION_V2.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to write SQLite schema version")?;
+
+        Ok(())
+    }
+
+    async fn migrate_to_v3(&self) -> Result<()> {
+        sqlx::query(CREATE_GROUPS_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite groups table")?;
+
+        sqlx::query(CREATE_GROUP_MEMBERS_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite group members table")?;
+
+        sqlx::query(CREATE_GROUP_MEMBERS_INDEX_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite group members index")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO schema_metadata (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+        )
+        .bind(SCHEMA_VERSION_KEY)
+        .bind(SCHEMA_VERSION_V3.to_string())
         .execute(&self.pool)
         .await
         .context("failed to write SQLite schema version")?;
@@ -572,6 +630,22 @@ impl DeviceStore for SqliteDeviceStore {
         rows.into_iter().map(room_from_row).collect()
     }
 
+    async fn load_all_groups(&self) -> Result<Vec<DeviceGroup>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT g.id, g.name, gm.device_id, gm.member_order
+            FROM groups g
+            LEFT JOIN group_members gm ON gm.group_id = g.id
+            ORDER BY g.id, gm.member_order ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load groups from SQLite")?;
+
+        Ok(groups_from_rows(rows))
+    }
+
     async fn save_device(&self, device: &Device) -> Result<()> {
         let previous = self.load_persisted_device(&device.id).await?;
         let attributes_json = serde_json::to_string(&device.attributes)
@@ -627,6 +701,63 @@ impl DeviceStore for SqliteDeviceStore {
         Ok(())
     }
 
+    async fn save_group(&self, group: &DeviceGroup) -> Result<()> {
+        let mut tx = self.pool.begin().await.with_context(|| {
+            format!("failed to start transaction to save group '{}'", group.id.0)
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO groups (id, name)
+            VALUES (?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name
+            "#,
+        )
+        .bind(&group.id.0)
+        .bind(&group.name)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("failed to save group '{}' to SQLite", group.id.0))?;
+
+        sqlx::query("DELETE FROM group_members WHERE group_id = ?1")
+            .bind(&group.id.0)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to clear existing members for group '{}' in SQLite",
+                    group.id.0
+                )
+            })?;
+
+        for (order, member) in group.members.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO group_members (group_id, device_id, member_order)
+                VALUES (?1, ?2, ?3)
+                "#,
+            )
+            .bind(&group.id.0)
+            .bind(&member.0)
+            .bind(order as i64)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to save member '{}' for group '{}' to SQLite",
+                    member.0, group.id.0
+                )
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .with_context(|| format!("failed to commit group '{}' transaction", group.id.0))?;
+
+        Ok(())
+    }
+
     async fn delete_device(&self, id: &DeviceId) -> Result<()> {
         sqlx::query("DELETE FROM devices WHERE device_id = ?1")
             .bind(&id.0)
@@ -643,6 +774,16 @@ impl DeviceStore for SqliteDeviceStore {
             .execute(&self.pool)
             .await
             .with_context(|| format!("failed to delete room '{}' from SQLite", id.0))?;
+
+        Ok(())
+    }
+
+    async fn delete_group(&self, id: &GroupId) -> Result<()> {
+        sqlx::query("DELETE FROM groups WHERE id = ?1")
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete group '{}' from SQLite", id.0))?;
 
         Ok(())
     }
@@ -1124,6 +1265,39 @@ fn room_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Room> {
     })
 }
 
+fn groups_from_rows(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<DeviceGroup> {
+    let mut groups: Vec<DeviceGroup> = Vec::new();
+
+    for row in rows {
+        let id = row.get::<String, _>("id");
+        let name = row.get::<String, _>("name");
+        let member_device_id = row.get::<Option<String>, _>("device_id");
+
+        let group_id = GroupId(id.clone());
+        if groups
+            .last()
+            .map(|group| group.id != group_id)
+            .unwrap_or(true)
+        {
+            groups.push(DeviceGroup {
+                id: group_id,
+                name,
+                members: Vec::new(),
+            });
+        }
+
+        if let Some(member_device_id) = member_device_id {
+            groups
+                .last_mut()
+                .expect("group list is initialized")
+                .members
+                .push(DeviceId(member_device_id));
+        }
+    }
+
+    groups
+}
+
 fn device_kind_to_str(kind: &DeviceKind) -> &'static str {
     match kind {
         DeviceKind::Sensor => "sensor",
@@ -1324,6 +1498,35 @@ mod tests {
         assert_eq!(
             store.load_all_rooms().await.expect("load rooms succeeds"),
             vec![room]
+        );
+    }
+
+    #[tokio::test]
+    async fn save_and_load_groups_with_members() {
+        let store = temp_store().await;
+        store
+            .save_room(&Room {
+                id: RoomId("lab".to_string()),
+                name: "Lab".to_string(),
+            })
+            .await
+            .expect("save room succeeds");
+        let device = sample_device("test:one", 20.0);
+        store
+            .save_device(&device)
+            .await
+            .expect("save device succeeds");
+
+        let group = DeviceGroup {
+            id: GroupId("bedroom_lamps".to_string()),
+            name: "Bedroom Lamps".to_string(),
+            members: vec![device.id.clone()],
+        };
+        store.save_group(&group).await.expect("save group succeeds");
+
+        assert_eq!(
+            store.load_all_groups().await.expect("load groups succeeds"),
+            vec![group]
         );
     }
 

@@ -171,6 +171,42 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(devices))
         });
 
+        methods.add_method("get_group", |lua, this, group_id: String| {
+            let Some(group) = this
+                .runtime
+                .registry()
+                .get_group(&smart_home_core::model::GroupId(group_id))
+            else {
+                return Ok(Value::Nil);
+            };
+
+            attribute_to_lua_value(&lua, group_to_attribute_value(&group))
+        });
+
+        methods.add_method("list_groups", |lua, this, (): ()| {
+            let groups = this
+                .runtime
+                .registry()
+                .list_groups()
+                .into_iter()
+                .map(|group| group_to_attribute_value(&group))
+                .collect();
+
+            attribute_to_lua_value(&lua, AttributeValue::Array(groups))
+        });
+
+        methods.add_method("list_group_devices", |lua, this, group_id: String| {
+            let devices = this
+                .runtime
+                .registry()
+                .list_devices_in_group(&smart_home_core::model::GroupId(group_id))
+                .into_iter()
+                .map(|device| device_to_attribute_value(&device))
+                .collect();
+
+            attribute_to_lua_value(&lua, AttributeValue::Array(devices))
+        });
+
         methods.add_method(
             "log",
             |_, _, (level, message, fields): (String, String, Option<Value>)| {
@@ -235,6 +271,23 @@ fn room_to_attribute_value(room: &Room) -> AttributeValue {
     AttributeValue::Object(HashMap::from([
         ("id".to_string(), AttributeValue::Text(room.id.0.clone())),
         ("name".to_string(), AttributeValue::Text(room.name.clone())),
+    ]))
+}
+
+fn group_to_attribute_value(group: &smart_home_core::model::DeviceGroup) -> AttributeValue {
+    AttributeValue::Object(HashMap::from([
+        ("id".to_string(), AttributeValue::Text(group.id.0.clone())),
+        ("name".to_string(), AttributeValue::Text(group.name.clone())),
+        (
+            "members".to_string(),
+            AttributeValue::Array(
+                group
+                    .members
+                    .iter()
+                    .map(|member| AttributeValue::Text(member.0.clone()))
+                    .collect(),
+            ),
+        ),
     ]))
 }
 

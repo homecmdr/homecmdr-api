@@ -11,6 +11,10 @@ pub struct DeviceId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RoomId(pub String);
 
+/// Unique identifier for a device group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GroupId(pub String);
+
 /// The kind of device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +54,17 @@ pub struct Room {
     pub id: RoomId,
     /// Human-readable room name.
     pub name: String,
+}
+
+/// A logical device group with explicit static membership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroup {
+    /// Stable unique group identifier.
+    pub id: GroupId,
+    /// Human-readable group name.
+    pub name: String,
+    /// Explicit member devices by device ID.
+    pub members: Vec<DeviceId>,
 }
 
 /// Typed attribute values.

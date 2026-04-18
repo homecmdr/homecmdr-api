@@ -356,6 +356,110 @@ Possible per-device statuses:
 - `unsupported`
 - `error`
 
+## Groups
+
+Groups are explicit user-defined collections of devices. Membership is static and managed directly with device IDs.
+
+### `GET /groups`
+
+Returns all groups.
+
+Example:
+
+```bash
+curl http://127.0.0.1:3000/groups
+```
+
+Response shape:
+
+```json
+[
+  {
+    "id": "bedroom_lamps",
+    "name": "Bedroom Lamps",
+    "members": ["zigbee2mqtt:bedside_left", "zigbee2mqtt:bedside_right"]
+  }
+]
+```
+
+### `POST /groups`
+
+Creates or updates a group.
+
+Request body:
+
+```json
+{
+  "id": "bedroom_lamps",
+  "name": "Bedroom Lamps",
+  "members": ["zigbee2mqtt:bedside_left", "zigbee2mqtt:bedside_right"]
+}
+```
+
+Validation:
+
+- group ID must not be empty
+- group name must not be empty
+- members must not contain empty IDs
+- every member must refer to an existing device
+
+### `GET /groups/{id}`
+
+Returns one group by ID.
+
+### `DELETE /groups/{id}`
+
+Deletes a group.
+
+### `POST /groups/{id}/members`
+
+Replaces group membership with an explicit device list.
+
+Request body:
+
+```json
+{
+  "members": ["zigbee2mqtt:bedside_left", "zigbee2mqtt:bedside_right"]
+}
+```
+
+Behavior:
+
+- returns 404 if the group does not exist
+- returns 400 if any member device does not exist
+- removes duplicate member IDs while preserving first-seen order
+
+### `GET /groups/{id}/devices`
+
+Returns all devices currently in the group.
+
+### `POST /groups/{id}/command`
+
+Fans out one canonical command to every device currently in the group.
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:3000/groups/bedroom_lamps/command \
+  -H 'Content-Type: application/json' \
+  -d '{"capability":"power","action":"off"}'
+```
+
+Response shape:
+
+```json
+[
+  { "device_id": "zigbee2mqtt:bedside_left", "status": "ok", "message": null },
+  { "device_id": "zigbee2mqtt:bedside_right", "status": "ok", "message": null }
+]
+```
+
+Possible per-device statuses:
+
+- `ok`
+- `unsupported`
+- `error`
+
 ## WebSocket Events
 
 ### `GET /events`
@@ -376,6 +480,10 @@ Current emitted event frame types:
 - `room.added`
 - `room.updated`
 - `room.removed`
+- `group.added`
+- `group.updated`
+- `group.removed`
+- `group.members_changed`
 - `adapter.started`
 - `system.error`
 

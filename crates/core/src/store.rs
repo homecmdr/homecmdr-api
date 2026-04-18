@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::command::DeviceCommand;
-use crate::model::{AttributeValue, Device, DeviceId, Room, RoomId};
+use crate::model::{AttributeValue, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceHistoryEntry {
@@ -69,10 +69,13 @@ pub struct AutomationRuntimeState {
 pub trait DeviceStore: Send + Sync + 'static {
     async fn load_all_devices(&self) -> anyhow::Result<Vec<Device>>;
     async fn load_all_rooms(&self) -> anyhow::Result<Vec<Room>>;
+    async fn load_all_groups(&self) -> anyhow::Result<Vec<DeviceGroup>>;
     async fn save_device(&self, device: &Device) -> anyhow::Result<()>;
     async fn save_room(&self, room: &Room) -> anyhow::Result<()>;
+    async fn save_group(&self, group: &DeviceGroup) -> anyhow::Result<()>;
     async fn delete_device(&self, id: &DeviceId) -> anyhow::Result<()>;
     async fn delete_room(&self, id: &RoomId) -> anyhow::Result<()>;
+    async fn delete_group(&self, id: &GroupId) -> anyhow::Result<()>;
     async fn load_device_history(
         &self,
         id: &DeviceId,

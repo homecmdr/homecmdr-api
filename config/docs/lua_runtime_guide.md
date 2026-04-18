@@ -43,6 +43,9 @@ Available methods:
 - `ctx:get_room(room_id)`
 - `ctx:list_rooms()`
 - `ctx:list_room_devices(room_id)`
+- `ctx:get_group(group_id)`
+- `ctx:list_groups()`
+- `ctx:list_group_devices(group_id)`
 - `ctx:log(level, message, fields?)`
 
 ### `ctx:command(...)`
@@ -97,6 +100,15 @@ Lua assets can inspect the current registry snapshot without going back through 
 - `ctx:get_room(room_id)` returns a room table or `nil`
 - `ctx:list_rooms()` returns an array of room tables
 - `ctx:list_room_devices(room_id)` returns devices currently assigned to a room
+- `ctx:get_group(group_id)` returns a group table or `nil`
+- `ctx:list_groups()` returns an array of group tables
+- `ctx:list_group_devices(group_id)` returns devices currently in a group
+
+Returned group tables include:
+
+- `id`
+- `name`
+- `members` (array of device IDs)
 
 Returned device tables include:
 

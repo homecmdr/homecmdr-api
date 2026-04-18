@@ -28,7 +28,7 @@ use smart_home_core::capability::{
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use smart_home_core::event::Event;
-use smart_home_core::model::{DeviceId, Room, RoomId};
+use smart_home_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use smart_home_core::runtime::Runtime;
 use smart_home_core::store::{
     AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry, DeviceHistoryEntry,
@@ -98,6 +98,20 @@ struct AssignRoomRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateGroupRequest {
+    id: String,
+    name: String,
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetGroupMembersRequest {
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AutomationEnabledRequest {
     enabled: bool,
 }
@@ -109,6 +123,13 @@ struct ManualAutomationRequest {
 
 #[derive(Debug, Serialize)]
 struct RoomCommandResult {
+    device_id: String,
+    status: &'static str,
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GroupCommandResult {
     device_id: String,
     status: &'static str,
     message: Option<String>,
@@ -268,6 +289,7 @@ struct DiagnosticsResponse {
     ready: bool,
     devices: usize,
     rooms: usize,
+    groups: usize,
     scenes: usize,
     automations: usize,
     history_enabled: bool,
@@ -587,11 +609,19 @@ async fn main() -> Result<()> {
             .load_all_rooms()
             .await
             .context("failed to load persisted rooms")?;
+        let groups = store
+            .load_all_groups()
+            .await
+            .context("failed to load persisted groups")?;
         let devices = store
             .load_all_devices()
             .await
             .context("failed to load persisted devices")?;
         runtime.registry().restore_rooms(rooms);
+        runtime
+            .registry()
+            .restore_groups(groups)
+            .context("failed to restore persisted groups into registry")?;
         runtime
             .registry()
             .restore(devices)
@@ -855,6 +885,7 @@ async fn run_persistence_worker(
             _ = &mut shutdown => {
                 if let Err(error) = reconcile_device_store(
                     runtime.registry().list_rooms(),
+                    runtime.registry().list_groups(),
                     runtime.registry().list(),
                     store.clone(),
                 )
@@ -947,6 +978,41 @@ async fn run_persistence_worker(
                     health.persistence_ok();
                 }
             }
+            Ok(Event::GroupAdded { group } | Event::GroupUpdated { group }) => {
+                if let Err(error) = store.save_group(&group).await {
+                    health.persistence_error(format!(
+                        "failed to persist group '{}': {error}",
+                        group.id.0
+                    ));
+                    tracing::error!(group_id = %group.id.0, error = %error, "failed to persist group");
+                } else {
+                    health.persistence_ok();
+                }
+            }
+            Ok(Event::GroupMembersChanged { id, .. }) => {
+                if let Some(group) = runtime.registry().get_group(&id) {
+                    if let Err(error) = store.save_group(&group).await {
+                        health.persistence_error(format!(
+                            "failed to persist group membership change for '{}': {error}",
+                            id.0
+                        ));
+                        tracing::error!(group_id = %id.0, error = %error, "failed to persist group membership change");
+                    } else {
+                        health.persistence_ok();
+                    }
+                }
+            }
+            Ok(Event::GroupRemoved { id }) => {
+                if let Err(error) = store.delete_group(&id).await {
+                    health.persistence_error(format!(
+                        "failed to delete persisted group '{}': {error}",
+                        id.0
+                    ));
+                    tracing::error!(group_id = %id.0, error = %error, "failed to delete persisted group");
+                } else {
+                    health.persistence_ok();
+                }
+            }
             Ok(Event::RoomRemoved { id }) => {
                 if let Err(error) = store.delete_room(&id).await {
                     health.persistence_error(format!("failed to delete room '{}': {error}", id.0));
@@ -981,6 +1047,7 @@ async fn run_persistence_worker(
 
                 if let Err(error) = reconcile_device_store(
                     runtime.registry().list_rooms(),
+                    runtime.registry().list_groups(),
                     runtime.registry().list(),
                     store.clone(),
                 )
@@ -1008,6 +1075,7 @@ fn adapter_name_from_system_error(message: &str) -> Option<&str> {
 
 async fn reconcile_device_store(
     rooms: Vec<Room>,
+    groups: Vec<DeviceGroup>,
     devices: Vec<smart_home_core::model::Device>,
     store: Arc<dyn DeviceStore>,
 ) -> Result<()> {
@@ -1021,6 +1089,17 @@ async fn reconcile_device_store(
     let current_room_ids = rooms
         .iter()
         .map(|room| room.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let persisted_group_ids = store
+        .load_all_groups()
+        .await
+        .context("failed to load persisted groups for reconciliation")?
+        .into_iter()
+        .map(|group| group.id)
+        .collect::<std::collections::HashSet<_>>();
+    let current_group_ids = groups
+        .iter()
+        .map(|group| group.id.clone())
         .collect::<std::collections::HashSet<_>>();
     let persisted_ids = store
         .load_all_devices()
@@ -1046,6 +1125,24 @@ async fn reconcile_device_store(
     for room in rooms {
         store.save_room(&room).await.with_context(|| {
             format!("failed to save room '{}' during reconciliation", room.id.0)
+        })?;
+    }
+
+    for stale_id in persisted_group_ids.difference(&current_group_ids) {
+        store.delete_group(stale_id).await.with_context(|| {
+            format!(
+                "failed to delete stale group '{}' during reconciliation",
+                stale_id.0
+            )
+        })?;
+    }
+
+    for group in groups {
+        store.save_group(&group).await.with_context(|| {
+            format!(
+                "failed to save group '{}' during reconciliation",
+                group.id.0
+            )
         })?;
     }
 
@@ -1096,6 +1193,11 @@ fn app(state: AppState, config: &Config) -> Router {
         .route("/rooms/{id}", get(get_room).delete(delete_room))
         .route("/rooms/{id}/devices", get(list_room_devices))
         .route("/rooms/{id}/command", post(command_room_devices))
+        .route("/groups", get(list_groups).post(create_group))
+        .route("/groups/{id}", get(get_group).delete(delete_group))
+        .route("/groups/{id}/devices", get(list_group_devices))
+        .route("/groups/{id}/members", post(set_group_members))
+        .route("/groups/{id}/command", post(command_group_devices))
         .route("/devices", get(list_devices))
         .route("/devices/{id}", get(get_device))
         .route("/devices/{id}/history", get(get_device_history))
@@ -1193,6 +1295,7 @@ async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse>
         ready: health.ready,
         devices: state.runtime.registry().list().len(),
         rooms: state.runtime.registry().list_rooms().len(),
+        groups: state.runtime.registry().list_groups().len(),
         scenes: state.scenes.summaries().len(),
         automations: state.automations.summaries().len(),
         history_enabled: state.history.enabled,
@@ -1479,6 +1582,125 @@ async fn list_room_devices(
     ))
 }
 
+fn validate_group_payload(id: &str, name: &str, members: &[String]) -> Result<(), ApiError> {
+    if id.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "group id must not be empty",
+        ));
+    }
+    if name.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "group name must not be empty",
+        ));
+    }
+    for member in members {
+        if member.trim().is_empty() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "group members must not contain empty device IDs",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn list_groups(State(state): State<AppState>) -> Json<Vec<DeviceGroup>> {
+    Json(state.runtime.registry().list_groups())
+}
+
+async fn create_group(
+    State(state): State<AppState>,
+    Json(request): Json<CreateGroupRequest>,
+) -> Result<Json<DeviceGroup>, ApiError> {
+    let id = request.id.trim();
+    let name = request.name.trim();
+    validate_group_payload(id, name, &request.members)?;
+
+    let group = DeviceGroup {
+        id: GroupId(id.to_string()),
+        name: name.to_string(),
+        members: request.members.into_iter().map(DeviceId).collect(),
+    };
+
+    state
+        .runtime
+        .registry()
+        .upsert_group(group.clone())
+        .await
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+
+    Ok(Json(group))
+}
+
+async fn get_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DeviceGroup>, ApiError> {
+    state
+        .runtime
+        .registry()
+        .get_group(&GroupId(id.clone()))
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("group '{id}' not found")))
+}
+
+async fn delete_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let group_id = GroupId(id.clone());
+    if !state.runtime.registry().remove_group(&group_id).await {
+        return Err(ApiError::not_found(format!("group '{id}' not found")));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_group_members(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<SetGroupMembersRequest>,
+) -> Result<Json<DeviceGroup>, ApiError> {
+    let group_id = GroupId(id.clone());
+    if state.runtime.registry().get_group(&group_id).is_none() {
+        return Err(ApiError::not_found(format!("group '{id}' not found")));
+    }
+
+    state
+        .runtime
+        .registry()
+        .set_group_members(
+            &group_id,
+            request.members.into_iter().map(DeviceId).collect(),
+        )
+        .await
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+
+    state
+        .runtime
+        .registry()
+        .get_group(&group_id)
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found(format!("group '{id}' not found")))
+}
+
+async fn list_group_devices(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<smart_home_core::model::Device>>, ApiError> {
+    let group_id = GroupId(id.clone());
+    if state.runtime.registry().get_group(&group_id).is_none() {
+        return Err(ApiError::not_found(format!("group '{id}' not found")));
+    }
+
+    Ok(Json(
+        state.runtime.registry().list_devices_in_group(&group_id),
+    ))
+}
+
 async fn list_devices(
     State(state): State<AppState>,
     RawQuery(raw_query): RawQuery,
@@ -1732,6 +1954,94 @@ async fn command_room_devices(
                     },
                 );
                 results.push(RoomCommandResult {
+                    device_id: device_id.0,
+                    status: "error",
+                    message: Some(error.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Json(results))
+}
+
+async fn command_group_devices(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(command): Json<DeviceCommand>,
+) -> Result<Json<Vec<GroupCommandResult>>, ApiError> {
+    let group_id = GroupId(id.clone());
+    if state.runtime.registry().get_group(&group_id).is_none() {
+        return Err(ApiError::not_found(format!("group '{id}' not found")));
+    }
+
+    command
+        .validate()
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+
+    let devices = state.runtime.registry().list_devices_in_group(&group_id);
+    let mut results = Vec::with_capacity(devices.len());
+
+    for device in devices {
+        let device_id = device.id.clone();
+        let audit_command = command.clone();
+        match state
+            .runtime
+            .command_device(&device_id, command.clone())
+            .await
+        {
+            Ok(true) => {
+                persist_command_audit(
+                    &state,
+                    CommandAuditEntry {
+                        recorded_at: Utc::now(),
+                        source: "group".to_string(),
+                        room_id: device.room_id.clone(),
+                        device_id: device_id.clone(),
+                        command: audit_command,
+                        status: "ok".to_string(),
+                        message: None,
+                    },
+                );
+                results.push(GroupCommandResult {
+                    device_id: device_id.0,
+                    status: "ok",
+                    message: None,
+                });
+            }
+            Ok(false) => {
+                persist_command_audit(
+                    &state,
+                    CommandAuditEntry {
+                        recorded_at: Utc::now(),
+                        source: "group".to_string(),
+                        room_id: device.room_id.clone(),
+                        device_id: device_id.clone(),
+                        command: audit_command,
+                        status: "unsupported".to_string(),
+                        message: Some("device commands are not implemented".to_string()),
+                    },
+                );
+                results.push(GroupCommandResult {
+                    device_id: device_id.0,
+                    status: "unsupported",
+                    message: Some("device commands are not implemented".to_string()),
+                });
+            }
+            Err(error) => {
+                persist_command_audit(
+                    &state,
+                    CommandAuditEntry {
+                        recorded_at: Utc::now(),
+                        source: "group".to_string(),
+                        room_id: device.room_id.clone(),
+                        device_id: device_id.clone(),
+                        command: audit_command,
+                        status: "error".to_string(),
+                        message: Some(error.to_string()),
+                    },
+                );
+                results.push(GroupCommandResult {
                     device_id: device_id.0,
                     status: "error",
                     message: Some(error.to_string()),
@@ -2000,6 +2310,20 @@ fn event_to_frame(event: Event) -> serde_json::Value {
             json!({ "type": "room.updated", "room": room })
         }
         Event::RoomRemoved { id } => json!({ "type": "room.removed", "id": id.0 }),
+        Event::GroupAdded { group } => {
+            json!({ "type": "group.added", "group": group })
+        }
+        Event::GroupUpdated { group } => {
+            json!({ "type": "group.updated", "group": group })
+        }
+        Event::GroupRemoved { id } => json!({ "type": "group.removed", "id": id.0 }),
+        Event::GroupMembersChanged { id, members } => {
+            json!({
+                "type": "group.members_changed",
+                "id": id.0,
+                "members": members.into_iter().map(|member| member.0).collect::<Vec<_>>()
+            })
+        }
         Event::DeviceRoomChanged { id, room_id } => {
             json!({ "type": "device.room_changed", "id": id.0, "room_id": room_id.map(|room| room.0) })
         }
@@ -2053,7 +2377,7 @@ mod tests {
     use smart_home_core::command::DeviceCommand;
     use smart_home_core::config::{Config, HistoryConfig, PersistenceBackend};
     use smart_home_core::model::{
-        AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
+        AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
     };
     use smart_home_core::runtime::RuntimeConfig;
     use smart_home_core::store::AutomationRuntimeState;
@@ -2078,6 +2402,7 @@ mod tests {
     struct LaggyMemoryStore {
         devices: Mutex<HashMap<DeviceId, Device>>,
         rooms: Mutex<HashMap<RoomId, Room>>,
+        groups: Mutex<HashMap<GroupId, DeviceGroup>>,
         device_history: Mutex<HashMap<DeviceId, Vec<DeviceHistoryEntry>>>,
         attribute_history: Mutex<HashMap<(DeviceId, String), Vec<AttributeHistoryEntry>>>,
         command_audit: Mutex<Vec<CommandAuditEntry>>,
@@ -2105,6 +2430,7 @@ mod tests {
             Self {
                 devices: Mutex::new(HashMap::new()),
                 rooms: Mutex::new(HashMap::new()),
+                groups: Mutex::new(HashMap::new()),
                 device_history: Mutex::new(HashMap::new()),
                 attribute_history: Mutex::new(HashMap::new()),
                 command_audit: Mutex::new(Vec::new()),
@@ -2150,6 +2476,18 @@ mod tests {
                 .collect::<Vec<_>>();
             rooms.sort_by(|a, b| a.id.0.cmp(&b.id.0));
             Ok(rooms)
+        }
+
+        async fn load_all_groups(&self) -> anyhow::Result<Vec<DeviceGroup>> {
+            let mut groups = self
+                .groups
+                .lock()
+                .expect("groups lock")
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            groups.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+            Ok(groups)
         }
 
         async fn save_device(&self, device: &Device) -> anyhow::Result<()> {
@@ -2212,6 +2550,14 @@ mod tests {
             Ok(())
         }
 
+        async fn save_group(&self, group: &DeviceGroup) -> anyhow::Result<()> {
+            self.groups
+                .lock()
+                .expect("groups lock")
+                .insert(group.id.clone(), group.clone());
+            Ok(())
+        }
+
         async fn delete_device(&self, id: &DeviceId) -> anyhow::Result<()> {
             self.devices.lock().expect("devices lock").remove(id);
             Ok(())
@@ -2219,6 +2565,11 @@ mod tests {
 
         async fn delete_room(&self, id: &RoomId) -> anyhow::Result<()> {
             self.rooms.lock().expect("rooms lock").remove(id);
+            Ok(())
+        }
+
+        async fn delete_group(&self, id: &GroupId) -> anyhow::Result<()> {
+            self.groups.lock().expect("groups lock").remove(id);
             Ok(())
         }
 
@@ -3317,6 +3668,140 @@ mod tests {
             body.as_array().expect("room command results array").len(),
             2
         );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn groups_can_be_created_listed_and_commanded() {
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("device upsert succeeds");
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device-b",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(21.0, "celsius"),
+            ))
+            .await
+            .expect("device-b upsert succeeds");
+
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+        let client = reqwest::Client::new();
+
+        let create = client
+            .post(format!("http://{addr}/groups"))
+            .json(&json!({
+                "id": "bedroom_lamps",
+                "name": "Bedroom Lamps",
+                "members": ["test:device", "test:device-b"]
+            }))
+            .send()
+            .await
+            .expect("create group request succeeds");
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let groups = reqwest::get(format!("http://{addr}/groups"))
+            .await
+            .expect("groups request succeeds")
+            .json::<Value>()
+            .await
+            .expect("groups json body");
+        assert_eq!(groups.as_array().expect("groups array").len(), 1);
+        assert_eq!(groups[0]["id"], "bedroom_lamps");
+
+        let command = client
+            .post(format!("http://{addr}/groups/bedroom_lamps/command"))
+            .json(&json!({
+                "capability": "brightness",
+                "action": "set",
+                "value": 42
+            }))
+            .send()
+            .await
+            .expect("group command request succeeds");
+        assert_eq!(command.status(), StatusCode::OK);
+
+        let command_body = command
+            .json::<Value>()
+            .await
+            .expect("group command json body");
+        assert_eq!(
+            command_body.as_array().expect("group results array").len(),
+            2
+        );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn group_members_can_be_updated() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(20.0, "celsius"),
+            ))
+            .await
+            .expect("device upsert succeeds");
+        runtime
+            .registry()
+            .upsert(sample_device(
+                "test:device-b",
+                TEMPERATURE_OUTDOOR,
+                measurement_value(21.0, "celsius"),
+            ))
+            .await
+            .expect("device-b upsert succeeds");
+        runtime
+            .registry()
+            .upsert_group(DeviceGroup {
+                id: GroupId("bedroom_lamps".to_string()),
+                name: "Bedroom Lamps".to_string(),
+                members: vec![DeviceId("test:device".to_string())],
+            })
+            .await
+            .expect("group upsert succeeds");
+
+        let (addr, shutdown, handle) = spawn_test_server(runtime).await;
+        let client = reqwest::Client::new();
+
+        let updated = client
+            .post(format!("http://{addr}/groups/bedroom_lamps/members"))
+            .json(&json!({"members": ["test:device-b"]}))
+            .send()
+            .await
+            .expect("set group members request succeeds");
+
+        assert_eq!(updated.status(), StatusCode::OK);
+        let body = updated
+            .json::<Value>()
+            .await
+            .expect("updated group json body");
+        assert_eq!(body["members"][0], "test:device-b");
 
         let _ = shutdown.send(());
         handle.await.expect("server task completes");
@@ -4949,7 +5434,7 @@ mod tests {
             .expect("seed stale device succeeds");
 
         let store_trait: Arc<dyn DeviceStore> = store.clone();
-        reconcile_device_store(Vec::new(), vec![current.clone()], store_trait)
+        reconcile_device_store(Vec::new(), Vec::new(), vec![current.clone()], store_trait)
             .await
             .expect("reconciliation succeeds");
 

@@ -6,13 +6,14 @@ use anyhow::Result;
 use crate::bus::EventBus;
 use crate::capability::{capability_definition, is_custom_attribute_key, CapabilitySchema};
 use crate::event::Event;
-use crate::model::{AttributeValue, Device, DeviceId, Room, RoomId};
+use crate::model::{AttributeValue, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
 
 #[derive(Debug, Clone)]
 pub struct DeviceRegistry {
     bus: EventBus,
     devices: Arc<RwLock<HashMap<DeviceId, Device>>>,
     rooms: Arc<RwLock<HashMap<RoomId, Room>>>,
+    groups: Arc<RwLock<HashMap<GroupId, DeviceGroup>>>,
 }
 
 impl DeviceRegistry {
@@ -21,6 +22,7 @@ impl DeviceRegistry {
             bus,
             devices: Arc::new(RwLock::new(HashMap::new())),
             rooms: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -94,17 +96,57 @@ impl DeviceRegistry {
         *current = restored;
     }
 
+    pub fn restore_groups(&self, groups: Vec<DeviceGroup>) -> Result<()> {
+        let devices = read_guard(&self.devices);
+        let mut restored = HashMap::with_capacity(groups.len());
+
+        for group in groups {
+            validate_group(&group)?;
+            validate_group_membership(&devices, &group)?;
+            restored.insert(group.id.clone(), group);
+        }
+
+        let mut current = write_guard(&self.groups);
+        *current = restored;
+
+        Ok(())
+    }
+
     pub async fn remove(&self, id: &DeviceId) -> bool {
         let removed = {
             let mut devices = write_guard(&self.devices);
             devices.remove(id).is_some()
         };
 
-        if removed {
-            self.bus.publish(Event::DeviceRemoved { id: id.clone() });
+        if !removed {
+            return false;
         }
 
-        removed
+        self.bus.publish(Event::DeviceRemoved { id: id.clone() });
+
+        let changed_groups = {
+            let mut groups = write_guard(&self.groups);
+            let mut changed = Vec::new();
+
+            for group in groups.values_mut() {
+                let previous_len = group.members.len();
+                group.members.retain(|member_id| member_id != id);
+                if group.members.len() != previous_len {
+                    changed.push((group.id.clone(), group.members.clone()));
+                }
+            }
+
+            changed
+        };
+
+        for (group_id, members) in changed_groups {
+            self.bus.publish(Event::GroupMembersChanged {
+                id: group_id,
+                members,
+            });
+        }
+
+        true
     }
 
     pub fn get(&self, id: &DeviceId) -> Option<Device> {
@@ -184,6 +226,109 @@ impl DeviceRegistry {
             .collect()
     }
 
+    pub async fn upsert_group(&self, group: DeviceGroup) -> Result<()> {
+        validate_group(&group)?;
+
+        {
+            let devices = read_guard(&self.devices);
+            validate_group_membership(&devices, &group)?;
+        }
+
+        let event = {
+            let mut groups = write_guard(&self.groups);
+            match groups.insert(group.id.clone(), group.clone()) {
+                Some(_) => Event::GroupUpdated { group },
+                None => Event::GroupAdded { group },
+            }
+        };
+
+        self.bus.publish(event);
+        Ok(())
+    }
+
+    pub async fn remove_group(&self, id: &GroupId) -> bool {
+        let removed = {
+            let mut groups = write_guard(&self.groups);
+            groups.remove(id).is_some()
+        };
+
+        if removed {
+            self.bus.publish(Event::GroupRemoved { id: id.clone() });
+        }
+
+        removed
+    }
+
+    pub fn get_group(&self, id: &GroupId) -> Option<DeviceGroup> {
+        let groups = read_guard(&self.groups);
+        groups.get(id).cloned()
+    }
+
+    pub fn list_groups(&self) -> Vec<DeviceGroup> {
+        let groups = read_guard(&self.groups);
+        groups.values().cloned().collect()
+    }
+
+    pub fn list_devices_in_group(&self, group_id: &GroupId) -> Vec<Device> {
+        let members = {
+            let groups = read_guard(&self.groups);
+            groups
+                .get(group_id)
+                .map(|group| group.members.clone())
+                .unwrap_or_default()
+        };
+
+        let devices = read_guard(&self.devices);
+        members
+            .into_iter()
+            .filter_map(|id| devices.get(&id).cloned())
+            .collect()
+    }
+
+    pub async fn set_group_members(
+        &self,
+        group_id: &GroupId,
+        members: Vec<DeviceId>,
+    ) -> Result<bool> {
+        let deduped_members = dedupe_member_ids(members);
+
+        {
+            let devices = read_guard(&self.devices);
+            for member in &deduped_members {
+                if !devices.contains_key(member) {
+                    anyhow::bail!(
+                        "group '{}' references unknown device '{}'",
+                        group_id.0,
+                        member.0
+                    );
+                }
+            }
+        }
+
+        let changed = {
+            let mut groups = write_guard(&self.groups);
+            let Some(group) = groups.get_mut(group_id) else {
+                return Ok(false);
+            };
+
+            if group.members == deduped_members {
+                return Ok(true);
+            }
+
+            group.members = deduped_members.clone();
+            true
+        };
+
+        if changed {
+            self.bus.publish(Event::GroupMembersChanged {
+                id: group_id.clone(),
+                members: deduped_members,
+            });
+        }
+
+        Ok(true)
+    }
+
     pub async fn assign_device_to_room(
         &self,
         device_id: &DeviceId,
@@ -236,6 +381,42 @@ fn validate_room_assignment(registry: &DeviceRegistry, device: &Device) -> Resul
             room_id.0
         )
     }
+}
+
+fn validate_group(group: &DeviceGroup) -> Result<()> {
+    if group.id.0.trim().is_empty() {
+        anyhow::bail!("group id must not be empty");
+    }
+    if group.name.trim().is_empty() {
+        anyhow::bail!("group name must not be empty");
+    }
+
+    Ok(())
+}
+
+fn validate_group_membership(
+    devices: &HashMap<DeviceId, Device>,
+    group: &DeviceGroup,
+) -> Result<()> {
+    for member in &group.members {
+        if !devices.contains_key(member) {
+            anyhow::bail!(
+                "group '{}' references unknown device '{}'",
+                group.id.0,
+                member.0
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn dedupe_member_ids(members: Vec<DeviceId>) -> Vec<DeviceId> {
+    let mut seen = std::collections::HashSet::new();
+    members
+        .into_iter()
+        .filter(|member| seen.insert(member.clone()))
+        .collect()
 }
 
 fn validate_attributes(device: &Device) -> Result<()> {

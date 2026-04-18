@@ -31,7 +31,9 @@ use crate::capability::{
 use crate::command::DeviceCommand;
 use crate::config::Config;
 use crate::event::Event;
-use crate::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId};
+use crate::model::{
+    AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
+};
 use crate::registry::DeviceRegistry;
 use crate::runtime::{Runtime, RuntimeConfig};
 
@@ -489,6 +491,83 @@ async fn assigning_device_to_room_updates_registry() {
         registry.get(&device.id).expect("device exists").room_id,
         Some(room.id)
     );
+}
+
+#[tokio::test]
+async fn creating_group_with_existing_members_succeeds() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let device = sample_device(
+        "test:grouped",
+        TEMPERATURE_OUTDOOR,
+        measurement_value(22.0, "celsius"),
+    );
+    registry
+        .upsert(device.clone())
+        .await
+        .expect("device insert succeeds");
+
+    let group = DeviceGroup {
+        id: GroupId("bedroom_lamps".to_string()),
+        name: "Bedroom Lamps".to_string(),
+        members: vec![device.id.clone()],
+    };
+
+    registry
+        .upsert_group(group.clone())
+        .await
+        .expect("group upsert succeeds");
+
+    assert_eq!(registry.get_group(&group.id), Some(group));
+}
+
+#[tokio::test]
+async fn creating_group_with_missing_member_is_rejected() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+
+    let error = registry
+        .upsert_group(DeviceGroup {
+            id: GroupId("bedroom_lamps".to_string()),
+            name: "Bedroom Lamps".to_string(),
+            members: vec![DeviceId("test:missing".to_string())],
+        })
+        .await
+        .expect_err("group with unknown member should fail");
+
+    assert!(error
+        .to_string()
+        .contains("references unknown device 'test:missing'"));
+}
+
+#[tokio::test]
+async fn removing_device_prunes_group_membership() {
+    let bus = EventBus::new(16);
+    let registry = DeviceRegistry::new(bus);
+    let device = sample_device(
+        "test:grouped",
+        TEMPERATURE_OUTDOOR,
+        measurement_value(22.0, "celsius"),
+    );
+    registry
+        .upsert(device.clone())
+        .await
+        .expect("device insert succeeds");
+    registry
+        .upsert_group(DeviceGroup {
+            id: GroupId("bedroom_lamps".to_string()),
+            name: "Bedroom Lamps".to_string(),
+            members: vec![device.id.clone()],
+        })
+        .await
+        .expect("group upsert succeeds");
+
+    assert!(registry.remove(&device.id).await);
+
+    let group = registry
+        .get_group(&GroupId("bedroom_lamps".to_string()))
+        .expect("group remains present");
+    assert!(group.members.is_empty());
 }
 
 #[tokio::test]
@@ -1333,8 +1412,11 @@ fn config_loads_default_toml() {
     assert_eq!(config.persistence.history.retention_days, Some(30));
     assert_eq!(config.persistence.history.default_query_limit, 200);
     assert_eq!(config.persistence.history.max_query_limit, 1000);
-    assert!(!config.api.cors.enabled);
-    assert!(config.api.cors.allowed_origins.is_empty());
+    assert!(config.api.cors.enabled);
+    assert_eq!(
+        config.api.cors.allowed_origins,
+        vec!["http://127.0.0.1:8080".to_string()]
+    );
     assert!(!config.telemetry.enabled);
     assert!(config.telemetry.selection.device_ids.is_empty());
     let open_meteo = config
