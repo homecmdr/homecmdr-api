@@ -68,25 +68,25 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` done
 ## Phase 2 — Official adapter completeness
 
 ### 2.1 zigbee2mqtt — device type expansion
-- [ ] Sensors: motion, contact/door, temperature, humidity, occupancy, smoke, water leak
-- [ ] Battery level (`battery`) for all battery-powered devices
-- [ ] Locks: lock/unlock state and commands
-- [ ] Covers/blinds: position, tilt, open/close commands
-- [ ] Tests for new device kinds
+- [x] Sensors: motion, contact/door, temperature, humidity, occupancy, smoke, water leak
+- [x] Battery level (`battery`) for all battery-powered devices
+- [x] Locks: lock/unlock state and commands
+- [x] Covers/blinds: position, tilt, open/close commands
+- [x] Tests for new device kinds
 
 ### 2.2 open-meteo — v2 current API
-- [ ] Switch from `?current_weather=true` to `?current=` parameter set
-- [ ] Add: apparent temperature, relative humidity, precipitation, cloud cover,
+- [x] Switch from `?current_weather=true` to `?current=` parameter set
+- [x] Add: apparent temperature, relative humidity, precipitation, cloud cover,
         UV index, surface pressure, wind gusts, weather code, is_day
-- [ ] Update tests
+- [x] Update tests
 
 ### 2.3 elgato-lights — production review
-- [ ] Fix `state` field (currently always `"online"` regardless of reachability)
-- [ ] Document single-device-per-config limitation in README
+- [x] Fix `state` field (currently always `"online"` regardless of reachability)
+- [x] Document single-device-per-config limitation in README
 
 ### 2.4 Docs cleanup
-- [ ] Mark roku-tv and ollama as community/example in README and adapter docs
-- [ ] Update README trigger type section (currently lists 2 of 9 implemented types)
+- [x] Mark roku-tv and ollama as community/example in README and adapter docs
+- [x] Update README trigger type section (currently lists 2 of 9 implemented types)
 
 ---
 

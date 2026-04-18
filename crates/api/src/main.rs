@@ -3437,9 +3437,7 @@ mod tests {
 
     /// Build a WebSocket `connect_async` request that includes the test master-key
     /// bearer token, so it passes the auth middleware on the `/events` route.
-    fn authed_ws_request(
-        url: &str,
-    ) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    fn authed_ws_request(url: &str) -> tokio_tungstenite::tungstenite::http::Request<()> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut req = url.into_client_request().expect("valid ws url");
         req.headers_mut().insert(
@@ -6511,7 +6509,11 @@ mod tests {
     async fn end_to_end_runtime_http_and_websocket_flow() {
         let server = MockServer::start(vec![MockResponse {
             status_line: "HTTP/1.1 200 OK",
-            body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+            body: "{\"current\":{\"temperature_2m\":18.25,\"apparent_temperature\":16.0,\
+                   \"relative_humidity_2m\":62.0,\"precipitation\":0.0,\"cloud_cover\":25,\
+                   \"uv_index\":3.5,\"surface_pressure\":1012.0,\"wind_speed_10m\":11.5,\
+                   \"wind_gusts_10m\":18.0,\"wind_direction_10m\":225.0,\
+                   \"weather_code\":2,\"is_day\":1}}",
         }])
         .await;
 

@@ -128,11 +128,12 @@ Persistence is current-state only.
 - type: polled and commandable multi-device adapter
 - exposes one logical light device per physical light index
 
-### Roku TV
+### Roku TV *(bundled example)*
 
 - crate: `crates/adapter-roku-tv`
 - type: polled and commandable single-device adapter
 - currently exposes power control for one TV using a static IP
+- **bundled as an example adapter** — not part of the official supported set
 
 ## Configuration
 
@@ -157,11 +158,11 @@ Default config lives at:
 
 Current default config includes:
 
-- `open_meteo`
-- `elgato_lights`
-- `roku_tv`
-- `ollama`
-- `zigbee2mqtt`
+- `open_meteo` (official)
+- `elgato_lights` (official)
+- `zigbee2mqtt` (official)
+- `roku_tv` (bundled example)
+- `ollama` (bundled example)
 
 The default asset layout is:
 
@@ -367,10 +368,16 @@ local result = ctx:invoke("ollama:chat", {
 local reply = result.message.content
 ```
 
-Automations live in `config/automations/` and support two trigger types in the first pass:
+Automations live in `config/automations/` and support these trigger types:
 
-- `device_state_change`
-- `interval`
+- `device_state_change` — fires when a device attribute changes
+- `weather_state` — fires when a weather sensor crosses a threshold
+- `adapter_lifecycle` — fires when an adapter starts or stops
+- `system_error` — fires on any system error event
+- `wall_clock` — fires at a specific time of day
+- `cron` — fires on a cron expression schedule
+- `sunrise` / `sunset` — fires at computed solar events for the configured location
+- `interval` — fires repeatedly on a fixed time interval
 
 Automation example:
 

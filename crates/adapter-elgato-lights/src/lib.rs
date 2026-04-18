@@ -66,7 +66,7 @@ impl ElgatoLightsAdapter {
 
         for (index, light) in response.lights.into_iter().enumerate() {
             let previous = registry.get(&device_id(index));
-            let device = build_device(index, light, previous.as_ref());
+            let device = build_device(index, light, previous.as_ref(), "online");
             seen.insert(index);
             registry
                 .upsert(device)
@@ -89,6 +89,35 @@ impl ElgatoLightsAdapter {
         }
 
         Ok(())
+    }
+
+    async fn mark_devices_unavailable(&self, registry: &DeviceRegistry) {
+        let known = self
+            .known_lights
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for index in known {
+            if let Some(mut device) = registry.get(&device_id(index)) {
+                let already_unavailable = device
+                    .attributes
+                    .get(STATE)
+                    .and_then(|v| match v {
+                        AttributeValue::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .map(|s| s == "unavailable")
+                    .unwrap_or(false);
+                if !already_unavailable {
+                    device.attributes.insert(
+                        STATE.to_string(),
+                        AttributeValue::Text("unavailable".to_string()),
+                    );
+                    device.updated_at = Utc::now();
+                    let _ = registry.upsert(device).await;
+                }
+            }
+        }
     }
 
     async fn fetch_lights(&self) -> Result<ElgatoLightsResponse> {
@@ -150,7 +179,7 @@ impl ElgatoLightsAdapter {
             .await?;
 
         registry
-            .upsert(build_device(index, updated_light, Some(&current)))
+            .upsert(build_device(index, updated_light, Some(&current), "online"))
             .await
             .with_context(|| {
                 format!(
@@ -224,6 +253,7 @@ impl Adapter for ElgatoLightsAdapter {
                 bus.publish(Event::SystemError {
                     message: format!("elgato_lights poll failed: {error}"),
                 });
+                self.mark_devices_unavailable(&registry).await;
             }
 
             sleep(self.poll_interval).await;
@@ -266,17 +296,19 @@ fn validate_config(config: &ElgatoLightsConfig) -> Result<()> {
     Ok(())
 }
 
-fn build_device(index: usize, light: ElgatoLight, previous: Option<&Device>) -> Device {
+fn build_device(
+    index: usize,
+    light: ElgatoLight,
+    previous: Option<&Device>,
+    state: &str,
+) -> Device {
     let now = Utc::now();
     let attributes = Attributes::from([
         (
             POWER.to_string(),
             AttributeValue::Text(if light.on == 0 { "off" } else { "on" }.to_string()),
         ),
-        (
-            STATE.to_string(),
-            AttributeValue::Text("online".to_string()),
-        ),
+        (STATE.to_string(), AttributeValue::Text(state.to_string())),
         (
             BRIGHTNESS.to_string(),
             AttributeValue::Integer(light.brightness),
@@ -794,5 +826,55 @@ mod tests {
 
         adapter_task.abort();
         let _ = adapter_task.await;
+    }
+
+    #[tokio::test]
+    async fn adapter_marks_devices_unavailable_after_poll_failure() {
+        let server = MockServer::start(vec![
+            // First poll: success — device appears as "online"
+            MockResponse {
+                status_line: "HTTP/1.1 200 OK",
+                body: "{\"numberOfLights\":1,\"lights\":[{\"on\":1,\"brightness\":20,\"temperature\":213}]}",
+            },
+            // Second poll: server error
+            MockResponse {
+                status_line: "HTTP/1.1 500 Internal Server Error",
+                body: "{\"error\":\"down\"}",
+            },
+        ])
+        .await;
+        let adapter = Arc::new(
+            ElgatoLightsAdapter::new(adapter_config(server.base_url())).expect("adapter builds"),
+        );
+        let bus = EventBus::new(16);
+        let registry = DeviceRegistry::new(bus.clone());
+
+        // First poll — device should be "online"
+        adapter
+            .poll_once(&registry)
+            .await
+            .expect("first poll succeeds");
+        let device = registry
+            .get(&DeviceId("elgato_lights:light:0".to_string()))
+            .expect("device exists after first poll");
+        assert_eq!(
+            device.attributes.get(STATE),
+            Some(&AttributeValue::Text("online".to_string()))
+        );
+
+        // Second poll — server error → device should become "unavailable"
+        adapter
+            .poll_once(&registry)
+            .await
+            .expect_err("second poll fails");
+        adapter.mark_devices_unavailable(&registry).await;
+
+        let device = registry
+            .get(&DeviceId("elgato_lights:light:0".to_string()))
+            .expect("device still in registry");
+        assert_eq!(
+            device.attributes.get(STATE),
+            Some(&AttributeValue::Text("unavailable".to_string()))
+        );
     }
 }
