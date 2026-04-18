@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Home</title>
+  <script src="assets/htmx.min.js"></script>
+  <script defer src="assets/alpine.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --surface2:  #22263a;
+      --border:    #2d3148;
+      --text:      #e2e8f0;
+      --muted:     #8892a4;
+      --accent:    #6366f1;
+      --accent-h:  #7c7fff;
+      --green:     #22c55e;
+      --gray:      #475569;
+    }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    /* ── Setup screen ─────────────────────────────── */
+    .setup {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 100vh; gap: 1rem; padding: 2rem;
+    }
+    .setup svg { opacity: 0.5; }
+    .setup h1 { font-size: 1.8rem; font-weight: 700; }
+    .setup p  { color: var(--muted); }
+    .setup input {
+      width: 100%; max-width: 380px; padding: 0.7rem 1rem;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); font-size: 1rem; outline: none;
+    }
+    .setup input:focus { border-color: var(--accent); }
+
+    /* ── Buttons ──────────────────────────────────── */
+    .btn { padding: 0.6rem 1.4rem; border-radius: 8px; border: none; cursor: pointer; font-size: 0.9rem; font-weight: 500; transition: background 0.15s; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-h); }
+    .btn-primary:disabled { opacity: 0.5; cursor: default; }
+    .btn-ghost  { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
+    .btn-sm { padding: 0.3rem 0.75rem; font-size: 0.82rem; }
+
+    /* ── App shell ────────────────────────────────── */
+    .app { display: flex; flex-direction: column; min-height: 100vh; }
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 1.5rem; display: flex; align-items: center; gap: 0.75rem;
+      height: 54px; position: sticky; top: 0; z-index: 100;
+    }
+    .logo { font-weight: 700; font-size: 1.05rem; margin-right: auto; }
+    nav { display: flex; gap: 0.2rem; }
+    nav button {
+      padding: 0.35rem 0.8rem; border-radius: 6px; border: none; cursor: pointer;
+      background: transparent; color: var(--muted); font-size: 0.88rem; transition: all 0.1s;
+    }
+    nav button:hover { color: var(--text); background: var(--surface2); }
+    nav button.active { color: var(--text); background: var(--surface2); }
+    .ws-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); flex-shrink: 0; transition: background 0.4s; }
+    .ws-dot.on { background: var(--green); }
+    main { flex: 1; padding: 1.5rem; max-width: 1280px; margin: 0 auto; width: 100%; }
+
+    /* ── Error banner ─────────────────────────────── */
+    .error {
+      background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3);
+      color: #fca5a5; padding: 0.65rem 1rem; border-radius: 8px; margin-bottom: 1.25rem;
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    }
+    .error-close { background: none; border: none; color: #fca5a5; cursor: pointer; font-size: 1.1rem; line-height: 1; }
+
+    /* ── Device grid ──────────────────────────────── */
+    .room-section { margin-bottom: 2rem; }
+    .room-title {
+      font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 0.75rem;
+    }
+    .device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.75rem; }
+
+    /* ── Device card ──────────────────────────────── */
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 1rem; display: flex; flex-direction: column; gap: 0.7rem;
+    }
+    .card-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+    .card-name { font-weight: 500; font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card-kind { font-size: 0.72rem; color: var(--muted); }
+
+    /* ── Power button ─────────────────────────────── */
+    .pwr {
+      width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; font-size: 1rem;
+      transition: background 0.2s;
+    }
+    .pwr.on  { background: var(--green); color: #fff; }
+    .pwr.off { background: var(--surface2); color: var(--muted); }
+    .pwr.off:hover { background: var(--border); color: var(--text); }
+
+    /* ── Sliders ──────────────────────────────────── */
+    .ctrl { display: flex; flex-direction: column; gap: 0.2rem; }
+    .ctrl-lbl { font-size: 0.72rem; color: var(--muted); display: flex; justify-content: space-between; }
+    input[type="range"] {
+      -webkit-appearance: none; width: 100%; height: 4px; background: var(--border); border-radius: 2px; outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer;
+    }
+    input[type="range"]:disabled { opacity: 0.35; cursor: default; }
+
+    /* ── Attribute badges ─────────────────────────── */
+    .attr-wrap { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+    .attr {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+      padding: 0.18rem 0.45rem; font-size: 0.72rem; color: var(--muted);
+    }
+    .attr b { color: var(--text); font-weight: 500; }
+
+    /* ── Scenes ───────────────────────────────────── */
+    .scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.75rem; }
+    .scene-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 1rem 1rem 0.75rem; display: flex; flex-direction: column; gap: 0.6rem;
+      cursor: pointer; transition: border-color 0.15s;
+    }
+    .scene-card:hover { border-color: var(--accent); }
+    .scene-name { font-weight: 500; font-size: 0.92rem; }
+    .scene-desc { font-size: 0.78rem; color: var(--muted); }
+    .scene-run {
+      align-self: flex-start; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--muted); padding: 0.25rem 0.6rem;
+      font-size: 0.78rem; cursor: pointer; transition: all 0.15s;
+    }
+    .scene-card:hover .scene-run { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    /* ── Events ───────────────────────────────────── */
+    .event-list { display: flex; flex-direction: column; gap: 0.4rem; }
+    .event-row {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      padding: 0.5rem 0.8rem; display: flex; align-items: baseline; gap: 0.75rem;
+    }
+    .ev-ts   { font-size: 0.72rem; color: var(--muted); font-family: monospace; white-space: nowrap; }
+    .ev-type { font-size: 0.8rem;  color: var(--accent); font-weight: 500; white-space: nowrap; }
+    .ev-id   { font-size: 0.78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Empty state ──────────────────────────────── */
+    .empty { text-align: center; padding: 4rem 2rem; color: var(--muted); }
+    .empty p { line-height: 1.6; }
+  </style>
+</head>
+<body>
+<div x-data="app()" x-init="init()">
+
+  <!-- Token setup ─────────────────────────────────── -->
+  <div class="setup" x-show="!token">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+      <polyline points="9 22 9 12 15 12 15 22"/>
+    </svg>
+    <h1>Smart Home</h1>
+    <p>Enter your API bearer token to connect.</p>
+    <input type="password" x-model="tokenInput" placeholder="Bearer token"
+           @keydown.enter="saveToken()" autocomplete="current-password">
+    <button class="btn btn-primary" @click="saveToken()" :disabled="!tokenInput.trim()">Connect</button>
+    <div x-show="error" style="color:#fca5a5;font-size:.85rem" x-text="error"></div>
+  </div>
+
+  <!-- Main app ────────────────────────────────────── -->
+  <div class="app" x-show="token">
+    <header>
+      <span class="logo">Smart Home</span>
+      <nav>
+        <button :class="{ active: tab === 'devices' }" @click="tab = 'devices'">Devices</button>
+        <button :class="{ active: tab === 'scenes'  }" @click="tab = 'scenes'">Scenes</button>
+        <button :class="{ active: tab === 'events'  }" @click="tab = 'events'">
+          Events<template x-if="events.length > 0">&nbsp;<span x-text="events.length"></span></template>
+        </button>
+      </nav>
+      <div class="ws-dot" :class="{ on: wsUp }" title="WebSocket"></div>
+      <button class="btn btn-ghost btn-sm" @click="clearToken()">Disconnect</button>
+    </header>
+
+    <main>
+      <!-- Error banner -->
+      <div class="error" x-show="error">
+        <span x-text="error"></span>
+        <button class="error-close" @click="error = null">&times;</button>
+      </div>
+
+      <!-- ── Devices tab ─────────────────────────── -->
+      <div x-show="tab === 'devices'">
+        <template x-for="section in sections()" :key="section.name">
+          <div class="room-section">
+            <div class="room-title" x-text="section.name"></div>
+            <div class="device-grid">
+              <template x-for="device in section.devices" :key="device.id">
+                <div class="card">
+                  <div class="card-header">
+                    <div style="min-width:0">
+                      <div class="card-name" x-text="displayName(device)"></div>
+                      <div class="card-kind" x-text="device.kind"></div>
+                    </div>
+                    <template x-if="hasAttr(device, 'power')">
+                      <button class="pwr" :class="isPowered(device) ? 'on' : 'off'"
+                              @click="togglePower(device)" title="Toggle power">&#x23FB;</button>
+                    </template>
+                  </div>
+
+                  <!-- Brightness slider -->
+                  <template x-if="hasAttr(device, 'brightness')">
+                    <div class="ctrl">
+                      <div class="ctrl-lbl">
+                        <span>Brightness</span>
+                        <span x-text="getBrightness(device) + '%'"></span>
+                      </div>
+                      <input type="range" min="1" max="100"
+                             :value="getBrightness(device)"
+                             :disabled="!isPowered(device)"
+                             @change="setBrightness(device, $event.target.value)">
+                    </div>
+                  </template>
+
+                  <!-- Color temperature slider -->
+                  <template x-if="hasAttr(device, 'color_temperature')">
+                    <div class="ctrl">
+                      <div class="ctrl-lbl">
+                        <span>Color temp</span>
+                        <span x-text="getColorTempK(device) + 'K'"></span>
+                      </div>
+                      <input type="range" min="2200" max="7000" step="100"
+                             :value="getColorTempK(device)"
+                             :disabled="!isPowered(device)"
+                             @change="setColorTemp(device, $event.target.value)">
+                    </div>
+                  </template>
+
+                  <!-- Sensor / virtual attribute badges -->
+                  <template x-if="device.kind === 'sensor' || device.kind === 'virtual'">
+                    <div class="attr-wrap">
+                      <template x-for="[k, v] in sensorAttrs(device)" :key="k">
+                        <div class="attr">
+                          <span x-text="fmtKey(k)"></span>: <b x-text="fmtVal(v)"></b>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <div class="empty" x-show="devices.length === 0">
+          <p>No devices found.<br>Make sure your adapters are running and connected.</p>
+        </div>
+      </div>
+
+      <!-- ── Scenes tab ──────────────────────────── -->
+      <div x-show="tab === 'scenes'">
+        <div class="scene-grid">
+          <template x-for="scene in scenes" :key="scene.id">
+            <div class="scene-card" @click="executeScene(scene.id)">
+              <div class="scene-name" x-text="scene.name"></div>
+              <div class="scene-desc" x-show="scene.description" x-text="scene.description"></div>
+              <button class="scene-run">Run</button>
+            </div>
+          </template>
+        </div>
+        <div class="empty" x-show="scenes.length === 0">
+          <p>No scenes loaded.<br>Add Lua scene files to your scenes directory.</p>
+        </div>
+      </div>
+
+      <!-- ── Events tab ─────────────────────────── -->
+      <div x-show="tab === 'events'">
+        <div class="event-list">
+          <template x-for="(ev, i) in events" :key="i">
+            <div class="event-row">
+              <span class="ev-ts"   x-text="ev._ts"></span>
+              <span class="ev-type" x-text="ev.type"></span>
+              <span class="ev-id"   x-text="ev.id || ev.adapter || ''"></span>
+            </div>
+          </template>
+        </div>
+        <div class="empty" x-show="events.length === 0">
+          <p>Waiting for events&hellip;</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+</div>
+<script>
+function app() {
+  return {
+    token:      localStorage.getItem('sm_token') || '',
+    tokenInput: '',
+    tab:        'devices',
+    rooms:      [],
+    devices:    [],
+    scenes:     [],
+    events:     [],
+    error:      null,
+    ws:         null,
+    wsUp:       false,
+
+    init() {
+      if (this.token) {
+        this.loadAll();
+        this.connectWs();
+      }
+    },
+
+    /* ── Auth ──────────────────────────────────── */
+    async saveToken() {
+      const t = this.tokenInput.trim();
+      if (!t) return;
+      this.token = t;
+      localStorage.setItem('sm_token', t);
+      this.tokenInput = '';
+      this.error = null;
+      await this.loadAll();
+      this.connectWs();
+    },
+
+    clearToken() {
+      this.token = '';
+      this.tokenInput = '';
+      this.error = null;
+      localStorage.removeItem('sm_token');
+      if (this.ws) { try { this.ws.close(); } catch(_) {} this.ws = null; }
+      this.wsUp = false;
+      this.rooms = []; this.devices = []; this.scenes = []; this.events = [];
+    },
+
+    /* ── HTTP helper ───────────────────────────── */
+    async apiFetch(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: {
+          'Authorization': 'Bearer ' + this.token,
+          'Content-Type':  'application/json',
+          ...(opts.headers || {})
+        }
+      });
+      if (res.status === 401 || res.status === 403) {
+        this.error = 'Token rejected — please reconnect with a valid token.';
+        this.token = '';
+        localStorage.removeItem('sm_token');
+        throw new Error('auth');
+      }
+      if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+      if (res.status === 204) return null;
+      return res.json();
+    },
+
+    /* ── Data loading ──────────────────────────── */
+    async loadAll() {
+      this.error = null;
+      try {
+        const ignore = (e) => { if (e.message !== 'auth') throw e; return []; };
+        const [rooms, devices, scenes] = await Promise.all([
+          this.apiFetch('/rooms').catch(ignore),
+          this.apiFetch('/devices').catch(ignore),
+          this.apiFetch('/scenes').catch(ignore),
+        ]);
+        this.rooms   = rooms   || [];
+        this.devices = devices || [];
+        this.scenes  = scenes  || [];
+      } catch (e) {
+        if (e.message !== 'auth') this.error = 'Failed to load data: ' + e.message;
+      }
+    },
+
+    /* ── Room / device helpers ─────────────────── */
+    devicesInRoom(roomId) {
+      return this.devices.filter(d => d.room_id === roomId);
+    },
+
+    unassignedDevices() {
+      const ids = new Set(this.rooms.map(r => r.id));
+      return this.devices.filter(d => !d.room_id || !ids.has(d.room_id));
+    },
+
+    sections() {
+      const result = this.rooms
+        .map(r => ({ name: r.name, devices: this.devicesInRoom(r.id) }))
+        .filter(s => s.devices.length > 0);
+      const u = this.unassignedDevices();
+      if (u.length > 0) result.push({ name: 'Unassigned', devices: u });
+      return result;
+    },
+
+    displayName(device) {
+      return device.metadata?.vendor_specific?.friendly_name
+          || device.metadata?.vendor_specific?.model
+          || device.id;
+    },
+
+    hasAttr(device, key) {
+      return key in (device.attributes || {});
+    },
+
+    isPowered(device) {
+      const v = (device.attributes || {})['power'];
+      return v === 'on' || v === true;
+    },
+
+    getBrightness(device) {
+      const v = (device.attributes || {})['brightness'];
+      if (v === null || v === undefined) return 0;
+      if (typeof v === 'object') return v.value ?? 0;
+      return v;
+    },
+
+    getColorTempK(device) {
+      const v = (device.attributes || {})['color_temperature'];
+      if (!v || typeof v !== 'object') return 4000;
+      return v.unit === 'mireds' ? Math.round(1_000_000 / (v.value || 250)) : (v.value || 4000);
+    },
+
+    sensorAttrs(device) {
+      const skip = new Set(['state', 'power', 'brightness', 'color_temperature', 'color']);
+      return Object.entries(device.attributes || {})
+        .filter(([k]) => !skip.has(k))
+        .slice(0, 8);
+    },
+
+    fmtKey(key) {
+      return key.replace(/^custom\.[^.]+\./, '').replace(/_/g, ' ');
+    },
+
+    fmtVal(val) {
+      if (val === null || val === undefined) return '—';
+      if (typeof val === 'boolean') return val ? 'yes' : 'no';
+      if (typeof val === 'object') {
+        if ('value' in val && 'unit' in val) return val.value + '\u202f' + val.unit;
+        return JSON.stringify(val);
+      }
+      return String(val);
+    },
+
+    /* ── Commands ──────────────────────────────── */
+    async sendCommand(deviceId, capability, action, value) {
+      const body = { capability, action };
+      if (value !== undefined) body.value = value;
+      try {
+        await this.apiFetch('/devices/' + deviceId + '/command', {
+          method: 'POST',
+          body:   JSON.stringify(body)
+        });
+      } catch (e) {
+        if (e.message !== 'auth') this.error = 'Command failed: ' + e.message;
+      }
+    },
+
+    async togglePower(device) {
+      const action = this.isPowered(device) ? 'off' : 'on';
+      // Optimistic update while the adapter catches up.
+      const d = this.devices.find(x => x.id === device.id);
+      if (d) d.attributes = { ...d.attributes, power: action };
+      await this.sendCommand(device.id, 'power', action);
+    },
+
+    async setBrightness(device, value) {
+      await this.sendCommand(device.id, 'brightness', 'set', parseInt(value));
+    },
+
+    async setColorTemp(device, kelvin) {
+      await this.sendCommand(device.id, 'color_temperature', 'set',
+        { value: parseInt(kelvin), unit: 'kelvin' });
+    },
+
+    async executeScene(id) {
+      try {
+        await this.apiFetch('/scenes/' + id + '/execute', { method: 'POST' });
+      } catch (e) {
+        if (e.message !== 'auth') this.error = 'Scene failed: ' + e.message;
+      }
+    },
+
+    /* ── WebSocket ─────────────────────────────── */
+    connectWs() {
+      if (this.ws) { try { this.ws.close(); } catch(_) {} this.ws = null; }
+      this.wsUp = false;
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url   = proto + '//' + location.host + '/events?token=' + encodeURIComponent(this.token);
+      const ws    = new WebSocket(url);
+      ws.onopen  = () => { this.wsUp = true; };
+      ws.onerror = () => { this.wsUp = false; };
+      ws.onclose = () => {
+        this.wsUp = false;
+        if (this.token) setTimeout(() => { if (this.token) this.connectWs(); }, 5000);
+      };
+      ws.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          ev._ts = new Date().toLocaleTimeString();
+          this.events.unshift(ev);
+          if (this.events.length > 100) this.events.length = 100;
+          // Refresh device list on registry changes.
+          if (ev.type === 'device.state_changed' || ev.type === 'device.added' || ev.type === 'device.removed') {
+            this.loadAll();
+          }
+        } catch(_) {}
+      };
+      this.ws = ws;
+    }
+  };
+}
+</script>
+</body>
+</html>

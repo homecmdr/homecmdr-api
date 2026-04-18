@@ -92,12 +92,12 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Phase 3 — Dashboard
 
-- [ ] Add `[dashboard]` section to `Config`: `enabled`, `directory`
-- [ ] Mount `tower_http::services::ServeDir` on `/dashboard` when enabled
-- [ ] Bundle Alpine.js and htmx locally (remove CDN dependency)
-- [ ] Expand template: light controls (power, brightness, colour temperature),
+- [x] Add `[dashboard]` section to `Config`: `enabled`, `directory`
+- [x] Mount `tower_http::services::ServeDir` on `/dashboard` when enabled
+- [x] Bundle Alpine.js and htmx locally (remove CDN dependency)
+- [x] Expand template: light controls (power, brightness, colour temperature),
         scene execution, room listing, live event feed
-- [ ] Dashboard requests authenticated via the same bearer token middleware
+- [x] Dashboard requests authenticated via the same bearer token middleware
 
 ---
 

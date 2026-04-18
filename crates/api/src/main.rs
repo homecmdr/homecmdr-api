@@ -48,6 +48,7 @@ use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 
@@ -1917,11 +1918,17 @@ fn app(state: AppState, config: &Config) -> Router {
             })
         });
 
-    Router::new()
+    let mut router = Router::new()
         .merge(public_routes)
         .merge(read_routes)
         .merge(write_routes)
-        .merge(admin_routes)
+        .merge(admin_routes);
+
+    if config.dashboard.enabled {
+        router = router.nest_service("/dashboard", ServeDir::new(&config.dashboard.directory));
+    }
+
+    router
         .layer(cors_layer(config))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -3366,10 +3373,29 @@ async fn authenticate_token(state: &AppState, token: &str) -> Option<ApiKeyRole>
 
 /// Extract the bearer token from a request as an owned `String`, so callers
 /// don't hold a `&Request` across any `.await` point.
+///
+/// Checks the `Authorization: Bearer <token>` header first, then falls back to
+/// the `?token=<token>` query parameter.  The query-parameter fallback exists
+/// for browser WebSocket connections, which cannot set custom headers.
 fn extract_bearer_token(req: &Request) -> Option<String> {
-    let auth_header = req.headers().get(axum::http::header::AUTHORIZATION)?;
-    let auth_str = auth_header.to_str().ok()?;
-    auth_str.strip_prefix("Bearer ").map(|s| s.to_owned())
+    // Authorization header takes precedence.
+    if let Some(token) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_owned())
+    {
+        return Some(token);
+    }
+
+    // Fall back to ?token= query parameter (browser WebSocket connections
+    // cannot set the Authorization header).
+    req.uri().query().and_then(|query| {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token=").map(|v| v.to_owned()))
+    })
 }
 
 async fn check_auth(state: AppState, req: Request, next: Next, required: ApiKeyRole) -> Response {
@@ -3996,6 +4022,7 @@ mod tests {
             auth: smart_home_core::config::AuthConfig {
                 master_key: TEST_MASTER_KEY.to_string(),
             },
+            dashboard: smart_home_core::config::DashboardConfig::default(),
         }
     }
 
@@ -6886,6 +6913,7 @@ mod tests {
             telemetry: smart_home_core::config::TelemetryConfig::default(),
             auth: smart_home_core::config::AuthConfig::default(),
             adapters: HashMap::new(),
+            dashboard: smart_home_core::config::DashboardConfig::default(),
         };
 
         let error = runtime
