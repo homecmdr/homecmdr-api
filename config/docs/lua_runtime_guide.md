@@ -251,6 +251,16 @@ Notes:
 - new executions after a successful reload use the new catalog
 - if reload validation fails, the previous catalog remains active
 
+Reload lifecycle events are published to the runtime event bus and WebSocket
+`/events` stream:
+
+- `scene.catalog_reload_started`
+- `scene.catalog_reloaded`
+- `scene.catalog_reload_failed`
+- `automation.catalog_reload_started`
+- `automation.catalog_reloaded`
+- `automation.catalog_reload_failed`
+
 ## Scenes
 
 Scenes are manual, user-invoked actions.

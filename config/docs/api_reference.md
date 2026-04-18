@@ -135,6 +135,12 @@ Failure response:
 }
 ```
 
+Runtime events emitted over WebSocket `/events` during reload:
+
+- `scene.catalog_reload_started`
+- `scene.catalog_reloaded`
+- `scene.catalog_reload_failed`
+
 ### `POST /scenes/{id}/execute`
 
 Executes one loaded scene by ID.
@@ -193,6 +199,12 @@ curl -X POST http://127.0.0.1:3000/automations/reload
 ```
 
 Response shape is the same as `POST /scenes/reload` with `target` set to `"automations"`.
+
+Runtime events emitted over WebSocket `/events` during reload:
+
+- `automation.catalog_reload_started`
+- `automation.catalog_reloaded`
+- `automation.catalog_reload_failed`
 
 ## Capabilities
 

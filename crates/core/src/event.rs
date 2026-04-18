@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Attributes, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReloadError {
+    pub file: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -48,6 +54,24 @@ pub enum Event {
     },
     AdapterStarted {
         adapter: String,
+    },
+    SceneCatalogReloadStarted,
+    SceneCatalogReloaded {
+        loaded_count: usize,
+        duration_ms: u64,
+    },
+    SceneCatalogReloadFailed {
+        duration_ms: u64,
+        errors: Vec<ReloadError>,
+    },
+    AutomationCatalogReloadStarted,
+    AutomationCatalogReloaded {
+        loaded_count: usize,
+        duration_ms: u64,
+    },
+    AutomationCatalogReloadFailed {
+        duration_ms: u64,
+        errors: Vec<ReloadError>,
     },
     SystemError {
         message: String,

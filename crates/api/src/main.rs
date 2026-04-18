@@ -1166,7 +1166,16 @@ async fn run_persistence_worker(
                     }
                 }
             }
-            Ok(Event::AdapterStarted { .. } | Event::SystemError { .. }) => {}
+            Ok(
+                Event::AdapterStarted { .. }
+                | Event::SceneCatalogReloadStarted
+                | Event::SceneCatalogReloaded { .. }
+                | Event::SceneCatalogReloadFailed { .. }
+                | Event::AutomationCatalogReloadStarted
+                | Event::AutomationCatalogReloaded { .. }
+                | Event::AutomationCatalogReloadFailed { .. }
+                | Event::SystemError { .. },
+            ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 health.persistence_error(format!(
                     "persistence worker lagged and dropped {skipped} runtime events"
@@ -1462,32 +1471,57 @@ async fn reload_scenes(State(state): State<AppState>) -> Result<Json<ReloadRespo
 
     let started = Instant::now();
     let scripts_root = state.scripts_root.clone();
+    state
+        .runtime
+        .bus()
+        .publish(Event::SceneCatalogReloadStarted);
     match SceneCatalog::reload_from_directory(&state.scenes_directory, scripts_root) {
         Ok(catalog) => {
             let loaded_count = catalog.summaries().len();
+            let duration_ms = started.elapsed().as_millis() as u64;
             let mut runner = write_lock(&state.scenes);
             *runner = SceneRunner::new(catalog);
+            state.runtime.bus().publish(Event::SceneCatalogReloaded {
+                loaded_count,
+                duration_ms,
+            });
             Ok(Json(ReloadResponse {
                 status: "ok",
                 target: "scenes",
                 loaded_count,
                 errors: Vec::new(),
-                duration_ms: started.elapsed().as_millis(),
+                duration_ms: duration_ms as u128,
             }))
         }
-        Err(errors) => Ok(Json(ReloadResponse {
-            status: "error",
-            target: "scenes",
-            loaded_count: 0,
-            errors: errors
-                .into_iter()
-                .map(|error| ReloadErrorDetail {
-                    file: error.file,
-                    message: error.message,
-                })
-                .collect(),
-            duration_ms: started.elapsed().as_millis(),
-        })),
+        Err(errors) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            state
+                .runtime
+                .bus()
+                .publish(Event::SceneCatalogReloadFailed {
+                    duration_ms,
+                    errors: errors
+                        .iter()
+                        .map(|error| smart_home_core::event::ReloadError {
+                            file: error.file.clone(),
+                            message: error.message.clone(),
+                        })
+                        .collect(),
+                });
+            Ok(Json(ReloadResponse {
+                status: "error",
+                target: "scenes",
+                loaded_count: 0,
+                errors: errors
+                    .into_iter()
+                    .map(|error| ReloadErrorDetail {
+                        file: error.file,
+                        message: error.message,
+                    })
+                    .collect(),
+                duration_ms: duration_ms as u128,
+            }))
+        }
     }
 }
 
@@ -1517,6 +1551,10 @@ async fn reload_automations(
 
     let started = Instant::now();
     let scripts_root = state.scripts_root.clone();
+    state
+        .runtime
+        .bus()
+        .publish(Event::AutomationCatalogReloadStarted);
     let previous_controller = {
         let controller = read_lock(&state.automation_control);
         controller.clone()
@@ -1540,6 +1578,7 @@ async fn reload_automations(
             }
 
             let loaded_count = catalog.summaries().len();
+            let duration_ms = started.elapsed().as_millis() as u64;
             let runner = build_automation_runner(
                 catalog.clone(),
                 state.automation_observer.clone(),
@@ -1560,28 +1599,51 @@ async fn reload_automations(
             if state.automation_runner_tx.send(runner).is_err() {
                 tracing::warn!("automation reload completed but no active runner supervisor was available to receive the updated runner");
             }
+            state
+                .runtime
+                .bus()
+                .publish(Event::AutomationCatalogReloaded {
+                    loaded_count,
+                    duration_ms,
+                });
 
             Ok(Json(ReloadResponse {
                 status: "ok",
                 target: "automations",
                 loaded_count,
                 errors: Vec::new(),
-                duration_ms: started.elapsed().as_millis(),
+                duration_ms: duration_ms as u128,
             }))
         }
-        Err(errors) => Ok(Json(ReloadResponse {
-            status: "error",
-            target: "automations",
-            loaded_count: 0,
-            errors: errors
-                .into_iter()
-                .map(|error| ReloadErrorDetail {
-                    file: error.file,
-                    message: error.message,
-                })
-                .collect(),
-            duration_ms: started.elapsed().as_millis(),
-        })),
+        Err(errors) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            state
+                .runtime
+                .bus()
+                .publish(Event::AutomationCatalogReloadFailed {
+                    duration_ms,
+                    errors: errors
+                        .iter()
+                        .map(|error| smart_home_core::event::ReloadError {
+                            file: error.file.clone(),
+                            message: error.message.clone(),
+                        })
+                        .collect(),
+                });
+            Ok(Json(ReloadResponse {
+                status: "error",
+                target: "automations",
+                loaded_count: 0,
+                errors: errors
+                    .into_iter()
+                    .map(|error| ReloadErrorDetail {
+                        file: error.file,
+                        message: error.message,
+                    })
+                    .collect(),
+                duration_ms: duration_ms as u128,
+            }))
+        }
     }
 }
 
@@ -2625,6 +2687,60 @@ fn event_to_frame(event: Event) -> serde_json::Value {
         }
         Event::AdapterStarted { adapter } => {
             json!({ "type": "adapter.started", "adapter": adapter })
+        }
+        Event::SceneCatalogReloadStarted => {
+            json!({ "type": "scene.catalog_reload_started", "target": "scenes" })
+        }
+        Event::SceneCatalogReloaded {
+            loaded_count,
+            duration_ms,
+        } => {
+            json!({
+                "type": "scene.catalog_reloaded",
+                "target": "scenes",
+                "loaded_count": loaded_count,
+                "duration_ms": duration_ms,
+                "errors": []
+            })
+        }
+        Event::SceneCatalogReloadFailed {
+            duration_ms,
+            errors,
+        } => {
+            json!({
+                "type": "scene.catalog_reload_failed",
+                "target": "scenes",
+                "loaded_count": 0,
+                "duration_ms": duration_ms,
+                "errors": errors
+            })
+        }
+        Event::AutomationCatalogReloadStarted => {
+            json!({ "type": "automation.catalog_reload_started", "target": "automations" })
+        }
+        Event::AutomationCatalogReloaded {
+            loaded_count,
+            duration_ms,
+        } => {
+            json!({
+                "type": "automation.catalog_reloaded",
+                "target": "automations",
+                "loaded_count": loaded_count,
+                "duration_ms": duration_ms,
+                "errors": []
+            })
+        }
+        Event::AutomationCatalogReloadFailed {
+            duration_ms,
+            errors,
+        } => {
+            json!({
+                "type": "automation.catalog_reload_failed",
+                "target": "automations",
+                "loaded_count": 0,
+                "duration_ms": duration_ms,
+                "errors": errors
+            })
         }
         Event::SystemError { message } => {
             json!({ "type": "system.error", "message": message })
@@ -5496,6 +5612,64 @@ mod tests {
 
         assert_eq!(payload["type"], "device.state_changed");
         assert_eq!(payload["id"], "test:device");
+
+        drop(socket);
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn websocket_emits_scene_reload_lifecycle_events() {
+        let scene_dir = write_temp_scene_dir(&[(
+            "video.lua",
+            r#"return {
+                id = "video",
+                name = "Video",
+                execute = function(ctx)
+                end
+            }"#,
+        )]);
+        let mut config = test_config(serde_json::Map::new());
+        config.scenes.enabled = true;
+        config.scenes.directory = scene_dir.to_string_lossy().to_string();
+
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{addr}/events"))
+            .await
+            .expect("websocket connects");
+
+        let reload = reqwest::Client::new()
+            .post(format!("http://{addr}/scenes/reload"))
+            .send()
+            .await
+            .expect("reload request succeeds");
+        assert_eq!(reload.status(), StatusCode::OK);
+
+        let first = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("first reload websocket event arrives")
+            .expect("websocket yields first message")
+            .expect("first websocket message valid");
+        let first_payload: Value = serde_json::from_str(first.to_text().expect("text frame"))
+            .expect("valid first websocket JSON");
+        assert_eq!(first_payload["type"], "scene.catalog_reload_started");
+
+        let second = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("second reload websocket event arrives")
+            .expect("websocket yields second message")
+            .expect("second websocket message valid");
+        let second_payload: Value = serde_json::from_str(second.to_text().expect("text frame"))
+            .expect("valid second websocket JSON");
+        assert_eq!(second_payload["type"], "scene.catalog_reloaded");
+        assert_eq!(second_payload["target"], "scenes");
 
         drop(socket);
         let _ = shutdown.send(());
