@@ -134,9 +134,11 @@ dependencies = [
  "chrono",
  "futures-util",
  "notify",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "smart-home-adapters",
  "smart-home-automations",
  "smart-home-core",
@@ -2977,6 +2979,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

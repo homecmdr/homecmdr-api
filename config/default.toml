@@ -1,3 +1,11 @@
+# Environment variable overrides (take priority over this file):
+#   SMART_HOME_CONFIG   — path to a different config file
+#   SMART_HOME_DATA_DIR — base directory for relative database_url paths
+#                         e.g. SMART_HOME_DATA_DIR=/var/lib/smart-home makes
+#                         "sqlite://data/smart-home.db" resolve to
+#                         /var/lib/smart-home/data/smart-home.db
+#   SMART_HOME_MASTER_KEY — master API key (see [auth] section)
+
 [runtime]
 event_bus_capacity = 1024
 
@@ -7,6 +15,11 @@ bind_address = "127.0.0.1:3001"
 [api.cors]
 enabled = true
 allowed_origins = ["http://127.0.0.1:8080"]
+
+[auth]
+# Master key grants the Admin role.  Override at runtime via the
+# SMART_HOME_MASTER_KEY environment variable — never commit a real key.
+master_key = "change-me-before-use"
 
 [locale]
 timezone = "UTC"

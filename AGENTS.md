@@ -10,8 +10,11 @@
 - Full test suite: `cargo test --workspace`
 - Run the API: `cargo run -p api -- --config config/default.toml`
 - `api` also defaults to `config/default.toml` when `--config` is omitted.
+- `SMART_HOME_CONFIG` env var overrides the `--config` default entirely.
+- `SMART_HOME_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/smart-home`).
+- `SMART_HOME_MASTER_KEY` env var overrides `auth.master_key` in config.
 - API bind address is configured via `api.bind_address` in `config/default.toml`; it is no longer hard-coded in `main.rs`.
-- Focused tests: `cargo test -p api`, `cargo test -p smart-home-core`, `cargo test -p smart-home-scenes`, `cargo test -p smart-home-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo` / `adapter-elgato-lights` / `adapter-ollama` / `adapter-roku-tv`.
+- Focused tests: `cargo test -p api`, `cargo test -p smart-home-core`, `cargo test -p smart-home-scenes`, `cargo test -p smart-home-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo` / `adapter-elgato-lights` / `adapter-ollama` / `adapter-roku-tv` / `adapter-zigbee2mqtt`.
 
 ## Workspace Map
 
@@ -47,3 +50,14 @@
 - `postgres` is listed in config/types but `crates/api` currently rejects it as unimplemented.
 - Useful live inspection endpoints while developing: `/health`, `/ready`, `/diagnostics`, `/adapters`, `/devices`, `/rooms`, `/capabilities`, and WebSocket `/events`.
 - History and audit endpoints are implemented; this repo is not current-state-only anymore.
+
+## Authentication
+
+- All routes except `GET /health` and `GET /ready` require a `Bearer` token in the `Authorization` header.
+- Roles: `read`, `write`, `admin`, `automation`. Role satisfaction rules: `read` satisfies Read; `write` satisfies Write; `admin` satisfies Admin only; `automation` satisfies Automation and Admin.
+- Route tiers: **Read** (all GET endpoints + WebSocket), **Write** (mutation endpoints), **Admin** (diagnostics, reload, key management).
+- Master key is configured via `auth.master_key` in `config/default.toml`, overridable with `SMART_HOME_MASTER_KEY` env var. It is stored and compared as a SHA-256 hex digest and always grants the `Admin` role.
+- API keys are stored in the `api_keys` SQLite table (schema V4) as SHA-256 hashes. Managed via `POST /auth/keys`, `GET /auth/keys`, `DELETE /auth/keys/{id}`.
+- `ApiKeyRole` enum and `ApiKeyStore` trait live in `crates/core/src/store.rs`; the SQLite implementation is in `crates/store-sql/src/sqlite.rs`.
+- Auth middleware uses `middleware::from_fn` with closure capture of `AppState` (not `from_fn_with_state`), because `axum::body::Body: !Sync` makes `&Request: !Send`. The `check_auth` helper extracts the bearer token as an owned `String` before any `.await` for the same reason.
+- Tests: `test_client()` returns a `reqwest::Client` with `Authorization: Bearer <TEST_MASTER_KEY>` as a default header. WebSocket tests use `authed_ws_request(&url)` which calls `into_client_request()` on the URL (to generate `Sec-WebSocket-Key`) then injects the auth header.

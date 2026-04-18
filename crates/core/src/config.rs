@@ -27,6 +27,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub adapters: AdaptersConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 pub type AdapterConfig = serde_json::Value;
@@ -200,6 +202,20 @@ pub struct TelemetrySelectionConfig {
     pub adapter_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_master_key")]
+    pub master_key: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            master_key: default_master_key(),
+        }
+    }
+}
+
 impl Config {
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -315,6 +331,10 @@ impl Config {
             );
         }
 
+        if self.auth.master_key.trim().is_empty() {
+            bail!("auth.master_key must not be empty");
+        }
+
         Ok(())
     }
 }
@@ -333,4 +353,8 @@ fn default_api_bind_address() -> String {
 
 fn default_history_max_query_limit() -> usize {
     1000
+}
+
+fn default_master_key() -> String {
+    "change-me-in-production".to_string()
 }
