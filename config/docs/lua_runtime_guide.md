@@ -37,6 +37,7 @@ Both scenes and automations currently receive the same host API through `ctx`.
 Available methods:
 
 - `ctx:command(device_id, command_table)`
+- `ctx:command_group(group_id, command_table)`
 - `ctx:invoke(target, payload_table)`
 - `ctx:get_device(device_id)`
 - `ctx:list_devices()`
@@ -47,6 +48,7 @@ Available methods:
 - `ctx:list_groups()`
 - `ctx:list_group_devices(group_id)`
 - `ctx:log(level, message, fields?)`
+- `ctx:sleep(secs)`
 
 ### `ctx:command(...)`
 
@@ -71,6 +73,29 @@ Execution behavior:
 - command validation uses the existing canonical Rust path
 - dispatch goes through `Runtime::command_device()`
 - per-command results are recorded for scene execution responses
+
+### `ctx:command_group(...)`
+
+`ctx:command_group(group_id, command_table)` fans out one command to every device currently in the group, in membership order.
+
+The `command_table` shape is the same as `ctx:command(...)`.
+
+Example:
+
+```lua
+ctx:command_group("bedroom_lamps", {
+  capability = "power",
+  action = "off",
+})
+```
+
+Execution behavior:
+
+- command is validated once before any dispatch
+- returns a Lua error immediately if the group does not exist
+- fans out `Runtime::command_device()` to each member in membership order
+- one result is recorded per member device (same statuses: `ok`, `unsupported`, `error`)
+- empty groups are a silent no-op (no results recorded)
 
 ### `ctx:invoke(...)`
 
@@ -133,6 +158,27 @@ ctx:log("info", "rain automation fired", {
   recovered = event.recovered == true,
 })
 ```
+
+### `ctx:sleep(...)`
+
+`ctx:sleep(secs)` pauses Lua execution for the given number of seconds without consuming the instruction budget and without blocking the async executor thread.
+
+Parameters:
+
+- `secs` — float or integer seconds; must be in the range `0..=3600`
+
+Example:
+
+```lua
+ctx:command_group("bedroom_lamps", { capability = "power", action = "off" })
+ctx:sleep(5)
+ctx:command("roku_tv:tv", { capability = "power", action = "off" })
+```
+
+Notes:
+
+- cancellation via a `restart` mode token only takes effect after the sleep returns; sleep itself is not interruptible
+- values outside `0..=3600` produce a Lua error immediately
 
 ## Scripts
 
@@ -223,10 +269,9 @@ Required fields:
 Optional fields:
 
 - `description`
+- `mode`
 
 Notes:
-
-- scenes are loaded at API startup
 - duplicate scene IDs fail startup
 - scene files must return a Lua table
 
@@ -278,6 +323,7 @@ Optional fields:
 - `description`
 - `conditions`
 - `state`
+- `mode`
 
 Execution model:
 
@@ -555,15 +601,52 @@ Current scheduling behavior is intentionally simple:
 - resumable schedules can persist the last completed scheduled fire time per automation
 - missed runs while the process is down are not replayed in bulk; the next scheduled fire resumes from persisted schedule state
 
-## Delay And Wait Policy
+## Execution Modes
 
-Lua scripts do not currently expose a first-class `sleep` or `wait` primitive.
+Both scenes and automations support an optional `mode` field that controls what happens when a second invocation arrives while the first is still running.
 
-Intentional policy:
+| Mode | Behaviour |
+|---|---|
+| `parallel` (default) | Up to `max` (default 8) concurrent executions; additional triggers are dropped. |
+| `single` | At most one execution at a time; concurrent triggers are dropped. |
+| `queued` | One execution at a time; up to `max` (default unbounded) pending triggers are queued and run in order. |
+| `restart` | Cancels the running execution and starts a fresh one immediately. |
 
-- keep long waits out of Lua execution so one script cannot hold a worker slot or hide timeout behavior
-- use trigger-level `debounce_secs`, `duration_secs`, `interval`, `wall_clock`, `cron`, `sunrise`, or `sunset` scheduling instead of in-script waiting
-- if more complex delayed workflows are needed later, add them as explicit automation runtime features rather than a general Lua blocking primitive
+`parallel` with `max = 8` is the default for all scenes and automations that do not declare `mode`.
+
+### Lua syntax
+
+String shorthand (for modes with no meaningful `max`):
+
+```lua
+mode = "single"
+mode = "restart"
+```
+
+Table form with optional `max`:
+
+```lua
+mode = { type = "parallel", max = 3 }
+mode = { type = "queued", max = 10 }
+```
+
+### HTTP status codes (scenes)
+
+| Outcome | Status |
+|---|---|
+| Completed | `200 OK` with results |
+| Dropped | `423 Locked` |
+| Queued | `202 Accepted` |
+
+## Sleep
+
+## Sleep
+
+`ctx:sleep(secs)` is available in both scenes and automations. See `ctx:sleep(...)` in the Shared Host API section for full details.
+
+For automation scheduling that does not require arbitrary in-script delays, prefer trigger-level primitives (`debounce_secs`, `duration_secs`, `interval`, `wall_clock`, `cron`, `sunrise`, `sunset`) over `ctx:sleep`. These primitives do not hold a worker slot and survive process restarts.
+
+`ctx:sleep` is appropriate for short sequenced delays within a single execution (for example, turning off one group and then another with a 5-second gap).
 
 ## Persisted Runtime State
 

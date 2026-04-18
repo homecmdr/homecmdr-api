@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -9,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use mlua::{Function, HookTriggers, Lua, VmState};
+use mlua::{Function, Lua};
 use serde::Serialize;
 use smart_home_core::event::Event;
 use smart_home_core::model::{AttributeValue, Attributes, DeviceId, RoomId};
@@ -18,15 +19,13 @@ use smart_home_core::store::{
     AutomationExecutionHistoryEntry, AutomationRuntimeState, DeviceStore, SceneStepResult,
 };
 use smart_home_lua_host::{
-    attribute_to_lua_value, evaluate_module, LuaExecutionContext, LuaRuntimeOptions,
+    attribute_to_lua_value, evaluate_module, parse_execution_mode, ExecutionMode,
+    LuaExecutionContext, LuaRuntimeOptions, DEFAULT_MAX_INSTRUCTIONS,
 };
 use sunrise::{Coordinates, SolarDay, SolarEvent};
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
-const MAX_CONCURRENT_AUTOMATIONS: usize = 8;
-const AUTOMATION_EXECUTION_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTOMATION_BACKSTOP_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AutomationSummary {
@@ -40,6 +39,7 @@ pub struct AutomationSummary {
 #[derive(Debug, Clone)]
 pub struct Automation {
     pub summary: AutomationSummary,
+    pub mode: ExecutionMode,
     path: PathBuf,
     trigger: Trigger,
     conditions: Vec<Condition>,
@@ -64,6 +64,7 @@ pub struct AutomationCatalog {
     automations: Vec<Automation>,
     scripts_root: Option<PathBuf>,
     control: Arc<RwLock<AutomationControlState>>,
+    concurrency: ConcurrencyMap,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +175,32 @@ pub struct TriggerContext {
     pub timezone: Option<Tz>,
 }
 
+// ── per-automation concurrency tracking ──────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct PerAutomationConcurrency {
+    active: usize,
+    /// Restart mode: cancel token for the currently running execution.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Queued mode: pending triggers that haven't started yet.
+    queue: VecDeque<PendingExecution>,
+}
+
+#[derive(Debug)]
+struct PendingExecution {
+    event: AttributeValue,
+}
+
+type ConcurrencyMap = Arc<std::sync::Mutex<HashMap<String, PerAutomationConcurrency>>>;
+
+enum SpawnDecision {
+    Spawn { cancel: Arc<AtomicBool> },
+    Queue,
+    Drop,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct AutomationRunner {
     catalog: AutomationCatalog,
@@ -195,8 +222,8 @@ pub struct AutomationStateStore {
 
 #[derive(Clone)]
 struct ExecutionControl {
-    semaphore: Arc<Semaphore>,
-    timeout: Duration,
+    concurrency: ConcurrencyMap,
+    max_instructions: u64,
     trigger_context: TriggerContext,
 }
 
@@ -275,6 +302,7 @@ impl AutomationCatalog {
             automations,
             scripts_root,
             control: Arc::new(RwLock::new(AutomationControlState::default())),
+            concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -352,12 +380,14 @@ impl AutomationCatalog {
             });
         }
 
+        let cancel = Arc::new(AtomicBool::new(false));
         let record = execute_automation(
             automation,
             runtime,
             trigger_payload,
             self.scripts_root.as_deref(),
-            AUTOMATION_EXECUTION_TIMEOUT,
+            cancel,
+            DEFAULT_MAX_INSTRUCTIONS,
         )?;
 
         Ok(AutomationExecutionResult {
@@ -417,11 +447,12 @@ impl AutomationRunner {
 
     pub async fn run(self, runtime: Arc<Runtime>) {
         let trigger_context = self.trigger_context;
+        let concurrency = self.catalog.concurrency.clone();
         self.run_with_options(
             runtime,
             ExecutionControl {
-                semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_AUTOMATIONS)),
-                timeout: AUTOMATION_EXECUTION_TIMEOUT,
+                concurrency,
+                max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                 trigger_context,
             },
         )
@@ -576,7 +607,6 @@ async fn run_event_trigger_loop(
     state_store: Option<Arc<dyn DeviceStore>>,
 ) {
     let mut receiver = runtime.bus().subscribe();
-    let mut executions = JoinSet::new();
 
     loop {
         match receiver.recv().await {
@@ -592,7 +622,6 @@ async fn run_event_trigger_loop(
                             store: store.clone(),
                         });
                         spawn_automation_execution(
-                            &mut executions,
                             automation.clone(),
                             runtime.clone(),
                             event_value,
@@ -603,13 +632,10 @@ async fn run_event_trigger_loop(
                         );
                     }
                 }
-
-                while executions.try_join_next().is_some() {}
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "automation event trigger loop lagged behind");
                 recover_lagged_event_automations(
-                    &mut executions,
                     runtime.clone(),
                     &catalog,
                     scripts_root.clone(),
@@ -618,7 +644,6 @@ async fn run_event_trigger_loop(
                     observer.clone(),
                     state_store.clone(),
                 );
-                while executions.try_join_next().is_some() {}
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
@@ -660,16 +685,9 @@ async fn run_interval_trigger_loop(
             ),
         ]));
 
-        if should_skip_trigger(&automation, &event, state_store.as_ref(), Some(Utc::now()))
-            .await
-            .is_skip()
-        {
-            continue;
-        }
-
-        execute_scheduled_automation(
+        spawn_automation_execution(
+            automation.clone(),
             runtime.clone(),
-            &automation,
             event,
             scripts_root.clone(),
             execution.clone(),
@@ -677,9 +695,7 @@ async fn run_interval_trigger_loop(
             state_store.as_ref().map(|store| AutomationStateStore {
                 store: store.clone(),
             }),
-            Some(Utc::now()),
-        )
-        .await;
+        );
     }
 }
 
@@ -736,9 +752,9 @@ async fn run_scheduled_trigger_loop(
         };
 
         let event = scheduled_trigger_event(&automation.trigger, scheduled_for, trigger_context);
-        execute_scheduled_automation(
+        spawn_automation_execution(
+            automation.clone(),
             runtime.clone(),
-            &automation,
             event,
             scripts_root.clone(),
             execution.clone(),
@@ -746,141 +762,7 @@ async fn run_scheduled_trigger_loop(
             state_store.as_ref().map(|store| AutomationStateStore {
                 store: store.clone(),
             }),
-            Some(scheduled_for),
-        )
-        .await;
-    }
-}
-
-async fn execute_scheduled_automation(
-    runtime: Arc<Runtime>,
-    automation: &Automation,
-    event: AttributeValue,
-    scripts_root: Option<PathBuf>,
-    execution: ExecutionControl,
-    observer: Option<Arc<dyn AutomationExecutionObserver>>,
-    state_store: Option<AutomationStateStore>,
-    scheduled_for: Option<DateTime<Utc>>,
-) {
-    let delay_secs = event_number_field(&event, "duration_secs")
-        .or_else(|| event_number_field(&event, "debounce_secs"));
-    if let Some(delay_secs) = delay_secs {
-        if !confirm_delayed_trigger(runtime.as_ref(), &event, delay_secs).await {
-            return;
-        }
-    }
-
-    if should_skip_trigger(
-        automation,
-        &event,
-        state_store.as_ref().map(|store| &store.store),
-        scheduled_for,
-    )
-    .await
-    .is_skip()
-    {
-        return;
-    }
-
-    let evaluation_time = scheduled_for.unwrap_or_else(Utc::now);
-    if let Some(reason) = first_failed_condition(
-        automation,
-        runtime.as_ref(),
-        &event,
-        evaluation_time,
-        execution.trigger_context,
-    )
-    .await
-    {
-        notify_observer(
-            observer.as_ref(),
-            automation,
-            event,
-            AutomationExecutionRecord {
-                status: "skipped".to_string(),
-                error: Some(reason),
-                results: Vec::new(),
-                duration_ms: 0,
-            },
         );
-        return;
-    }
-
-    let permit = match execution.semaphore.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(error) => {
-            tracing::error!(automation = %automation.summary.id, error = %error, "automation runner semaphore closed");
-            return;
-        }
-    };
-
-    let automation_clone = automation.clone();
-    let runtime_clone = runtime.clone();
-    let scripts_root_clone = scripts_root.clone();
-    let timeout_duration = execution.timeout;
-    let event_for_observer = event.clone();
-    let event_for_task = event.clone();
-    let join_handle = tokio::spawn(async move {
-        let _permit = permit;
-        execute_automation(
-            &automation_clone,
-            runtime_clone,
-            event_for_task,
-            scripts_root_clone.as_deref(),
-            timeout_duration,
-        )
-    });
-
-    tokio::pin!(join_handle);
-
-    match timeout(timeout_duration, &mut join_handle).await {
-        Ok(Ok(Ok(record))) => {
-            persist_runtime_state(automation, &event, state_store.as_ref(), scheduled_for).await;
-            notify_observer(observer.as_ref(), automation, event_for_observer, record);
-        }
-        Ok(Ok(Err(error))) => {
-            tracing::error!(automation = %automation.summary.id, error = %error, "scheduled automation execution failed");
-            notify_observer(
-                observer.as_ref(),
-                automation,
-                event_for_observer,
-                AutomationExecutionRecord {
-                    status: "error".to_string(),
-                    error: Some(error.to_string()),
-                    results: Vec::new(),
-                    duration_ms: timeout_duration.as_millis() as i64,
-                },
-            );
-        }
-        Ok(Err(error)) => {
-            tracing::error!(automation = %automation.summary.id, error = %error, "scheduled automation task failed");
-            notify_observer(
-                observer.as_ref(),
-                automation,
-                event_for_observer,
-                AutomationExecutionRecord {
-                    status: "error".to_string(),
-                    error: Some(error.to_string()),
-                    results: Vec::new(),
-                    duration_ms: timeout_duration.as_millis() as i64,
-                },
-            );
-        }
-        Err(_) => {
-            join_handle.abort();
-            tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "scheduled automation execution timed out");
-            notify_observer(
-                observer.as_ref(),
-                automation,
-                event_for_observer,
-                AutomationExecutionRecord {
-                    status: "timeout".to_string(),
-                    error: Some("automation execution timed out".to_string()),
-                    results: Vec::new(),
-                    duration_ms: timeout_duration.as_millis() as i64,
-                },
-            );
-        }
     }
 }
 
@@ -1054,7 +936,6 @@ fn next_wall_clock_occurrence(
 }
 
 fn spawn_automation_execution(
-    executions: &mut JoinSet<()>,
     automation: Automation,
     runtime: Arc<Runtime>,
     event: AttributeValue,
@@ -1063,27 +944,117 @@ fn spawn_automation_execution(
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
     state_store: Option<AutomationStateStore>,
 ) {
-    let Ok(permit) = execution.semaphore.clone().try_acquire_owned() else {
-        tracing::warn!(automation = %automation.summary.id, "skipping automation execution because the runner is saturated");
-        notify_observer(
-            observer.as_ref(),
-            &automation,
-            event,
-            AutomationExecutionRecord {
-                status: "skipped".to_string(),
-                error: Some("automation runner saturated".to_string()),
-                results: Vec::new(),
-                duration_ms: 0,
-            },
-        );
-        return;
+    let id = automation.summary.id.clone();
+    let decision = {
+        let mut map = execution
+            .concurrency
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let state = map.entry(id.clone()).or_default();
+        match &automation.mode {
+            ExecutionMode::Parallel { max } => {
+                if state.active < *max {
+                    state.active += 1;
+                    SpawnDecision::Spawn {
+                        cancel: Arc::new(AtomicBool::new(false)),
+                    }
+                } else {
+                    SpawnDecision::Drop
+                }
+            }
+            ExecutionMode::Single => {
+                if state.active == 0 {
+                    state.active += 1;
+                    SpawnDecision::Spawn {
+                        cancel: Arc::new(AtomicBool::new(false)),
+                    }
+                } else {
+                    SpawnDecision::Drop
+                }
+            }
+            ExecutionMode::Queued { max } => {
+                if state.active == 0 {
+                    state.active += 1;
+                    SpawnDecision::Spawn {
+                        cancel: Arc::new(AtomicBool::new(false)),
+                    }
+                } else if state.queue.len() < *max {
+                    state.queue.push_back(PendingExecution {
+                        event: event.clone(),
+                    });
+                    SpawnDecision::Queue
+                } else {
+                    SpawnDecision::Drop
+                }
+            }
+            ExecutionMode::Restart => {
+                if let Some(old_cancel) = state.cancel.take() {
+                    old_cancel.store(true, Ordering::Relaxed);
+                }
+                state.active += 1;
+                let cancel = Arc::new(AtomicBool::new(false));
+                state.cancel = Some(cancel.clone());
+                SpawnDecision::Spawn { cancel }
+            }
+        }
     };
 
-    executions.spawn(async move {
+    match decision {
+        SpawnDecision::Spawn { cancel } => {
+            do_spawn_execution(
+                automation,
+                runtime,
+                event,
+                scripts_root,
+                execution,
+                observer,
+                state_store,
+                cancel,
+            );
+        }
+        SpawnDecision::Queue => {
+            // event already enqueued above; nothing more to do
+        }
+        SpawnDecision::Drop => {
+            tracing::warn!(automation = %id, "skipping automation execution due to execution mode saturation");
+            notify_observer(
+                observer.as_ref(),
+                &automation,
+                event,
+                AutomationExecutionRecord {
+                    status: "skipped".to_string(),
+                    error: Some("execution mode saturated".to_string()),
+                    results: Vec::new(),
+                    duration_ms: 0,
+                },
+            );
+        }
+    }
+}
+
+fn do_spawn_execution(
+    automation: Automation,
+    runtime: Arc<Runtime>,
+    event: AttributeValue,
+    scripts_root: Option<PathBuf>,
+    execution: ExecutionControl,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
+    state_store: Option<AutomationStateStore>,
+    cancel: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
         let delay_secs = event_number_field(&event, "duration_secs")
             .or_else(|| event_number_field(&event, "debounce_secs"));
         if let Some(delay_secs) = delay_secs {
             if !confirm_delayed_trigger(runtime.as_ref(), &event, delay_secs).await {
+                finalize_and_maybe_dequeue(
+                    automation,
+                    runtime,
+                    scripts_root,
+                    execution,
+                    observer,
+                    state_store,
+                );
                 return;
             }
         }
@@ -1097,6 +1068,14 @@ fn spawn_automation_execution(
         .await
         .is_skip()
         {
+            finalize_and_maybe_dequeue(
+                automation,
+                runtime,
+                scripts_root,
+                execution,
+                observer,
+                state_store,
+            );
             return;
         }
 
@@ -1120,27 +1099,38 @@ fn spawn_automation_execution(
                     duration_ms: 0,
                 },
             );
+            finalize_and_maybe_dequeue(
+                automation,
+                runtime,
+                scripts_root,
+                execution,
+                observer,
+                state_store,
+            );
             return;
         }
 
-        let timeout_duration = execution.timeout;
-        let automation_for_task = automation.clone();
         let event_for_observer = event.clone();
+        let automation_for_task = automation.clone();
+        let scripts_root_for_task = scripts_root.clone();
         let state_store_for_task = state_store.clone();
+        let max_instructions = execution.max_instructions;
+        let runtime_for_task = runtime.clone();
+
         let join_handle = tokio::spawn(async move {
-            let _permit = permit;
             execute_automation(
                 &automation_for_task,
-                runtime,
+                runtime_for_task,
                 event,
-                scripts_root.as_deref(),
-                timeout_duration,
+                scripts_root_for_task.as_deref(),
+                cancel,
+                max_instructions,
             )
         });
 
         tokio::pin!(join_handle);
 
-        match timeout(timeout_duration, &mut join_handle).await {
+        match timeout(AUTOMATION_BACKSTOP_TIMEOUT, &mut join_handle).await {
             Ok(Ok(Ok(record))) => {
                 persist_runtime_state(
                     &automation,
@@ -1149,12 +1139,7 @@ fn spawn_automation_execution(
                     event_scheduled_at(&event_for_observer),
                 )
                 .await;
-                notify_observer(
-                    observer.as_ref(),
-                    &automation,
-                    event_for_observer,
-                    record,
-                );
+                notify_observer(observer.as_ref(), &automation, event_for_observer, record);
             }
             Ok(Ok(Err(error))) => {
                 tracing::error!(automation = %automation.summary.id, error = %error, "automation execution failed");
@@ -1166,12 +1151,12 @@ fn spawn_automation_execution(
                         status: "error".to_string(),
                         error: Some(error.to_string()),
                         results: Vec::new(),
-                        duration_ms: timeout_duration.as_millis() as i64,
+                        duration_ms: 0,
                     },
                 );
             }
             Ok(Err(error)) => {
-                tracing::error!(automation = %automation.summary.id, error = %error, "automation task failed");
+                tracing::error!(automation = %automation.summary.id, error = %error, "automation task panicked");
                 notify_observer(
                     observer.as_ref(),
                     &automation,
@@ -1180,27 +1165,75 @@ fn spawn_automation_execution(
                         status: "error".to_string(),
                         error: Some(error.to_string()),
                         results: Vec::new(),
-                        duration_ms: timeout_duration.as_millis() as i64,
+                        duration_ms: 0,
                     },
                 );
             }
             Err(_) => {
                 join_handle.abort();
-                tracing::error!(automation = %automation.summary.id, timeout_secs = timeout_duration.as_secs(), "automation execution timed out");
+                tracing::error!(automation = %automation.summary.id, "automation execution exceeded backstop timeout");
                 notify_observer(
                     observer.as_ref(),
                     &automation,
                     event_for_observer,
                     AutomationExecutionRecord {
                         status: "timeout".to_string(),
-                        error: Some("automation execution timed out".to_string()),
+                        error: Some("automation execution exceeded backstop timeout".to_string()),
                         results: Vec::new(),
-                        duration_ms: timeout_duration.as_millis() as i64,
+                        duration_ms: AUTOMATION_BACKSTOP_TIMEOUT.as_millis() as i64,
                     },
                 );
             }
         }
+
+        finalize_and_maybe_dequeue(
+            automation,
+            runtime,
+            scripts_root,
+            execution,
+            observer,
+            state_store,
+        );
     });
+}
+
+fn finalize_and_maybe_dequeue(
+    automation: Automation,
+    runtime: Arc<Runtime>,
+    scripts_root: Option<PathBuf>,
+    execution: ExecutionControl,
+    observer: Option<Arc<dyn AutomationExecutionObserver>>,
+    state_store: Option<AutomationStateStore>,
+) {
+    let next_event = {
+        let mut map = execution
+            .concurrency
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let state = map.entry(automation.summary.id.clone()).or_default();
+        state.active = state.active.saturating_sub(1);
+        if matches!(automation.mode, ExecutionMode::Queued { .. }) {
+            state.queue.pop_front().map(|pending| {
+                state.active += 1;
+                pending.event
+            })
+        } else {
+            None
+        }
+    };
+
+    if let Some(event) = next_event {
+        do_spawn_execution(
+            automation,
+            runtime,
+            event,
+            scripts_root,
+            execution,
+            observer,
+            state_store,
+            Arc::new(AtomicBool::new(false)),
+        );
+    }
 }
 
 impl AutomationStateStore {
@@ -1649,7 +1682,6 @@ fn event_scheduled_at(event: &AttributeValue) -> Option<DateTime<Utc>> {
 }
 
 fn recover_lagged_event_automations(
-    executions: &mut JoinSet<()>,
     runtime: Arc<Runtime>,
     catalog: &AutomationCatalog,
     scripts_root: Option<PathBuf>,
@@ -1666,7 +1698,6 @@ fn recover_lagged_event_automations(
             automation_event_from_registry_snapshot(automation, runtime.registry(), skipped)
         {
             spawn_automation_execution(
-                executions,
                 automation.clone(),
                 runtime.clone(),
                 event_value,
@@ -1686,7 +1717,8 @@ fn execute_automation(
     runtime: Arc<Runtime>,
     event: AttributeValue,
     scripts_root: Option<&Path>,
-    timeout_duration: Duration,
+    cancel: Arc<AtomicBool>,
+    max_instructions: u64,
 ) -> Result<AutomationExecutionRecord> {
     let started = Instant::now();
     let source = fs::read_to_string(&automation.path).with_context(|| {
@@ -1696,8 +1728,12 @@ fn execute_automation(
         )
     })?;
     let lua = Lua::new();
-    install_execution_timeout_hook(&lua, timeout_duration);
-    let module = evaluate_automation_module(&lua, &source, &automation.path, scripts_root)?;
+    let opts = LuaRuntimeOptions {
+        scripts_root: scripts_root.map(Path::to_path_buf),
+        max_instructions,
+        cancel: Some(cancel),
+    };
+    let module = evaluate_automation_module(&lua, &source, &automation.path, &opts)?;
     let execute = module.get::<Function>("execute").map_err(|error| {
         anyhow::anyhow!(
             "automation '{}' is missing execute function: {error}",
@@ -1751,20 +1787,6 @@ fn notify_observer(
         error: record.error,
         results: record.results,
     });
-}
-
-fn install_execution_timeout_hook(lua: &Lua, timeout_duration: Duration) {
-    let started = Instant::now();
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(10_000),
-        move |_lua, _debug| {
-            if started.elapsed() >= timeout_duration {
-                Err(mlua::Error::runtime("automation execution timed out"))
-            } else {
-                Ok(VmState::Continue)
-            }
-        },
-    );
 }
 
 fn automation_event_from_runtime_event(
@@ -2208,7 +2230,11 @@ fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> Result<Auto
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read automation file {}", path.display()))?;
     let lua = Lua::new();
-    let module = evaluate_automation_module(&lua, &source, path, scripts_root)?;
+    let opts = LuaRuntimeOptions {
+        scripts_root: scripts_root.map(Path::to_path_buf),
+        ..Default::default()
+    };
+    let module = evaluate_automation_module(&lua, &source, path, &opts)?;
 
     let id = module.get::<String>("id").map_err(|error| {
         anyhow::anyhow!(
@@ -2255,6 +2281,19 @@ fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> Result<Auto
         })?;
     let runtime_state_policy = parse_runtime_state_policy(&module, path)?;
 
+    let mode_value = module.get::<mlua::Value>("mode").map_err(|error| {
+        anyhow::anyhow!(
+            "automation file {} has invalid optional field 'mode': {error}",
+            path.display()
+        )
+    })?;
+    let mode = parse_execution_mode(mode_value).map_err(|error| {
+        anyhow::anyhow!(
+            "automation file {} has invalid field 'mode': {error}",
+            path.display()
+        )
+    })?;
+
     Ok(Automation {
         summary: AutomationSummary {
             id,
@@ -2263,6 +2302,7 @@ fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> Result<Auto
             trigger_type: trigger_type_name(&trigger),
             condition_count: conditions.len(),
         },
+        mode,
         path: path.to_path_buf(),
         trigger,
         conditions,
@@ -2274,17 +2314,9 @@ fn evaluate_automation_module(
     lua: &Lua,
     source: &str,
     path: &Path,
-    scripts_root: Option<&Path>,
+    opts: &LuaRuntimeOptions,
 ) -> Result<mlua::Table> {
-    evaluate_module(
-        lua,
-        source,
-        path.to_string_lossy().as_ref(),
-        &LuaRuntimeOptions {
-            scripts_root: scripts_root.map(Path::to_path_buf),
-        },
-    )
-    .map_err(|error| {
+    evaluate_module(lua, source, path.to_string_lossy().as_ref(), opts).map_err(|error| {
         anyhow::anyhow!(
             "failed to evaluate automation file {}: {error}",
             path.display()
@@ -2952,6 +2984,7 @@ fn trigger_uses_event_bus(automation: &Automation) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::str::FromStr;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2968,7 +3001,7 @@ mod tests {
     use smart_home_core::registry::DeviceRegistry;
     use smart_home_core::runtime::{Runtime, RuntimeConfig};
     use smart_home_core::store::AutomationExecutionHistoryEntry;
-    use tokio::sync::Semaphore;
+    use smart_home_lua_host::DEFAULT_MAX_INSTRUCTIONS;
     use tokio::time::{sleep, timeout, Duration};
 
     use super::*;
@@ -4456,7 +4489,8 @@ mod tests {
                 AttributeValue::Bool(true),
             )])),
             catalog.scripts_root.as_deref(),
-            Duration::from_secs(2),
+            Arc::new(AtomicBool::new(false)),
+            DEFAULT_MAX_INSTRUCTIONS,
         )
         .expect("script-backed automation executes successfully");
 
@@ -4487,9 +4521,7 @@ mod tests {
                     equals = true,
                 },
                 execute = function(ctx, event)
-                    local started = os.clock()
-                    while os.clock() - started < 0.25 do
-                    end
+                    ctx:sleep(0.25)
                     ctx:command("test:slow", {
                         capability = "brightness",
                         action = "set",
@@ -4591,6 +4623,7 @@ mod tests {
             r#"return {
                 id = "slow_check",
                 name = "Slow Check",
+                mode = { type = "parallel", max = 1 },
                 trigger = {
                     type = "device_state_change",
                     device_id = "test:rain",
@@ -4598,9 +4631,7 @@ mod tests {
                     equals = true,
                 },
                 execute = function(ctx, event)
-                    local started = os.clock()
-                    while os.clock() - started < 0.2 do
-                    end
+                    ctx:sleep(0.2)
                     ctx:command("test:device", {
                         capability = "brightness",
                         action = "set",
@@ -4636,8 +4667,8 @@ mod tests {
                     .run_with_options(
                         runtime,
                         ExecutionControl {
-                            semaphore: Arc::new(Semaphore::new(1)),
-                            timeout: Duration::from_secs(1),
+                            concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                            max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                             trigger_context: TriggerContext::default(),
                         },
                     )
@@ -4730,15 +4761,13 @@ mod tests {
             .await
             .expect("matching device state is updated in registry");
 
-        let mut executions = JoinSet::new();
         recover_lagged_event_automations(
-            &mut executions,
             runtime.clone(),
             &catalog,
             None,
             ExecutionControl {
-                semaphore: Arc::new(Semaphore::new(1)),
-                timeout: Duration::from_secs(1),
+                concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                 trigger_context: TriggerContext::default(),
             },
             2,
@@ -4747,19 +4776,20 @@ mod tests {
         );
 
         let recovered_value = timeout(Duration::from_secs(2), async {
-            executions.join_next().await;
-            let brightness = runtime
-                .registry()
-                .get(&DeviceId("test:device".to_string()))
-                .expect("target device exists")
-                .attributes
-                .get("brightness")
-                .cloned()
-                .expect("brightness is set by recovered automation");
-
-            match brightness {
-                AttributeValue::Integer(value) => value,
-                other => panic!("unexpected brightness value: {other:?}"),
+            loop {
+                let brightness = runtime
+                    .registry()
+                    .get(&DeviceId("test:device".to_string()))
+                    .expect("target device exists")
+                    .attributes
+                    .get("brightness")
+                    .cloned();
+                if let Some(AttributeValue::Integer(v)) = brightness {
+                    if v != 0 {
+                        return v;
+                    }
+                }
+                sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -4784,9 +4814,7 @@ mod tests {
                     equals = true,
                 },
                 execute = function(ctx, event)
-                    local started = os.clock()
-                    while os.clock() - started < 0.25 do
-                    end
+                    while true do end
                     ctx:command("test:device", {
                         capability = "brightness",
                         action = "set",
@@ -4819,11 +4847,12 @@ mod tests {
             runtime.clone(),
             AttributeValue::Object(HashMap::new()),
             None,
-            Duration::from_millis(50),
+            Arc::new(AtomicBool::new(false)),
+            100_000u64,
         )
-        .expect_err("slow Lua execution should time out");
+        .expect_err("infinite loop should be killed by compute limit");
 
-        assert!(error.to_string().contains("automation execution timed out"));
+        assert!(error.to_string().contains("compute limit exceeded"));
         assert_eq!(
             runtime
                 .registry()
@@ -4910,6 +4939,637 @@ mod tests {
         assert_eq!(entries[0].status, "ok");
         assert!(entries[0].duration_ms >= 0);
         assert_eq!(entries[0].results[0].target, "test:device");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    // ── execution mode tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn default_mode_is_parallel_max_8() {
+        assert_eq!(ExecutionMode::default(), ExecutionMode::Parallel { max: 8 });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn single_mode_drops_concurrent_trigger() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "single.lua",
+            r#"return {
+                id = "single_check",
+                name = "Single Check",
+                mode = "single",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.2)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 5,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        // fire two triggers; first runs 200 ms, second arrives while first is active
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first trigger");
+        sleep(Duration::from_millis(10)).await;
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second trigger");
+
+        sleep(Duration::from_millis(400)).await;
+
+        let entries = observer.entries.lock().expect("observer lock");
+        let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+        let skipped_count = entries.iter().filter(|e| e.status == "skipped").count();
+        assert_eq!(ok_count, 1, "first trigger should complete");
+        assert_eq!(skipped_count, 1, "second trigger should be dropped");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_mode_allows_concurrent_up_to_max() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "parallel.lua",
+            r#"return {
+                id = "parallel_check",
+                name = "Parallel Check",
+                mode = { type = "parallel", max = 2 },
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.15)
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        // fire two triggers in quick succession — both should run concurrently
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first trigger");
+        sleep(Duration::from_millis(5)).await;
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second trigger");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let count = observer
+                    .entries
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|e| e.status == "ok")
+                    .count();
+                if count >= 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both parallel executions should complete");
+
+        let entries = observer.entries.lock().expect("observer lock");
+        let skipped = entries.iter().filter(|e| e.status == "skipped").count();
+        assert_eq!(skipped, 0, "no triggers should be dropped within max");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_mode_drops_beyond_max() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "parallel_limited.lua",
+            r#"return {
+                id = "parallel_limited",
+                name = "Parallel Limited",
+                mode = { type = "parallel", max = 1 },
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.2)
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first trigger");
+        sleep(Duration::from_millis(10)).await;
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second trigger");
+
+        sleep(Duration::from_millis(400)).await;
+
+        let entries = observer.entries.lock().expect("observer lock");
+        let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+        let skipped_count = entries.iter().filter(|e| e.status == "skipped").count();
+        assert_eq!(ok_count, 1, "one trigger should complete");
+        assert_eq!(skipped_count, 1, "over-max trigger should be dropped");
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_mode_runs_triggers_sequentially() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "queued.lua",
+            r#"return {
+                id = "queued_check",
+                name = "Queued Check",
+                mode = { type = "queued", max = 4 },
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.1)
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        // fire two triggers; second queues behind first
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first trigger");
+        sleep(Duration::from_millis(5)).await;
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second trigger");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let count = observer
+                    .entries
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|e| e.status == "ok")
+                    .count();
+                if count >= 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both queued executions should complete");
+
+        let entries = observer.entries.lock().expect("observer lock");
+        let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+        let skipped_count = entries.iter().filter(|e| e.status == "skipped").count();
+        assert_eq!(ok_count, 2, "both triggers should complete in queue");
+        assert_eq!(skipped_count, 0);
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_mode_drops_when_queue_full() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "queued_limited.lua",
+            r#"return {
+                id = "queued_limited",
+                name = "Queued Limited",
+                mode = { type = "queued", max = 1 },
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.2)
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        // trigger 1: starts running (active=1)
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first trigger");
+        sleep(Duration::from_millis(10)).await;
+        // trigger 2: queued (queue.len()=0 < max=1)
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second trigger");
+        sleep(Duration::from_millis(10)).await;
+        // trigger 3: dropped (queue.len()=1 >= max=1)
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset 2");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("third trigger");
+
+        // wait for 2 completions (running + queued)
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let count = observer
+                    .entries
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|e| e.status == "ok")
+                    .count();
+                if count >= 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("two executions should complete");
+
+        let entries = observer.entries.lock().expect("observer lock");
+        let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+        let skipped_count = entries.iter().filter(|e| e.status == "skipped").count();
+        assert_eq!(ok_count, 2, "running + queued trigger should complete");
+        assert_eq!(
+            skipped_count, 1,
+            "over-queue-capacity trigger should be dropped"
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restart_mode_cancels_running_and_starts_new() {
+        let dir = temp_dir("smart-home-automations");
+        // The 50_000-iteration loop ensures the hook fires before ctx:command when cancel is set,
+        // while completing quickly when cancel remains false (trigger 2).
+        write_automation(
+            &dir,
+            "restart.lua",
+            r#"return {
+                id = "restart_check",
+                name = "Restart Check",
+                mode = "restart",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.25)
+                    for i = 1, 50000 do end
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 5,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        // fire trigger 1 — starts sleeping 250 ms
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("first trigger");
+        sleep(Duration::from_millis(50)).await;
+        // fire trigger 2 while trigger 1 is sleeping — restarts, cancels trigger 1
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("reset");
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("second trigger");
+
+        // wait until both executions record a result
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let count = observer.entries.lock().expect("lock").len();
+                if count >= 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both restart executions should settle");
+
+        let entries = observer.entries.lock().expect("observer lock");
+        let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+        let error_count = entries.iter().filter(|e| e.status == "error").count();
+        assert_eq!(
+            ok_count, 1,
+            "trigger 2 (restart) should complete successfully"
+        );
+        assert_eq!(error_count, 1, "trigger 1 should be cancelled");
+        let cancelled = entries
+            .iter()
+            .find(|e| e.status == "error")
+            .and_then(|e| e.error.as_deref())
+            .unwrap_or("");
+        assert!(
+            cancelled.contains("execution cancelled"),
+            "cancelled error should mention cancellation; got: {cancelled}"
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sleep_in_automation_completes_without_timeout() {
+        let dir = temp_dir("smart-home-automations");
+        write_automation(
+            &dir,
+            "sleep.lua",
+            r#"return {
+                id = "sleep_check",
+                name = "Sleep Check",
+                trigger = {
+                    type = "device_state_change",
+                    device_id = "test:rain",
+                    attribute = "custom.test.rain",
+                    equals = true,
+                },
+                execute = function(ctx, event)
+                    ctx:sleep(0.05)
+                    ctx:command("test:device", {
+                        capability = "brightness",
+                        action = "set",
+                        value = 88,
+                    })
+                end
+            }"#,
+        );
+
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(CommandAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 32,
+            },
+        ));
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", false))
+            .await
+            .expect("sensor");
+        runtime
+            .registry()
+            .upsert(target_device("test:device"))
+            .await
+            .expect("target");
+
+        let catalog = AutomationCatalog::load_from_directory(&dir, None).expect("catalog loads");
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = AutomationRunner::new(catalog).with_observer(observer.clone());
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runner.run(runtime).await }
+        });
+
+        sleep(Duration::from_millis(25)).await;
+        runtime
+            .registry()
+            .upsert(sample_device("test:rain", true))
+            .await
+            .expect("trigger");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if !observer.entries.lock().expect("lock").is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sleep automation should complete without timing out");
+
+        let entries = observer.entries.lock().expect("observer lock");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, "ok");
 
         task.abort();
         let _ = task.await;

@@ -96,20 +96,28 @@ impl DeviceRegistry {
         *current = restored;
     }
 
-    pub fn restore_groups(&self, groups: Vec<DeviceGroup>) -> Result<()> {
+    pub fn restore_groups(&self, groups: Vec<DeviceGroup>) {
         let devices = read_guard(&self.devices);
         let mut restored = HashMap::with_capacity(groups.len());
 
-        for group in groups {
-            validate_group(&group)?;
-            validate_group_membership(&devices, &group)?;
+        for mut group in groups {
+            let before = group.members.len();
+            group.members.retain(|id| devices.contains_key(id));
+            let pruned = before - group.members.len();
+            if pruned > 0 {
+                tracing::warn!(
+                    group_id = %group.id.0,
+                    pruned,
+                    "pruned {pruned} unknown member(s) from group '{}' during restore; \
+                     the device(s) were likely removed while the server was offline",
+                    group.id.0
+                );
+            }
             restored.insert(group.id.clone(), group);
         }
 
         let mut current = write_guard(&self.groups);
         *current = restored;
-
-        Ok(())
     }
 
     pub async fn remove(&self, id: &DeviceId) -> bool {

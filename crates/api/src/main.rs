@@ -34,7 +34,9 @@ use smart_home_core::store::{
     AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry, DeviceHistoryEntry,
     DeviceStore, SceneExecutionHistoryEntry, SceneStepResult,
 };
-use smart_home_scenes::{SceneCatalog, SceneExecutionResult, SceneSummary};
+use smart_home_scenes::{
+    SceneCatalog, SceneExecutionResult, SceneRunOutcome, SceneRunner, SceneSummary,
+};
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::Level;
@@ -138,7 +140,7 @@ struct GroupCommandResult {
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
-    scenes: Arc<SceneCatalog>,
+    scenes: SceneRunner,
     automations: Arc<AutomationCatalog>,
     automation_control: Arc<AutomationController>,
     trigger_context: TriggerContext,
@@ -581,14 +583,14 @@ async fn main() -> Result<()> {
         .enabled
         .then(|| std::path::PathBuf::from(&config.scripts.directory));
     let scenes = if config.scenes.enabled {
-        Arc::new(
+        SceneRunner::new(
             SceneCatalog::load_from_directory(&config.scenes.directory, scripts_root.clone())
                 .with_context(|| {
                     format!("failed to load scenes from {}", config.scenes.directory)
                 })?,
         )
     } else {
-        Arc::new(SceneCatalog::empty())
+        SceneRunner::new(SceneCatalog::empty())
     };
     let automations = if config.automations.enabled {
         Arc::new(
@@ -620,12 +622,9 @@ async fn main() -> Result<()> {
         runtime.registry().restore_rooms(rooms);
         runtime
             .registry()
-            .restore_groups(groups)
-            .context("failed to restore persisted groups into registry")?;
-        runtime
-            .registry()
             .restore(devices)
             .context("failed to restore persisted devices into registry")?;
+        runtime.registry().restore_groups(groups);
     }
 
     let automation_observer =
@@ -1426,11 +1425,12 @@ async fn execute_automation_manually(
 async fn execute_scene(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<SceneExecuteResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let executed_at = Utc::now();
-    let execution = state
+    let outcome = state
         .scenes
         .execute(&id, state.runtime.clone())
+        .await
         .map_err(|error| {
             persist_scene_history(
                 &state,
@@ -1444,32 +1444,63 @@ async fn execute_scene(
             );
             ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
         })?;
-    let Some(results) = execution else {
-        return Err(ApiError::not_found(format!("scene '{id}' not found")));
-    };
 
-    persist_scene_history(
-        &state,
-        SceneExecutionHistoryEntry {
-            executed_at,
-            scene_id: id.clone(),
-            status: "ok".to_string(),
-            error: None,
-            results: results
-                .iter()
-                .map(|result| SceneStepResult {
-                    target: result.target.clone(),
-                    status: result.status.to_string(),
-                    message: result.message.clone(),
-                })
-                .collect(),
-        },
-    );
-
-    Ok(Json(SceneExecuteResponse {
-        status: "ok",
-        results,
-    }))
+    match outcome {
+        SceneRunOutcome::NotFound => Err(ApiError::not_found(format!("scene '{id}' not found"))),
+        SceneRunOutcome::Dropped => {
+            persist_scene_history(
+                &state,
+                SceneExecutionHistoryEntry {
+                    executed_at,
+                    scene_id: id.clone(),
+                    status: "skipped".to_string(),
+                    error: Some("scene already running (execution mode saturated)".to_string()),
+                    results: Vec::new(),
+                },
+            );
+            Err(ApiError::new(
+                StatusCode::LOCKED,
+                format!("scene '{id}' is already running"),
+            ))
+        }
+        SceneRunOutcome::Queued => {
+            persist_scene_history(
+                &state,
+                SceneExecutionHistoryEntry {
+                    executed_at,
+                    scene_id: id.clone(),
+                    status: "queued".to_string(),
+                    error: None,
+                    results: Vec::new(),
+                },
+            );
+            Ok(StatusCode::ACCEPTED.into_response())
+        }
+        SceneRunOutcome::Completed(results) => {
+            persist_scene_history(
+                &state,
+                SceneExecutionHistoryEntry {
+                    executed_at,
+                    scene_id: id.clone(),
+                    status: "ok".to_string(),
+                    error: None,
+                    results: results
+                        .iter()
+                        .map(|r| SceneStepResult {
+                            target: r.target.clone(),
+                            status: r.status.to_string(),
+                            message: r.message.clone(),
+                        })
+                        .collect(),
+                },
+            );
+            Ok(Json(SceneExecuteResponse {
+                status: "ok",
+                results,
+            })
+            .into_response())
+        }
+    }
 }
 
 async fn get_scene_history(
@@ -2381,7 +2412,7 @@ mod tests {
     };
     use smart_home_core::runtime::RuntimeConfig;
     use smart_home_core::store::AutomationRuntimeState;
-    use smart_home_scenes::SceneCatalog;
+    use smart_home_scenes::{SceneCatalog, SceneRunner};
     use store_sql::{SqliteDeviceStore, SqliteHistoryConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -2938,8 +2969,8 @@ mod tests {
         }
     }
 
-    fn empty_scenes() -> Arc<SceneCatalog> {
-        Arc::new(SceneCatalog::empty())
+    fn empty_scenes() -> SceneRunner {
+        SceneRunner::new(SceneCatalog::empty())
     }
 
     fn history_settings(enabled: bool) -> HistorySettings {
@@ -3106,7 +3137,7 @@ mod tests {
 
     async fn spawn_test_server_with_scenes(
         runtime: Arc<Runtime>,
-        scenes: Arc<SceneCatalog>,
+        scenes: SceneRunner,
     ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
         let automations = Arc::new(AutomationCatalog::empty());
         let config = test_config(serde_json::Map::new());
@@ -3825,8 +3856,9 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes =
-            Arc::new(SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"));
+        let scenes = SceneRunner::new(
+            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
+        );
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime, scenes).await;
 
         let response = reqwest::get(format!("http://{addr}/scenes"))
@@ -4333,8 +4365,9 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes =
-            Arc::new(SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"));
+        let scenes = SceneRunner::new(
+            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
+        );
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime.clone(), scenes).await;
 
         let response = reqwest::Client::new()
@@ -4678,8 +4711,9 @@ mod tests {
                 end
             }"#,
         )]);
-        let scenes =
-            Arc::new(SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"));
+        let scenes = SceneRunner::new(
+            SceneCatalog::load_from_directory(&scene_dir, None).expect("scenes load"),
+        );
 
         let config = test_config(serde_json::Map::new());
         let app = app(

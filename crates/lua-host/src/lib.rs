@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -14,6 +15,82 @@ use smart_home_core::runtime::Runtime;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
+pub const DEFAULT_MAX_INSTRUCTIONS: u64 = 5_000_000;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionMode {
+    Parallel { max: usize },
+    Single,
+    Queued { max: usize },
+    Restart,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        ExecutionMode::Parallel { max: 8 }
+    }
+}
+
+pub fn parse_execution_mode(value: mlua::Value) -> Result<ExecutionMode> {
+    match value {
+        mlua::Value::Nil => Ok(ExecutionMode::default()),
+        mlua::Value::String(s) => {
+            let mode_str = s.to_str().map_err(|e| anyhow::anyhow!("{e}"))?;
+            match mode_str.as_ref() {
+                "parallel" => Ok(ExecutionMode::Parallel { max: 8 }),
+                "single" => Ok(ExecutionMode::Single),
+                "queued" => Ok(ExecutionMode::Queued { max: 8 }),
+                "restart" => Ok(ExecutionMode::Restart),
+                other => anyhow::bail!(
+                    "unknown execution mode '{other}'; expected parallel, single, queued, or restart"
+                ),
+            }
+        }
+        mlua::Value::Table(table) => {
+            let mode_type: String = table
+                .get("type")
+                .map_err(|e| anyhow::anyhow!("mode table is missing string field 'type': {e}"))?;
+            match mode_type.as_str() {
+                "parallel" => {
+                    let max = table
+                        .get::<Option<usize>>("max")
+                        .map_err(|e| anyhow::anyhow!("mode 'max' field is invalid: {e}"))?
+                        .unwrap_or(8);
+                    Ok(ExecutionMode::Parallel { max })
+                }
+                "single" => Ok(ExecutionMode::Single),
+                "queued" => {
+                    let max = table
+                        .get::<Option<usize>>("max")
+                        .map_err(|e| anyhow::anyhow!("mode 'max' field is invalid: {e}"))?
+                        .unwrap_or(8);
+                    Ok(ExecutionMode::Queued { max })
+                }
+                "restart" => Ok(ExecutionMode::Restart),
+                other => anyhow::bail!("unknown execution mode type '{other}'"),
+            }
+        }
+        _ => anyhow::bail!("mode must be a string or table"),
+    }
+}
+
+pub fn install_execution_hook(lua: &Lua, max_instructions: u64, cancel: Arc<AtomicBool>) {
+    let count = Arc::new(AtomicU64::new(0));
+    lua.set_hook(
+        mlua::HookTriggers::new().every_nth_instruction(10_000),
+        move |_lua, _debug| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(mlua::Error::runtime("execution cancelled"));
+            }
+            let new_count = count.fetch_add(10_000, Ordering::Relaxed) + 10_000;
+            if new_count >= max_instructions {
+                return Err(mlua::Error::runtime("execution compute limit exceeded"));
+            }
+            Ok(mlua::VmState::Continue)
+        },
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandExecutionResult {
     pub target: String,
@@ -21,9 +98,21 @@ pub struct CommandExecutionResult {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LuaRuntimeOptions {
     pub scripts_root: Option<PathBuf>,
+    pub max_instructions: u64,
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Default for LuaRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            scripts_root: None,
+            max_instructions: DEFAULT_MAX_INSTRUCTIONS,
+            cancel: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -208,6 +297,58 @@ impl UserData for LuaExecutionContext {
         });
 
         methods.add_method(
+            "command_group",
+            |_, this, (group_id, command): (String, Table)| {
+                let command = lua_table_to_command(&command)?;
+                command.validate().map_err(mlua::Error::external)?;
+
+                let registry_group_id = smart_home_core::model::GroupId(group_id.clone());
+                if this
+                    .runtime
+                    .registry()
+                    .get_group(&registry_group_id)
+                    .is_none()
+                {
+                    return Err(mlua::Error::external(format!(
+                        "group '{group_id}' not found"
+                    )));
+                }
+
+                let devices = this
+                    .runtime
+                    .registry()
+                    .list_devices_in_group(&registry_group_id);
+
+                for device in devices {
+                    let device_id_str = device.id.0.clone();
+                    let result = match block_in_place(|| {
+                        Handle::current()
+                            .block_on(this.runtime.command_device(&device.id, command.clone()))
+                    }) {
+                        Ok(true) => CommandExecutionResult {
+                            target: device_id_str,
+                            status: "ok",
+                            message: None,
+                        },
+                        Ok(false) => CommandExecutionResult {
+                            target: device_id_str,
+                            status: "unsupported",
+                            message: Some("device commands are not implemented".to_string()),
+                        },
+                        Err(error) => CommandExecutionResult {
+                            target: device_id_str,
+                            status: "error",
+                            message: Some(error.to_string()),
+                        },
+                    };
+                    this.execution_results.push(result);
+                }
+
+                Ok(())
+            },
+        );
+
+        methods.add_method(
             "log",
             |_, _, (level, message, fields): (String, String, Option<Value>)| {
                 let fields = match fields {
@@ -231,6 +372,19 @@ impl UserData for LuaExecutionContext {
                 Ok(())
             },
         );
+
+        methods.add_method("sleep", |_, _, secs: f64| {
+            if !(0.0..=3600.0).contains(&secs) {
+                return Err(mlua::Error::external(
+                    "sleep: seconds must be between 0 and 3600",
+                ));
+            }
+            block_in_place(|| {
+                Handle::current()
+                    .block_on(tokio::time::sleep(std::time::Duration::from_secs_f64(secs)))
+            });
+            Ok(())
+        });
     }
 }
 
@@ -418,6 +572,10 @@ pub fn prepare_lua(lua: &Lua, options: &LuaRuntimeOptions) -> Result<()> {
         ScriptLoader { root: root.clone() }.install(lua)?;
     }
 
+    if let Some(cancel) = &options.cancel {
+        install_execution_hook(lua, options.max_instructions, cancel.clone());
+    }
+
     Ok(())
 }
 
@@ -448,6 +606,12 @@ pub fn lua_table_to_command(table: &Table) -> mlua::Result<DeviceCommand> {
         value: match table.get::<Value>("value")? {
             Value::Nil => None,
             value => Some(lua_value_to_attribute(value)?),
+        },
+        transition_secs: match table.get::<Value>("transition_secs")? {
+            Value::Nil => None,
+            Value::Integer(v) => Some(v as f64),
+            Value::Number(v) => Some(v),
+            _ => return Err(mlua::Error::external("transition_secs must be a number")),
         },
     })
 }
@@ -579,9 +743,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use smart_home_core::adapter::Adapter;
+    use smart_home_core::bus::EventBus;
+    use smart_home_core::command::DeviceCommand;
     use smart_home_core::model::{
-        AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room, RoomId,
+        AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
     };
+    use smart_home_core::registry::DeviceRegistry;
     use smart_home_core::runtime::{Runtime, RuntimeConfig};
 
     fn temp_dir() -> PathBuf {
@@ -705,5 +873,260 @@ mod tests {
         )
         .exec()
         .expect("structured log call succeeds");
+    }
+
+    struct AnyTestAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for AnyTestAdapter {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn run(&self, _registry: DeviceRegistry, _bus: EventBus) -> anyhow::Result<()> {
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+
+        async fn command(
+            &self,
+            device_id: &DeviceId,
+            command: DeviceCommand,
+            registry: DeviceRegistry,
+        ) -> anyhow::Result<bool> {
+            let mut device = registry.get(device_id).expect("device exists");
+            // Store the capability as an attribute so tests can verify dispatch.
+            let value = command
+                .value
+                .unwrap_or(AttributeValue::Text(command.action.clone()));
+            device.attributes.insert(command.capability, value);
+            registry
+                .upsert(device)
+                .await
+                .expect("registry update succeeds");
+            Ok(true)
+        }
+    }
+
+    fn bare_device(id: &str) -> Device {
+        Device {
+            id: DeviceId(id.to_string()),
+            room_id: None,
+            kind: DeviceKind::Light,
+            attributes: HashMap::from([(
+                "power".to_string(),
+                AttributeValue::Text("on".to_string()),
+            )]),
+            metadata: Metadata {
+                source: "test".to_string(),
+                accuracy: None,
+                vendor_specific: HashMap::new(),
+            },
+            updated_at: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_group_fans_out_to_all_members() {
+        let runtime = Arc::new(Runtime::new(
+            vec![Box::new(AnyTestAdapter)],
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+
+        runtime
+            .registry()
+            .upsert(bare_device("test:left"))
+            .await
+            .expect("left device upserted");
+        runtime
+            .registry()
+            .upsert(bare_device("test:right"))
+            .await
+            .expect("right device upserted");
+        runtime
+            .registry()
+            .upsert_group(DeviceGroup {
+                id: GroupId("bedroom_lamps".to_string()),
+                name: "Bedroom Lamps".to_string(),
+                members: vec![
+                    DeviceId("test:left".to_string()),
+                    DeviceId("test:right".to_string()),
+                ],
+            })
+            .await
+            .expect("group upserted");
+
+        let lua = Lua::new();
+        let ctx = LuaExecutionContext::new(runtime.clone());
+        lua.globals()
+            .set("ctx", ctx.clone())
+            .expect("ctx is installed");
+
+        lua.load(
+            r#"
+            ctx:command_group("bedroom_lamps", {
+                capability = "power",
+                action = "off",
+            })
+            "#,
+        )
+        .exec()
+        .expect("command_group executes without error");
+
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 2, "one result per group member");
+        assert!(
+            results.iter().all(|r| r.status == "ok"),
+            "all members should report ok: {results:?}"
+        );
+        assert!(
+            results.iter().any(|r| r.target == "test:left"),
+            "left device should appear in results"
+        );
+        assert!(
+            results.iter().any(|r| r.target == "test:right"),
+            "right device should appear in results"
+        );
+
+        // Verify commands were actually applied to device attributes.
+        for id in ["test:left", "test:right"] {
+            let device = runtime
+                .registry()
+                .get(&DeviceId(id.to_string()))
+                .expect("device exists after command");
+            assert_eq!(
+                device.attributes.get("power"),
+                Some(&AttributeValue::Text("off".to_string())),
+                "{id} power attribute should be off"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_group_errors_on_missing_group() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let lua = Lua::new();
+        lua.globals()
+            .set("ctx", LuaExecutionContext::new(runtime))
+            .expect("ctx is installed");
+
+        let result = lua
+            .load(
+                r#"
+                ctx:command_group("nonexistent_group", {
+                    capability = "power",
+                    action = "off",
+                })
+                "#,
+            )
+            .exec();
+
+        assert!(result.is_err(), "missing group should produce a Lua error");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("nonexistent_group"),
+            "error message should name the missing group"
+        );
+    }
+
+    // ── hook / sleep tests ────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sleep_pauses_execution_without_consuming_instruction_budget() {
+        // Use a very low instruction budget so that if sleep were to count
+        // instructions the hook would fire before the sleep finishes.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let lua = Lua::new();
+        lua.globals()
+            .set("ctx", LuaExecutionContext::new(runtime))
+            .expect("ctx is installed");
+        install_execution_hook(&lua, 20_000, cancel);
+
+        let start = std::time::Instant::now();
+        let result = lua.load("ctx:sleep(0.05)").exec();
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_ok(),
+            "sleep should not trigger the compute limit: {result:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(40),
+            "sleep should have paused for at least ~50 ms, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn compute_limit_fires_on_infinite_loop() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let lua = Lua::new();
+        install_execution_hook(&lua, 100_000, cancel);
+
+        let result = lua.load("while true do end").exec();
+        assert!(result.is_err(), "infinite loop should be killed");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("compute limit exceeded"),
+            "error should mention compute limit; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cancellation_token_kills_execution() {
+        let cancel = Arc::new(AtomicBool::new(true)); // pre-cancelled
+        let lua = Lua::new();
+        install_execution_hook(&lua, DEFAULT_MAX_INSTRUCTIONS, cancel);
+
+        let result = lua.load("while true do end").exec();
+        assert!(result.is_err(), "pre-cancelled execution should be killed");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("execution cancelled"),
+            "error should mention cancellation; got: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sleep_validates_negative_and_over_limit() {
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let lua = Lua::new();
+        lua.globals()
+            .set("ctx", LuaExecutionContext::new(runtime))
+            .expect("ctx is installed");
+
+        let neg = lua.load("ctx:sleep(-1)").exec();
+        assert!(neg.is_err(), "negative sleep should fail");
+        assert!(
+            neg.unwrap_err().to_string().contains("0 and 3600"),
+            "error should mention range"
+        );
+
+        let over = lua.load("ctx:sleep(3601)").exec();
+        assert!(over.is_err(), "sleep > 3600 should fail");
+        assert!(
+            over.unwrap_err().to_string().contains("0 and 3600"),
+            "error should mention range"
+        );
     }
 }
