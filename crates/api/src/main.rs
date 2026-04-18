@@ -275,6 +275,21 @@ struct ReloadWatchItem {
     directory: String,
 }
 
+/// A single Lua file entry returned by `GET /files`.
+#[derive(Debug, Serialize)]
+struct FileEntry {
+    /// Relative path in the form `{type}/{filename}`, e.g. `scenes/wakeup.lua`.
+    path: String,
+    /// Top-level category: `scenes`, `automations`, or `scripts`.
+    #[serde(rename = "type")]
+    file_type: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct PutFileRequest {
+    content: String,
+}
+
 type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<String>);
 
 #[derive(Clone)]
@@ -1836,6 +1851,148 @@ async fn reconcile_device_store(
     Ok(())
 }
 
+/// Validate `path` and resolve it to a concrete filesystem `PathBuf`.
+///
+/// `path` must be in the form `{type}/{filename}` where:
+/// - `{type}` is one of `scenes`, `automations`, `scripts`
+/// - `{filename}` has a `.lua` extension
+/// - No component is `..`
+fn resolve_lua_path(state: &AppState, path: &str) -> Result<(PathBuf, &'static str), ApiError> {
+    // Guard against path traversal at the raw string level.
+    for component in path.split('/') {
+        if component == ".." || component == "." {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "path traversal is not allowed",
+            ));
+        }
+    }
+
+    let (type_prefix, rest) = path.split_once('/').ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "path must be in the form {type}/{filename} (e.g. scenes/my-scene.lua)",
+        )
+    })?;
+
+    if rest.is_empty() || rest.contains('/') {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "path must be a single filename inside a type directory",
+        ));
+    }
+
+    if !rest.ends_with(".lua") {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "only .lua files are allowed",
+        ));
+    }
+
+    let (base_dir, file_type): (&str, &'static str) = match type_prefix {
+        "scenes" => (&state.scenes_directory, "scenes"),
+        "automations" => (&state.automations_directory, "automations"),
+        "scripts" => (&state.scripts_directory, "scripts"),
+        other => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("unknown file type '{other}'; must be scenes, automations, or scripts"),
+            ));
+        }
+    };
+
+    Ok((PathBuf::from(base_dir).join(rest), file_type))
+}
+
+/// Collect all `.lua` files from a directory as `FileEntry` values.
+fn collect_lua_entries(dir: &str, file_type: &'static str) -> Vec<FileEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut result: Vec<FileEntry> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.path().is_file()
+                && entry.path().extension().and_then(|ext| ext.to_str()) == Some("lua")
+        })
+        .filter_map(|entry| {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            Some(FileEntry {
+                path: format!("{file_type}/{filename}"),
+                file_type,
+            })
+        })
+        .collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    result
+}
+
+async fn list_files(State(state): State<AppState>) -> Json<Vec<FileEntry>> {
+    let mut entries = Vec::new();
+    if !state.scenes_directory.is_empty() {
+        entries.extend(collect_lua_entries(&state.scenes_directory, "scenes"));
+    }
+    if !state.automations_directory.is_empty() {
+        entries.extend(collect_lua_entries(
+            &state.automations_directory,
+            "automations",
+        ));
+    }
+    if !state.scripts_directory.is_empty() {
+        entries.extend(collect_lua_entries(&state.scripts_directory, "scripts"));
+    }
+    Json(entries)
+}
+
+async fn get_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (full_path, _file_type) = resolve_lua_path(&state, &path)?;
+
+    let content = tokio::fs::read_to_string(&full_path).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ApiError::not_found(format!("file '{path}' not found"))
+        } else {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read file '{path}': {err}"),
+            )
+        }
+    })?;
+
+    Ok(content)
+}
+
+async fn put_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Json(body): Json<PutFileRequest>,
+) -> Result<StatusCode, ApiError> {
+    let (full_path, _file_type) = resolve_lua_path(&state, &path)?;
+
+    // Ensure the parent directory exists.
+    if let Some(parent) = full_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create directory for '{path}': {err}"),
+            )
+        })?;
+    }
+
+    tokio::fs::write(&full_path, body.content.as_bytes())
+        .await
+        .map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to write file '{path}': {err}"),
+            )
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn app(state: AppState, config: &Config) -> Router {
     // Public — no authentication required.
     let public_routes = Router::new()
@@ -1918,11 +2075,24 @@ fn app(state: AppState, config: &Config) -> Router {
             })
         });
 
+    // Automation — bearer token with `automation` or `admin` role.
+    let automation_routes = Router::new()
+        .route("/files", get(list_files))
+        .route("/files/{*path}", get(get_file).put(put_file))
+        .route_layer({
+            let s = state.clone();
+            middleware::from_fn(move |req: Request, next: Next| {
+                let s = s.clone();
+                async move { check_auth(s, req, next, ApiKeyRole::Automation).await }
+            })
+        });
+
     let mut router = Router::new()
         .merge(public_routes)
         .merge(read_routes)
         .merge(write_routes)
-        .merge(admin_routes);
+        .merge(admin_routes)
+        .merge(automation_routes);
 
     if config.dashboard.enabled {
         router = router.nest_service("/dashboard", ServeDir::new(&config.dashboard.directory));
@@ -6975,5 +7145,182 @@ mod tests {
             error.to_string(),
             "no adapter factory registered for 'made_up_adapter'"
         );
+    }
+
+    // ── File API tests ────────────────────────────────────────────────────────
+
+    /// Spawn a test server with three writable temp dirs (scenes, automations,
+    /// scripts) that are pre-populated with the given files.
+    async fn spawn_test_server_for_files(
+        scenes_files: &[(&str, &str)],
+        automations_files: &[(&str, &str)],
+        scripts_files: &[(&str, &str)],
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let scenes_dir = write_temp_scene_dir(scenes_files);
+        let automations_dir = write_temp_automation_dir(automations_files);
+        let scripts_dir = write_temp_scene_dir(scripts_files);
+
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let mut config = test_config(serde_json::Map::new());
+        // The file API reads/writes files directly via the directory paths
+        // stored in AppState and works correctly without the catalogs being
+        // loaded.  Disable scene and automation loading so the server does not
+        // try to evaluate the placeholder Lua files (which are not valid scene
+        // or automation modules) and panic.
+        config.scenes.enabled = false;
+        config.scenes.directory = scenes_dir.to_string_lossy().to_string();
+        config.automations.enabled = false;
+        config.automations.directory = automations_dir.to_string_lossy().to_string();
+        // scripts.enabled = true so scripts_root is set and the scripts
+        // directory is propagated into AppState (no catalog loading happens
+        // for scripts, only a path is stored).
+        config.scripts.enabled = true;
+        config.scripts.directory = scripts_dir.to_string_lossy().to_string();
+
+        let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
+        (
+            addr,
+            shutdown,
+            handle,
+            scenes_dir,
+            automations_dir,
+            scripts_dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn file_api_lists_lua_files() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(
+            &[("wakeup.lua", "-- scene")],
+            &[("morning.lua", "-- automation")],
+            &[("helpers.lua", "-- helpers")],
+        )
+        .await;
+
+        let response = test_client()
+            .get(format!("http://{addr}/files"))
+            .send()
+            .await
+            .expect("list files request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("list files json body");
+        let entries = body.as_array().expect("files array");
+
+        let paths: Vec<&str> = entries.iter().filter_map(|e| e["path"].as_str()).collect();
+        assert!(
+            paths.contains(&"scenes/wakeup.lua"),
+            "expected scenes/wakeup.lua in {paths:?}"
+        );
+        assert!(
+            paths.contains(&"automations/morning.lua"),
+            "expected automations/morning.lua in {paths:?}"
+        );
+        assert!(
+            paths.contains(&"scripts/helpers.lua"),
+            "expected scripts/helpers.lua in {paths:?}"
+        );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_reads_file_content() {
+        let content = "-- this is the wakeup scene\nreturn {}";
+        let (addr, shutdown, handle, _, _, _) =
+            spawn_test_server_for_files(&[("wakeup.lua", content)], &[], &[]).await;
+
+        let response = test_client()
+            .get(format!("http://{addr}/files/scenes/wakeup.lua"))
+            .send()
+            .await
+            .expect("get file request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("get file text body");
+        assert_eq!(body, content);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_writes_and_reads_back() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(&[], &[], &[]).await;
+
+        let new_content = "return { id = 'test', name = 'Test' }";
+
+        let put = test_client()
+            .put(format!("http://{addr}/files/scenes/new.lua"))
+            .json(&json!({ "content": new_content }))
+            .send()
+            .await
+            .expect("put file request succeeds");
+        assert_eq!(put.status(), StatusCode::NO_CONTENT);
+
+        let get = test_client()
+            .get(format!("http://{addr}/files/scenes/new.lua"))
+            .send()
+            .await
+            .expect("get file request succeeds");
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(get.text().await.expect("get file text"), new_content);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_rejects_path_traversal() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(&[], &[], &[]).await;
+
+        // Use percent-encoded slashes (%2F) so that reqwest's URL parser does
+        // not normalise the ".." away before the request reaches the server.
+        // Axum's Path extractor decodes the segment back to "scenes/../etc/passwd.lua"
+        // and resolve_lua_path catches the ".." component → 400.
+        let response = test_client()
+            .get(format!(
+                "http://{addr}/files/scenes%2F..%2F..%2F..%2Fetc%2Fpasswd.lua"
+            ))
+            .send()
+            .await
+            .expect("traversal request completes");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_rejects_non_lua_extension() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(&[], &[], &[]).await;
+
+        let response = test_client()
+            .get(format!("http://{addr}/files/scenes/secret.txt"))
+            .send()
+            .await
+            .expect("non-lua request completes");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
     }
 }

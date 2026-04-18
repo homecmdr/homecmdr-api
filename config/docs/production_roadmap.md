@@ -104,12 +104,12 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` done
 ## Phase 4 — MCP tooling
 
 ### 4.1 Lua authoring (basic users and AI)
-- [ ] MCP server wrapping the HTTP API
-- [ ] Add file read/write endpoints to the API (`admin`/`automation` role)
-- [ ] Tools: list/read/write Lua files, trigger reload, query device state
+- [x] MCP server wrapping the HTTP API
+- [x] Add file read/write endpoints to the API (`admin`/`automation` role)
+- [x] Tools: list/read/write Lua files, trigger reload, query device state
 
 ### 4.2 Adapter authoring (advanced users and AI)
-- [ ] MCP tools: scaffold new adapter crate, run cargo check/test,
+- [x] MCP tools: scaffold new adapter crate, run cargo check/test,
         inspect live registry output
 
 ---
