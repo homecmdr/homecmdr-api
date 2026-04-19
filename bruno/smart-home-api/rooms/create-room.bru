@@ -6,17 +6,27 @@ meta {
 
 post {
   url: {{baseUrl}}/rooms
+  body: json
+  auth: bearer
 }
 
 headers {
   content-type: application/json
 }
 
-body {
+auth:bearer {
+  token: change-me-before-use
+}
+
+body:json {
   {
-    "id": "living_room",
-    "name": "Living Room"
+    "id": "bedroom",
+    "name": "Bedroom"
   }
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
 }
 
 settings {

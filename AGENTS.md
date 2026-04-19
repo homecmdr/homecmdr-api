@@ -9,6 +9,7 @@
 - Fast safety check: `cargo check --workspace`
 - Full test suite: `cargo test --workspace`
 - Run the API: `cargo run -p api -- --config config/default.toml`
+- Run the MCP server: `cargo run -p mcp-server -- --token <BEARER_TOKEN>` (the API must already be running; `--api-url` defaults to `http://127.0.0.1:3001`, `--workspace` defaults to `.`; token can also be set via `SMART_HOME_TOKEN` env var)
 - `api` also defaults to `config/default.toml` when `--config` is omitted.
 - `SMART_HOME_CONFIG` env var overrides the `--config` default entirely.
 - `SMART_HOME_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/smart-home`).
@@ -25,6 +26,7 @@
 - `crates/scenes`, `crates/automations`, `crates/lua-host`: Lua asset loading/execution. `mlua` is vendored Lua 5.4, so no system Lua dependency should be needed.
 - `crates/store-sql`: SQLite store plus in-code schema initialization/migrations and history storage.
 - `crates/store-postgres`: PostgreSQL store implementing the same `DeviceStore` + `ApiKeyStore` traits. Wired at startup when `persistence.backend = "postgres"` is set in config.
+- `crates/mcp-server`: standalone MCP server binary; JSON-RPC 2.0 over stdio (MCP protocol version `2024-11-05`). Launched by an MCP host as a subprocess — does not start automatically with the API. Proxies most tools to the HTTP API with Bearer auth; runs `cargo check`/`cargo test` as subprocesses; scaffolds new adapter crates on disk.
 
 ## Adapter Rules
 

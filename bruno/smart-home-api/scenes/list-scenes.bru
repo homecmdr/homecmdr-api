@@ -6,6 +6,12 @@ meta {
 
 get {
   url: {{baseUrl}}/scenes
+  body: none
+  auth: none
+}
+
+vars:pre-request {
+  baseUrl: 127.0.01:3001
 }
 
 settings {

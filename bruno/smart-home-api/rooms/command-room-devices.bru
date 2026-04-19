@@ -6,6 +6,8 @@ meta {
 
 post {
   url: {{baseUrl}}/rooms/:id/command
+  body: json
+  auth: bearer
 }
 
 params:path {
@@ -16,11 +18,20 @@ headers {
   content-type: application/json
 }
 
-body {
+auth:bearer {
+  token: change-me-before-use
+}
+
+body:json {
   {
     "capability": "power",
     "action": "off"
   }
+}
+
+vars:pre-request {
+  roomId: bedroom
+  baseUrl: 127.0.0.1:3001
 }
 
 settings {

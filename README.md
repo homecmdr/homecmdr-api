@@ -9,7 +9,7 @@ Smart Home is a Rust workspace for a local home automation runtime built around:
 - SQLite-backed current-state and history persistence (PostgreSQL also supported)
 - a factory-based adapter model designed to be easy for humans and agentic AI to extend
 
-This project is moving toward a workflow where agents can safely add adapters, automations, scenes, and eventually Lua-based scripting with MCP tooling layered on top.
+This project supports agentic workflows: agents can safely add adapters, automations, scenes, and Lua-based scripting, with an MCP server (`crates/mcp-server`) available for tool-assisted operations.
 
 ## Read This First
 
@@ -488,6 +488,5 @@ This project is intended to grow in these areas:
 - automations
 - scenes
 - scripting through Lua
-- MCP-assisted project operations
 
 The current adapter factory model is the foundation for that work.
