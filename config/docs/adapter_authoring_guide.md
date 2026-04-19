@@ -1,5 +1,10 @@
 # HomeCmdr Adapter Authoring Guide
 
+> **Publishing an official adapter?** Official adapters live in the
+> [homecmdr/adapters](https://github.com/homecmdr/adapters) registry and are installed into
+> workspaces with `homecmdr pull <adapter-name>`. See that repo for contribution guidelines.
+> This guide is for creating a new adapter crate **in your local workspace**.
+
 This guide is for an agentic AI or engineer creating a new adapter crate in this workspace.
 
 It reflects the current codebase, not an aspirational plugin system.
