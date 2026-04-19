@@ -24,11 +24,8 @@ Start here depending on your goal:
 
 Adapter-specific docs:
 
-- `crates/adapter-open-meteo/README.md`
-- `crates/adapter-elgato-lights/README.md`
-- `crates/adapter-ollama/README.md`
-- `crates/adapter-roku-tv/README.md`
-- `crates/adapter-zigbee2mqtt/README.md`
+- `crates/adapter-open-meteo/README.md` (bundled)
+- official adapter registry: https://github.com/homecmdr/adapters
 
 Lua runtime docs:
 
@@ -46,11 +43,7 @@ homecmdr/
 │   └── docs/
 ├── crates/
 │   ├── adapters/
-│   ├── adapter-elgato-lights/
-│   ├── adapter-ollama/
 │   ├── adapter-open-meteo/
-│   ├── adapter-roku-tv/
-│   ├── adapter-zigbee2mqtt/
 │   ├── api/
 │   ├── automations/
 │   ├── core/
@@ -129,24 +122,22 @@ The server handles SIGTERM and ctrl-c and drains in-flight requests with a 30-se
 
 ## Current Adapters
 
-### Open-Meteo
+### Open-Meteo *(bundled)*
 
 - crate: `crates/adapter-open-meteo`
 - type: poll-only sensor adapter
 - publishes weather sensors
 
-### Elgato Lights
+### Official adapters
 
-- crate: `crates/adapter-elgato-lights`
-- type: polled and commandable multi-device adapter
-- exposes one logical light device per physical light index
+The remaining official adapters (Elgato Key Light, Ollama, Roku TV, Zigbee2MQTT) live in the
+[homecmdr/adapters](https://github.com/homecmdr/adapters) registry. Install them with:
 
-### Roku TV *(bundled example)*
+```bash
+homecmdr pull adapter-elgato-lights
+```
 
-- crate: `crates/adapter-roku-tv`
-- type: polled and commandable single-device adapter
-- currently exposes power control for one TV using a static IP
-- **bundled as an example adapter** — not part of the official supported set
+See [homecmdr/homecmdr-cli](https://github.com/homecmdr/homecmdr-cli) for the CLI.
 
 ## Configuration
 
@@ -171,11 +162,10 @@ Default config lives at:
 
 Current default config includes:
 
-- `open_meteo` (official)
-- `elgato_lights` (official)
-- `zigbee2mqtt` (official)
-- `roku_tv` (bundled example)
-- `ollama` (bundled example)
+- `open_meteo` (bundled)
+
+Official adapters are installed via `homecmdr pull` and their config blocks added manually.
+See https://github.com/homecmdr/adapters for available adapters.
 
 The default asset layout is:
 

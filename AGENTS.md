@@ -16,14 +16,14 @@
 - `HOMECMDR_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/homecmdr`).
 - `HOMECMDR_MASTER_KEY` env var overrides `auth.master_key` in config.
 - API bind address is configured via `api.bind_address` in `config/default.toml`; it is no longer hard-coded in `main.rs`.
-- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo` / `adapter-elgato-lights` / `adapter-ollama` / `adapter-roku-tv` / `adapter-zigbee2mqtt`.
+- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo`.
 
 ## Workspace Map
 
 - `crates/core`: runtime contracts, config model, registry, command/capability model, event bus.
 - `crates/api`: only binary; starts runtime, loads Lua assets, exposes HTTP + WebSocket API, and wires persistence/history.
 - `crates/adapters`: link crate that pulls adapter crates into the final binary. Adapter discovery is compile-time via `inventory`.
-- `crates/adapter-*`: each adapter owns its own config parsing/validation, protocol client, state mapping, command handling, and tests.
+- `crates/adapter-open-meteo`: the one bundled adapter. Additional official adapters live at https://github.com/homecmdr/adapters and are installed via `homecmdr pull <adapter-name>`.
 - `crates/scenes`, `crates/automations`, `crates/lua-host`: Lua asset loading/execution. `mlua` is vendored Lua 5.4, so no system Lua dependency should be needed.
 - `crates/store-sql`: SQLite store plus in-code schema initialization/migrations and history storage.
 - `crates/store-postgres`: PostgreSQL store implementing the same `DeviceStore` + `ApiKeyStore` traits. Wired at startup when `persistence.backend = "postgres"` is set in config.
@@ -31,7 +31,8 @@
 
 ## Adapter Rules
 
-- New adapters must be linked in three places: root `Cargo.toml`, `crates/adapters/Cargo.toml`, and `crates/adapters/src/lib.rs`.
+- Adapters from the official registry are installed with `homecmdr pull <adapter-name>` (see https://github.com/homecmdr/homecmdr-cli). After pulling, link the crate in three places: root `Cargo.toml`, `crates/adapters/Cargo.toml`, and `crates/adapters/src/lib.rs`.
+- New in-workspace adapters must also be linked in those same three places.
 - Register factories with `inventory::submit!`; `crates/api` discovers factories through `registered_adapter_factories()`.
 - Do not add adapter-specific config structs to `crates/core/src/config.rs`; adapter config is loaded as generic JSON and parsed inside the adapter crate.
 - Do not add adapter-specific startup wiring to `crates/api/src/main.rs`.

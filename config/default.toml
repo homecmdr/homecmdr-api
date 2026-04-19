@@ -77,31 +77,13 @@ device_ids = []
 capabilities = []
 adapter_names = []
 
+# Official adapters (elgato-lights, ollama, roku-tv, zigbee2mqtt) are available
+# from https://github.com/homecmdr/adapters — install with:
+#   homecmdr pull adapter-elgato-lights
+# then add your [adapters.<name>] block here.
+
 [adapters.open_meteo]
 enabled = true
 latitude = 51.5
 longitude = -0.1
 poll_interval_secs = 90
-
-[adapters.elgato_lights]
-enabled = true
-base_url = "http://127.0.0.1:9123"
-poll_interval_secs = 30
-
-[adapters.roku_tv]
-enabled = true
-ip_address = "192.168.1.114"
-poll_interval_secs = 30
-
-[adapters.ollama]
-enabled = true
-base_url = "http://127.0.0.1:11434"
-model = "llava"
-
-[adapters.zigbee2mqtt]
-enabled = true
-server = "mqtt://127.0.0.1:1883"
-base_topic = "zigbee2mqtt"
-client_id = "homecmdr-zigbee2mqtt"
-keepalive_secs = 30
-command_timeout_secs = 5
