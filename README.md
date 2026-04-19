@@ -17,12 +17,10 @@ Start here depending on your goal:
 
 - run the system: `config/default.toml`
 - use the API: `config/docs/api_reference.md`
-- build an external dashboard template: `config/docs/dashboard_template_guide.md`
+- build or extend a dashboard: https://github.com/homecmdr/homecmdr-dash
 - write Lua scenes and automations: `config/docs/lua_runtime_guide.md`
 - build a new adapter: `config/docs/adapter_authoring_guide.md`
 - operate as an agent in this repo: `config/docs/agent_workflows.md`
-- understand why the factory model exists: `config/docs/adapter_factory_refactor_plan.md`
-- see the original scene implementation plan: `config/docs/lua_scenes_implementation_plan.md`
 
 Adapter-specific docs:
 
@@ -31,10 +29,6 @@ Adapter-specific docs:
 - `crates/adapter-ollama/README.md`
 - `crates/adapter-roku-tv/README.md`
 - `crates/adapter-zigbee2mqtt/README.md`
-
-External reference examples:
-
-- `examples/dashboard-template/README.md`
 
 Lua runtime docs:
 

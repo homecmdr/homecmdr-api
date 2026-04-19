@@ -1,8 +1,8 @@
 # HomeCmdr Agent Notes
 
 - Trust executable sources over prose when they disagree. Read `Cargo.toml`, `config/default.toml`, `crates/api/src/main.rs`, and the relevant crate before trusting `README.md`.
-- Highest-value repo docs are in `config/docs/`: `agent_workflows.md`, `adapter_authoring_guide.md`, `lua_runtime_guide.md`, `api_reference.md`, and `dashboard_template_guide.md`.
-- The API does not serve a dashboard. Dashboards are external clients. The reference example is `examples/dashboard-template/` (Alpine.js + vanilla CSS, no build step). Use it as the canonical starting point when building or extending a dashboard. See `config/docs/dashboard_template_guide.md` for the full API contract and extension guidance.
+- Highest-value repo docs are in `config/docs/`: `agent_workflows.md`, `adapter_authoring_guide.md`, `lua_runtime_guide.md`, and `api_reference.md`.
+- The API does not serve a dashboard. Dashboards are external clients. The reference dashboard is at https://github.com/homecmdr/homecmdr-dash (Alpine.js + vanilla CSS, no build step). Use it as the canonical starting point when building or extending a dashboard.
 
 ## Commands
 
