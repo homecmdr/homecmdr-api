@@ -5,23 +5,18 @@ WORKDIR /build
 
 # Cache dependency compilation by copying manifests first.
 COPY Cargo.toml Cargo.lock ./
-COPY crates/core/Cargo.toml          crates/core/Cargo.toml
-COPY crates/api/Cargo.toml           crates/api/Cargo.toml
-COPY crates/adapters/Cargo.toml      crates/adapters/Cargo.toml
-COPY crates/adapter-open-meteo/Cargo.toml   crates/adapter-open-meteo/Cargo.toml
-COPY crates/adapter-elgato-lights/Cargo.toml crates/adapter-elgato-lights/Cargo.toml
-COPY crates/adapter-roku-tv/Cargo.toml       crates/adapter-roku-tv/Cargo.toml
-COPY crates/adapter-ollama/Cargo.toml        crates/adapter-ollama/Cargo.toml
-COPY crates/adapter-zigbee2mqtt/Cargo.toml   crates/adapter-zigbee2mqtt/Cargo.toml
-COPY crates/scenes/Cargo.toml        crates/scenes/Cargo.toml
-COPY crates/automations/Cargo.toml   crates/automations/Cargo.toml
-COPY crates/lua-host/Cargo.toml      crates/lua-host/Cargo.toml
-COPY crates/store-sql/Cargo.toml     crates/store-sql/Cargo.toml
+COPY crates/core/Cargo.toml               crates/core/Cargo.toml
+COPY crates/api/Cargo.toml                crates/api/Cargo.toml
+COPY crates/adapters/Cargo.toml           crates/adapters/Cargo.toml
+COPY crates/adapter-open-meteo/Cargo.toml crates/adapter-open-meteo/Cargo.toml
+COPY crates/scenes/Cargo.toml             crates/scenes/Cargo.toml
+COPY crates/automations/Cargo.toml        crates/automations/Cargo.toml
+COPY crates/lua-host/Cargo.toml           crates/lua-host/Cargo.toml
+COPY crates/store-sql/Cargo.toml          crates/store-sql/Cargo.toml
 
 # Stub out every lib/main so `cargo build` can compile deps without real source.
 RUN for crate in core lua-host adapters scenes automations store-sql \
-        adapter-open-meteo adapter-elgato-lights adapter-roku-tv \
-        adapter-ollama adapter-zigbee2mqtt; do \
+        adapter-open-meteo; do \
       mkdir -p crates/$crate/src && echo "// stub" > crates/$crate/src/lib.rs; \
     done && \
     mkdir -p crates/api/src && echo "fn main() {}" > crates/api/src/main.rs && \
