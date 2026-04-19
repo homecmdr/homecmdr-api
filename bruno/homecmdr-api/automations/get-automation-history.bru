@@ -1,0 +1,20 @@
+meta {
+  name: Get Automation History
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/automations/:id/history
+}
+
+params:path {
+  id: {{automationId}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

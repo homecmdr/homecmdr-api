@@ -1,0 +1,21 @@
+[package]
+name = "homecmdr-automations"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+cron = "0.12"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+sunrise = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+homecmdr-core = { path = "../core" }
+homecmdr-lua-host = { path = "../lua-host" }
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+async-trait = "0.1"

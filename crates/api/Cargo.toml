@@ -1,0 +1,32 @@
+[package]
+name = "api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["json", "ws", "tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+notify = "8"
+homecmdr-adapters = { path = "../adapters" }
+homecmdr-automations = { path = "../automations" }
+homecmdr-core = { path = "../core" }
+homecmdr-scenes = { path = "../scenes" }
+store-sql = { path = "../store-sql" }
+store-postgres = { path = "../store-postgres" }
+tower = { version = "0.5", features = ["limit"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+url = "2"
+
+[dev-dependencies]
+async-trait = "0.1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = "0.28"

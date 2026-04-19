@@ -1,0 +1,26 @@
+meta {
+  name: Get Diagnostics
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/diagnostics
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: change-me-before-use
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

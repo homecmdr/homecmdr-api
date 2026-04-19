@@ -1,0 +1,1621 @@
+openapi: 3.0.3
+info:
+  title: HomeCmdr API
+  version: 0.1.0
+  description: |
+    OpenAPI description for the HTTP and WebSocket API implemented by `crates/api`.
+
+    This spec is based on the current Rust handlers and response types, not the older prose docs.
+    It is intended to be imported into Bruno.
+
+    Notes:
+    - The default bind address in `config/default.toml` is `127.0.0.1:3001`.
+    - `GET /events` upgrades to a WebSocket connection. Bruno may import it as a normal GET request; the event frame schemas are included in `components.schemas.EventFrame` for reference.
+    - All routes except `GET /health` and `GET /ready` require `Authorization: Bearer <token>`.
+      The token may be the master key (from `auth.master_key` in config or `HOMECMDR_MASTER_KEY`
+      env var, which always grants `admin`) or an API key created via `POST /auth/keys`.
+servers:
+  - url: http://127.0.0.1:3001
+    description: Default local API server from `config/default.toml`
+tags:
+  - name: System
+  - name: Adapters
+  - name: Capabilities
+  - name: Scenes
+  - name: Automations
+  - name: Rooms
+  - name: Devices
+  - name: History
+  - name: Events
+  - name: Auth
+security:
+  - BearerAuth: []
+paths:
+  /health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Get system health
+      security: []
+      responses:
+        '200':
+          description: Health snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      tags: [System]
+      operationId: getReady
+      summary: Check readiness
+      security: []
+      responses:
+        '200':
+          description: System is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
+  /diagnostics:
+    get:
+      tags: [System]
+      operationId: getDiagnostics
+      summary: Get diagnostics snapshot
+      responses:
+        '200':
+          description: Diagnostics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticsResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /diagnostics/reload_watch:
+    get:
+      tags: [Diagnostics]
+      operationId: diagnosticsReloadWatch
+      summary: Reload watch diagnostics
+      responses:
+        '200':
+          description: Current reload watch settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadWatchResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /adapters:
+    get:
+      tags: [Adapters]
+      operationId: listAdapters
+      summary: List adapters
+      responses:
+        '200':
+          description: Configured adapters discovered at startup
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdapterSummary'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /adapters/{id}:
+    get:
+      tags: [Adapters]
+      operationId: getAdapter
+      summary: Get adapter details
+      parameters:
+        - $ref: '#/components/parameters/AdapterId'
+      responses:
+        '200':
+          description: Adapter details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterDetailResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /capabilities:
+    get:
+      tags: [Capabilities]
+      operationId: listCapabilities
+      summary: List canonical capabilities
+      responses:
+        '200':
+          description: Capability catalog and ownership rules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityCatalogResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /scenes:
+    get:
+      tags: [Scenes]
+      operationId: listScenes
+      summary: List scenes
+      responses:
+        '200':
+          description: Loaded scenes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SceneSummary'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /scenes/reload:
+    post:
+      tags: [Scenes]
+      operationId: reloadScenes
+      summary: Reload scenes
+      description: Reloads scenes from disk and atomically swaps the in-memory scene catalog on success.
+      responses:
+        '200':
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /scenes/{id}/execute:
+    post:
+      tags: [Scenes]
+      operationId: executeScene
+      summary: Execute a scene
+      parameters:
+        - $ref: '#/components/parameters/SceneId'
+      responses:
+        '200':
+          description: Scene executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SceneExecuteResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /scenes/{id}/history:
+    get:
+      tags: [Scenes, History]
+      operationId: getSceneHistory
+      summary: Get scene execution history
+      parameters:
+        - $ref: '#/components/parameters/SceneId'
+        - $ref: '#/components/parameters/HistoryStart'
+        - $ref: '#/components/parameters/HistoryEnd'
+        - $ref: '#/components/parameters/HistoryLimit'
+      responses:
+        '200':
+          description: Scene execution history entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SceneHistoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /automations:
+    get:
+      tags: [Automations]
+      operationId: listAutomations
+      summary: List automations
+      responses:
+        '200':
+          description: Loaded automations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AutomationResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /automations/reload:
+    post:
+      tags: [Automations]
+      operationId: reloadAutomations
+      summary: Reload automations
+      description: Reloads automations from disk and atomically swaps the in-memory automation catalog on success.
+      responses:
+        '200':
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /scripts/reload:
+    post:
+      tags: [Scripts]
+      operationId: reloadScripts
+      summary: Reload scripts
+      description: Acknowledges script directory changes and emits scripts reload lifecycle events.
+      responses:
+        '200':
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /automations/{id}:
+    get:
+      tags: [Automations]
+      operationId: getAutomation
+      summary: Get automation details
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      responses:
+        '200':
+          description: Automation details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /automations/{id}/enabled:
+    post:
+      tags: [Automations]
+      operationId: setAutomationEnabled
+      summary: Enable or disable an automation
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutomationEnabledRequest'
+      responses:
+        '200':
+          description: Updated automation details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /automations/{id}/validate:
+    post:
+      tags: [Automations]
+      operationId: validateAutomation
+      summary: Validate an automation asset
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      responses:
+        '200':
+          description: Automation is valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationValidateResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /automations/{id}/execute:
+    post:
+      tags: [Automations]
+      operationId: executeAutomation
+      summary: Execute an automation manually
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualAutomationRequest'
+      responses:
+        '200':
+          description: Manual execution result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationExecuteResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /automations/{id}/history:
+    get:
+      tags: [Automations, History]
+      operationId: getAutomationHistory
+      summary: Get automation execution history
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+        - $ref: '#/components/parameters/HistoryStart'
+        - $ref: '#/components/parameters/HistoryEnd'
+        - $ref: '#/components/parameters/HistoryLimit'
+      responses:
+        '200':
+          description: Automation execution history entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationHistoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /rooms:
+    get:
+      tags: [Rooms]
+      operationId: listRooms
+      summary: List rooms
+      responses:
+        '200':
+          description: Rooms
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Room'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+    post:
+      tags: [Rooms]
+      operationId: createRoom
+      summary: Create or update a room
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoomRequest'
+      responses:
+        '200':
+          description: Created or updated room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Room'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /rooms/{id}:
+    get:
+      tags: [Rooms]
+      operationId: getRoom
+      summary: Get a room
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      responses:
+        '200':
+          description: Room details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Room'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+    delete:
+      tags: [Rooms]
+      operationId: deleteRoom
+      summary: Delete a room
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      responses:
+        '204':
+          description: Room deleted
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /rooms/{id}/devices:
+    get:
+      tags: [Rooms, Devices]
+      operationId: listRoomDevices
+      summary: List devices assigned to a room
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      responses:
+        '200':
+          description: Devices assigned to the room
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /rooms/{id}/command:
+    post:
+      tags: [Rooms, Devices]
+      operationId: commandRoomDevices
+      summary: Send a command to all devices in a room
+      parameters:
+        - $ref: '#/components/parameters/RoomId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCommand'
+      responses:
+        '200':
+          description: Per-device command results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RoomCommandResult'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /devices:
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: List devices
+      responses:
+        '200':
+          description: Devices in the runtime registry
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /devices/{id}:
+    get:
+      tags: [Devices]
+      operationId: getDevice
+      summary: Get a device
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '200':
+          description: Device details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /devices/{id}/room:
+    post:
+      tags: [Devices, Rooms]
+      operationId: assignDeviceRoom
+      summary: Assign or clear a device room
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignRoomRequest'
+      responses:
+        '200':
+          description: Updated device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /devices/{id}/command:
+    post:
+      tags: [Devices]
+      operationId: commandDevice
+      summary: Send a command to one device
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCommand'
+      responses:
+        '200':
+          description: Command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '501':
+          $ref: '#/components/responses/ErrorResponse'
+  /devices/{id}/history:
+    get:
+      tags: [Devices, History]
+      operationId: getDeviceHistory
+      summary: Get device history
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+        - $ref: '#/components/parameters/HistoryStart'
+        - $ref: '#/components/parameters/HistoryEnd'
+        - $ref: '#/components/parameters/HistoryLimit'
+      responses:
+        '200':
+          description: Device history entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceHistoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /devices/{id}/history/{attribute}:
+    get:
+      tags: [Devices, History]
+      operationId: getAttributeHistory
+      summary: Get history for one device attribute
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+        - $ref: '#/components/parameters/AttributeName'
+        - $ref: '#/components/parameters/HistoryStart'
+        - $ref: '#/components/parameters/HistoryEnd'
+        - $ref: '#/components/parameters/HistoryLimit'
+      responses:
+        '200':
+          description: Attribute history entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttributeHistoryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /audit/commands:
+    get:
+      tags: [History]
+      operationId: getCommandAudit
+      summary: Get command audit history
+      parameters:
+        - $ref: '#/components/parameters/HistoryStart'
+        - $ref: '#/components/parameters/HistoryEnd'
+        - $ref: '#/components/parameters/HistoryLimit'
+      responses:
+        '200':
+          description: Command audit entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAuditResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /events:
+    get:
+      tags: [Events]
+      operationId: openEventsWebSocket
+      summary: Open the runtime event stream
+      description: |
+        Upgrades the connection to a WebSocket and streams event frames as JSON text messages.
+
+        Public frame variants are documented in `components.schemas.EventFrame`.
+      responses:
+        '101':
+          description: Switching Protocols to WebSocket
+        '400':
+          description: Invalid WebSocket upgrade request
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /auth/keys:
+    post:
+      tags: [Auth]
+      operationId: createApiKey
+      summary: Create an API key
+      description: Creates a new API key. Requires the `admin` role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '200':
+          description: Newly created API key — the plain-text key is shown only once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateApiKeyResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+    get:
+      tags: [Auth]
+      operationId: listApiKeys
+      summary: List API keys
+      description: Lists all API keys with key hashes redacted. Requires the `admin` role.
+      responses:
+        '200':
+          description: API key list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /auth/keys/{id}:
+    delete:
+      tags: [Auth]
+      operationId: deleteApiKey
+      summary: Revoke an API key
+      description: Permanently deletes an API key by ID. Requires the `admin` role.
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyId'
+      responses:
+        '200':
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteApiKeyResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+components:
+  parameters:
+    AdapterId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Adapter name, for example `roku_tv`.
+    AutomationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Automation identifier.
+    SceneId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Scene identifier.
+    RoomId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Room identifier.
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Namespaced device identifier such as `roku_tv:tv`.
+    AttributeName:
+      name: attribute
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Attribute key in `device.attributes`.
+    HistoryStart:
+      name: start
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: Inclusive history window start.
+    HistoryEnd:
+      name: end
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: Inclusive history window end.
+    HistoryLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+      description: Query limit. The runtime enforces the configured max limit; the default config uses 200 by default and 1000 as the max.
+    ApiKeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: API key identifier.
+  responses:
+    ErrorResponse:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnauthorizedResponse:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ForbiddenResponse:
+      description: Authenticated but insufficient role for this endpoint
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    StatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    ComponentStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+        message:
+          type: string
+          nullable: true
+        last_updated:
+          type: string
+          format: date-time
+          nullable: true
+    AdapterErrorSnapshot:
+      type: object
+      required: [message, observed_at]
+      properties:
+        message:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+    AdapterSummary:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+          nullable: true
+        last_updated:
+          type: string
+          format: date-time
+          nullable: true
+        last_success:
+          type: string
+          format: date-time
+          nullable: true
+        last_error:
+          $ref: '#/components/schemas/NullableAdapterErrorSnapshot'
+    NullableAdapterErrorSnapshot:
+      nullable: true
+      allOf:
+        - $ref: '#/components/schemas/AdapterErrorSnapshot'
+    AdapterDetailResponse:
+      type: object
+      required: [name, runtime_status, health]
+      properties:
+        name:
+          type: string
+        runtime_status:
+          type: string
+        health:
+          $ref: '#/components/schemas/ComponentStatus'
+        last_success:
+          type: string
+          format: date-time
+          nullable: true
+        last_error:
+          $ref: '#/components/schemas/NullableAdapterErrorSnapshot'
+    HealthResponse:
+      type: object
+      required: [status, ready, runtime, persistence, automations, adapters]
+      properties:
+        status:
+          type: string
+          example: ok
+        ready:
+          type: boolean
+        runtime:
+          $ref: '#/components/schemas/ComponentStatus'
+        persistence:
+          $ref: '#/components/schemas/ComponentStatus'
+        automations:
+          $ref: '#/components/schemas/ComponentStatus'
+        adapters:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdapterSummary'
+    DiagnosticsResponse:
+      type: object
+      required:
+        [status, ready, devices, rooms, scenes, automations, history_enabled, default_history_limit, max_history_limit, runtime, persistence, automations_component, adapters]
+      properties:
+        status:
+          type: string
+        ready:
+          type: boolean
+        devices:
+          type: integer
+        rooms:
+          type: integer
+        scenes:
+          type: integer
+        automations:
+          type: integer
+        history_enabled:
+          type: boolean
+        default_history_limit:
+          type: integer
+        max_history_limit:
+          type: integer
+        runtime:
+          $ref: '#/components/schemas/ComponentStatus'
+        persistence:
+          $ref: '#/components/schemas/ComponentStatus'
+        automations_component:
+          $ref: '#/components/schemas/ComponentStatus'
+        adapters:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdapterSummary'
+    CapabilitySchema:
+      type: object
+      required: [type, values]
+      properties:
+        type:
+          type: string
+          enum:
+            - measurement
+            - accumulation
+            - number
+            - integer
+            - string
+            - integer_or_string
+            - boolean
+            - percentage
+            - rgb_color
+            - hex_color
+            - xy_color
+            - hs_color
+            - color_temperature
+            - enum
+        values:
+          type: array
+          items:
+            type: string
+    CapabilityResponse:
+      type: object
+      required: [domain, key, schema, read_only, actions, description]
+      properties:
+        domain:
+          type: string
+        key:
+          type: string
+        schema:
+          $ref: '#/components/schemas/CapabilitySchema'
+        read_only:
+          type: boolean
+        actions:
+          type: array
+          items:
+            type: string
+        description:
+          type: string
+    CapabilityOwnershipResponse:
+      type: object
+      required: [canonical_attribute_location, custom_attribute_prefix, vendor_metadata_field, rules]
+      properties:
+        canonical_attribute_location:
+          type: string
+        custom_attribute_prefix:
+          type: string
+        vendor_metadata_field:
+          type: string
+        rules:
+          type: array
+          items:
+            type: string
+    CapabilityCatalogResponse:
+      type: object
+      required: [capabilities, ownership]
+      properties:
+        capabilities:
+          type: array
+          items:
+            $ref: '#/components/schemas/CapabilityResponse'
+        ownership:
+          $ref: '#/components/schemas/CapabilityOwnershipResponse'
+    DeviceKind:
+      type: string
+      enum: [sensor, light, switch, virtual]
+    AttributeValue:
+      description: JSON-like value used for device attributes, command values, and manual automation trigger payloads.
+      nullable: true
+      anyOf:
+        - type: integer
+        - type: number
+        - type: boolean
+        - type: string
+        - type: array
+          items:
+            $ref: '#/components/schemas/AttributeValue'
+        - type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AttributeValue'
+    Metadata:
+      type: object
+      required: [source, vendor_specific]
+      properties:
+        source:
+          type: string
+        accuracy:
+          type: number
+          nullable: true
+        vendor_specific:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AttributeValue'
+    Device:
+      type: object
+      required: [id, kind, attributes, metadata, updated_at, last_seen]
+      properties:
+        id:
+          type: string
+        room_id:
+          type: string
+          nullable: true
+        kind:
+          $ref: '#/components/schemas/DeviceKind'
+        attributes:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AttributeValue'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+        updated_at:
+          type: string
+          format: date-time
+        last_seen:
+          type: string
+          format: date-time
+    Room:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    DeviceCommand:
+      type: object
+      required: [capability, action]
+      properties:
+        capability:
+          type: string
+        action:
+          type: string
+        value:
+          $ref: '#/components/schemas/AttributeValue'
+      example:
+        capability: power
+        action: toggle
+    CreateRoomRequest:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    AssignRoomRequest:
+      type: object
+      properties:
+        room_id:
+          type: string
+          nullable: true
+      example:
+        room_id: living_room
+    RoomCommandResult:
+      type: object
+      required: [device_id, status]
+      properties:
+        device_id:
+          type: string
+        status:
+          type: string
+          enum: [ok, unsupported, error]
+        message:
+          type: string
+          nullable: true
+    SceneSummary:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+    SceneExecutionResult:
+      type: object
+      required: [target, status]
+      properties:
+        target:
+          type: string
+        status:
+          type: string
+          enum: [ok, unsupported, error]
+        message:
+          type: string
+          nullable: true
+    SceneStepResult:
+      type: object
+      required: [target, status]
+      properties:
+        target:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+          nullable: true
+    SceneExecuteResponse:
+      type: object
+      required: [status, results]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SceneExecutionResult'
+    AutomationResponse:
+      type: object
+      required: [id, name, trigger_type, condition_count, status]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        trigger_type:
+          type: string
+          enum:
+            - device_state_change
+            - weather_state
+            - adapter_lifecycle
+            - system_error
+            - wall_clock
+            - cron
+            - sunrise
+            - sunset
+            - interval
+        condition_count:
+          type: integer
+        status:
+          type: string
+          enum: [enabled, disabled]
+        last_run:
+          type: string
+          format: date-time
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+    AutomationEnabledRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    AutomationValidateResponse:
+      type: object
+      required: [status, automation]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        automation:
+          $ref: '#/components/schemas/AutomationResponse'
+    ManualAutomationRequest:
+      type: object
+      properties:
+        trigger_payload:
+          $ref: '#/components/schemas/AttributeValue'
+      example:
+        trigger_payload:
+          type: manual
+    AutomationExecuteResponse:
+      type: object
+      required: [status, duration_ms, results]
+      properties:
+        status:
+          type: string
+          description: Execution status returned by the automation runner, typically `ok`, `error`, or `skipped`.
+        error:
+          type: string
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SceneStepResult'
+    ReloadError:
+      type: object
+      required: [file, message]
+      properties:
+        file:
+          type: string
+        message:
+          type: string
+    ReloadResponse:
+      type: object
+      required: [status, target, loaded_count, errors, duration_ms]
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        target:
+          type: string
+          enum: [scenes, automations, scripts]
+        loaded_count:
+          type: integer
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReloadError'
+        duration_ms:
+          type: integer
+          format: int64
+    ReloadWatchItem:
+      type: object
+      required: [target, enabled, directory]
+      properties:
+        target:
+          type: string
+          enum: [scenes, automations, scripts]
+        enabled:
+          type: boolean
+        directory:
+          type: string
+    ReloadWatchResponse:
+      type: object
+      required: [status, watches]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        watches:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReloadWatchItem'
+    DeviceHistoryEntry:
+      type: object
+      required: [observed_at, device]
+      properties:
+        observed_at:
+          type: string
+          format: date-time
+        device:
+          $ref: '#/components/schemas/Device'
+    DeviceHistoryResponse:
+      type: object
+      required: [device_id, entries]
+      properties:
+        device_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceHistoryEntry'
+    AttributeHistoryEntry:
+      type: object
+      required: [observed_at, device_id, attribute, value]
+      properties:
+        observed_at:
+          type: string
+          format: date-time
+        device_id:
+          type: string
+        attribute:
+          type: string
+        value:
+          $ref: '#/components/schemas/AttributeValue'
+    AttributeHistoryResponse:
+      type: object
+      required: [device_id, attribute, entries]
+      properties:
+        device_id:
+          type: string
+        attribute:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttributeHistoryEntry'
+    CommandAuditEntry:
+      type: object
+      required: [recorded_at, source, device_id, command, status]
+      properties:
+        recorded_at:
+          type: string
+          format: date-time
+        source:
+          type: string
+          enum: [device, room]
+        room_id:
+          type: string
+          nullable: true
+        device_id:
+          type: string
+        command:
+          $ref: '#/components/schemas/DeviceCommand'
+        status:
+          type: string
+        message:
+          type: string
+          nullable: true
+    CommandAuditResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandAuditEntry'
+    SceneExecutionHistoryEntry:
+      type: object
+      required: [executed_at, scene_id, status, results]
+      properties:
+        executed_at:
+          type: string
+          format: date-time
+        scene_id:
+          type: string
+        status:
+          type: string
+        error:
+          type: string
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SceneStepResult'
+    SceneHistoryResponse:
+      type: object
+      required: [scene_id, entries]
+      properties:
+        scene_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/SceneExecutionHistoryEntry'
+    AutomationExecutionHistoryEntry:
+      type: object
+      required: [executed_at, automation_id, trigger_payload, status, duration_ms, results]
+      properties:
+        executed_at:
+          type: string
+          format: date-time
+        automation_id:
+          type: string
+        trigger_payload:
+          $ref: '#/components/schemas/AttributeValue'
+        status:
+          type: string
+        duration_ms:
+          type: integer
+          format: int64
+        error:
+          type: string
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SceneStepResult'
+    AutomationHistoryResponse:
+      type: object
+      required: [automation_id, entries]
+      properties:
+        automation_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutomationExecutionHistoryEntry'
+    CreateApiKeyRequest:
+      type: object
+      required: [label, role]
+      properties:
+        label:
+          type: string
+          description: Human-readable label for the key.
+        role:
+          type: string
+          enum: [read, write, admin, automation]
+          description: Role granted to this key.
+    CreateApiKeyResponse:
+      type: object
+      required: [id, label, role, created_at, plain_key]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        role:
+          type: string
+          enum: [read, write, admin, automation]
+        created_at:
+          type: string
+          format: date-time
+        plain_key:
+          type: string
+          description: The plain-text API key — shown only once at creation time.
+    ApiKeyResponse:
+      type: object
+      required: [id, label, role, created_at]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        role:
+          type: string
+          enum: [read, write, admin, automation]
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+    DeleteApiKeyResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
+    EventFrame:
+      description: Public JSON frames emitted over the `/events` WebSocket.
+      oneOf:
+        - $ref: '#/components/schemas/DeviceStateChangedFrame'
+        - $ref: '#/components/schemas/DeviceRemovedFrame'
+        - $ref: '#/components/schemas/RoomAddedFrame'
+        - $ref: '#/components/schemas/RoomUpdatedFrame'
+        - $ref: '#/components/schemas/RoomRemovedFrame'
+        - $ref: '#/components/schemas/DeviceRoomChangedFrame'
+        - $ref: '#/components/schemas/AdapterStartedFrame'
+        - $ref: '#/components/schemas/SystemErrorFrame'
+    DeviceStateChangedFrame:
+      type: object
+      required: [type, id, state]
+      properties:
+        type:
+          type: string
+          enum: [device.state_changed]
+        id:
+          type: string
+        state:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AttributeValue'
+    DeviceRemovedFrame:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [device.removed]
+        id:
+          type: string
+    RoomAddedFrame:
+      type: object
+      required: [type, room]
+      properties:
+        type:
+          type: string
+          enum: [room.added]
+        room:
+          $ref: '#/components/schemas/Room'
+    RoomUpdatedFrame:
+      type: object
+      required: [type, room]
+      properties:
+        type:
+          type: string
+          enum: [room.updated]
+        room:
+          $ref: '#/components/schemas/Room'
+    RoomRemovedFrame:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [room.removed]
+        id:
+          type: string
+    DeviceRoomChangedFrame:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [device.room_changed]
+        id:
+          type: string
+        room_id:
+          type: string
+          nullable: true
+    AdapterStartedFrame:
+      type: object
+      required: [type, adapter]
+      properties:
+        type:
+          type: string
+          enum: [adapter.started]
+        adapter:
+          type: string
+    SystemErrorFrame:
+      type: object
+      required: [type, message]
+      properties:
+        type:
+          type: string
+          enum: [system.error]
+        message:
+          type: string
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        All routes except `GET /health` and `GET /ready` require `Authorization: Bearer <token>`.
+        Accepted values: the master key (from `auth.master_key` in config or `HOMECMDR_MASTER_KEY`
+        env var, always grants `admin`) or an API key created via `POST /auth/keys`.

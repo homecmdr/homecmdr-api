@@ -1,0 +1,20 @@
+meta {
+  name: Get Device
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/devices/:id
+}
+
+params:path {
+  id: {{deviceId}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

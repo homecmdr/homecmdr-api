@@ -1,0 +1,21 @@
+meta {
+  name: Get Attribute History
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/devices/:id/history/:attribute
+}
+
+params:path {
+  id: {{deviceId}}
+  attribute: {{attributeName}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

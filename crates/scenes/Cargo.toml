@@ -1,0 +1,17 @@
+[package]
+name = "homecmdr-scenes"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+serde = { version = "1", features = ["derive"] }
+homecmdr-core = { path = "../core" }
+homecmdr-lua-host = { path = "../lua-host" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

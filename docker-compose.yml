@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: homecmdr
+      POSTGRES_USER: homecmdr
+      POSTGRES_PASSWORD: homecmdr
+    volumes:
+      - homecmdr-pg-data:/var/lib/postgresql/data
+
+  homecmdr:
+    build: .
+    image: homecmdr:latest
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      # Bind-mount your local config directory into the container.
+      # Place default.toml, scenes/, automations/, and scripts/ here.
+      - ./config:/config:ro
+      # Persistent data directory — holds the SQLite database (or other data).
+      - homecmdr-data:/data
+    environment:
+      HOMECMDR_CONFIG: /config/default.toml
+      HOMECMDR_DATA_DIR: /data
+      # Override the master key here or inject from a .env file.
+      # HOMECMDR_MASTER_KEY: change-me-before-use
+      # Uncomment to switch to PostgreSQL (update database_url in default.toml):
+      # DATABASE_URL: postgres://homecmdr:homecmdr@postgres/homecmdr
+    # Uncomment to forward host MQTT broker (zigbee2mqtt default port).
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+
+volumes:
+  homecmdr-data:
+  homecmdr-pg-data:

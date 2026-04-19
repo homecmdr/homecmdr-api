@@ -1,0 +1,22 @@
+meta {
+  name: List Scenes
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/scenes
+  body: none
+  auth: none
+}
+
+vars:pre-request {
+  baseUrl: 127.0.01:3001
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}
