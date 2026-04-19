@@ -31,15 +31,20 @@ impl Default for ExecutionMode {
     }
 }
 
-pub fn parse_execution_mode(value: mlua::Value) -> Result<ExecutionMode> {
+/// Parse an execution mode from a Lua value.
+///
+/// `default_max` is used as the concurrent-execution ceiling when the Lua
+/// script specifies `"parallel"` or `"queued"` as a plain string (without a
+/// table with an explicit `max` key).  Pass `8` for the historical default.
+pub fn parse_execution_mode(value: mlua::Value, default_max: usize) -> Result<ExecutionMode> {
     match value {
-        mlua::Value::Nil => Ok(ExecutionMode::default()),
+        mlua::Value::Nil => Ok(ExecutionMode::Parallel { max: default_max }),
         mlua::Value::String(s) => {
             let mode_str = s.to_str().map_err(|e| anyhow::anyhow!("{e}"))?;
             match mode_str.as_ref() {
-                "parallel" => Ok(ExecutionMode::Parallel { max: 8 }),
+                "parallel" => Ok(ExecutionMode::Parallel { max: default_max }),
                 "single" => Ok(ExecutionMode::Single),
-                "queued" => Ok(ExecutionMode::Queued { max: 8 }),
+                "queued" => Ok(ExecutionMode::Queued { max: default_max }),
                 "restart" => Ok(ExecutionMode::Restart),
                 other => anyhow::bail!(
                     "unknown execution mode '{other}'; expected parallel, single, queued, or restart"
@@ -55,7 +60,7 @@ pub fn parse_execution_mode(value: mlua::Value) -> Result<ExecutionMode> {
                     let max = table
                         .get::<Option<usize>>("max")
                         .map_err(|e| anyhow::anyhow!("mode 'max' field is invalid: {e}"))?
-                        .unwrap_or(8);
+                        .unwrap_or(default_max);
                     Ok(ExecutionMode::Parallel { max })
                 }
                 "single" => Ok(ExecutionMode::Single),
@@ -63,7 +68,7 @@ pub fn parse_execution_mode(value: mlua::Value) -> Result<ExecutionMode> {
                     let max = table
                         .get::<Option<usize>>("max")
                         .map_err(|e| anyhow::anyhow!("mode 'max' field is invalid: {e}"))?
-                        .unwrap_or(8);
+                        .unwrap_or(default_max);
                     Ok(ExecutionMode::Queued { max })
                 }
                 "restart" => Ok(ExecutionMode::Restart),

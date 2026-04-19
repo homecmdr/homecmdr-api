@@ -25,7 +25,7 @@ use smart_home_lua_host::{
 use sunrise::{Coordinates, SolarDay, SolarEvent};
 use tokio::time::{timeout, Duration};
 
-const AUTOMATION_BACKSTOP_TIMEOUT: Duration = Duration::from_secs(3600);
+const DEFAULT_BACKSTOP_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AutomationSummary {
@@ -213,6 +213,7 @@ pub struct AutomationRunner {
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
     state_store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
+    backstop_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -231,6 +232,7 @@ struct ExecutionControl {
     concurrency: ConcurrencyMap,
     max_instructions: u64,
     trigger_context: TriggerContext,
+    backstop_timeout: Duration,
 }
 
 pub trait AutomationExecutionObserver: Send + Sync {
@@ -522,6 +524,7 @@ impl AutomationRunner {
             observer: None,
             state_store: None,
             trigger_context: TriggerContext::default(),
+            backstop_timeout: DEFAULT_BACKSTOP_TIMEOUT,
         }
     }
 
@@ -540,6 +543,11 @@ impl AutomationRunner {
         self
     }
 
+    pub fn with_backstop_timeout(mut self, duration: Duration) -> Self {
+        self.backstop_timeout = duration;
+        self
+    }
+
     pub fn controller(&self) -> AutomationController {
         AutomationController {
             catalog: self.catalog.clone(),
@@ -550,12 +558,14 @@ impl AutomationRunner {
     pub async fn run(self, runtime: Arc<Runtime>) {
         let trigger_context = self.trigger_context;
         let concurrency = self.catalog.concurrency.clone();
+        let backstop_timeout = self.backstop_timeout;
         self.run_with_options(
             runtime,
             ExecutionControl {
                 concurrency,
                 max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                 trigger_context,
+                backstop_timeout,
             },
         )
         .await;
@@ -1232,7 +1242,7 @@ fn do_spawn_execution(
 
         tokio::pin!(join_handle);
 
-        match timeout(AUTOMATION_BACKSTOP_TIMEOUT, &mut join_handle).await {
+        match timeout(execution.backstop_timeout, &mut join_handle).await {
             Ok(Ok(Ok(record))) => {
                 persist_runtime_state(
                     &automation,
@@ -1282,7 +1292,7 @@ fn do_spawn_execution(
                         status: "timeout".to_string(),
                         error: Some("automation execution exceeded backstop timeout".to_string()),
                         results: Vec::new(),
-                        duration_ms: AUTOMATION_BACKSTOP_TIMEOUT.as_millis() as i64,
+                        duration_ms: execution.backstop_timeout.as_millis() as i64,
                     },
                 );
             }
@@ -2389,7 +2399,7 @@ fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> Result<Auto
             path.display()
         )
     })?;
-    let mode = parse_execution_mode(mode_value).map_err(|error| {
+    let mode = parse_execution_mode(mode_value, 8).map_err(|error| {
         anyhow::anyhow!(
             "automation file {} has invalid field 'mode': {error}",
             path.display()
@@ -3240,6 +3250,9 @@ mod tests {
                 .lock()
                 .expect("automation state lock")
                 .insert(state.automation_id.clone(), state.clone());
+            Ok(())
+        }
+        async fn prune_history(&self) -> anyhow::Result<()> {
             Ok(())
         }
     }
@@ -4772,6 +4785,7 @@ mod tests {
                             concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
                             max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                             trigger_context: TriggerContext::default(),
+                            backstop_timeout: DEFAULT_BACKSTOP_TIMEOUT,
                         },
                     )
                     .await;
@@ -4871,6 +4885,7 @@ mod tests {
                 concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                 trigger_context: TriggerContext::default(),
+                backstop_timeout: DEFAULT_BACKSTOP_TIMEOUT,
             },
             2,
             None,

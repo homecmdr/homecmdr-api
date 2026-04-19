@@ -24,6 +24,7 @@
 - `crates/adapter-*`: each adapter owns its own config parsing/validation, protocol client, state mapping, command handling, and tests.
 - `crates/scenes`, `crates/automations`, `crates/lua-host`: Lua asset loading/execution. `mlua` is vendored Lua 5.4, so no system Lua dependency should be needed.
 - `crates/store-sql`: SQLite store plus in-code schema initialization/migrations and history storage.
+- `crates/store-postgres`: PostgreSQL store implementing the same `DeviceStore` + `ApiKeyStore` traits. Wired at startup when `persistence.backend = "postgres"` is set in config.
 
 ## Adapter Rules
 
@@ -41,13 +42,15 @@
 - Scripts can be acknowledged via `POST /scripts/reload`, and optional file-watch hot reload can be enabled with `[scenes].watch`, `[automations].watch`, and `[scripts].watch` in `config/default.toml`.
 - `config/scripts` modules are loadable from scenes/automations with `require(...)`.
 - Current automation trigger types are implemented in code, not just docs: `device_state_change`, `weather_state`, `adapter_lifecycle`, `system_error`, `wall_clock`, `cron`, `sunrise`, `sunset`, `interval`.
-- Automation runner limits are hard-coded in `crates/automations/src/lib.rs`: max 8 concurrent runs, 10s execution timeout.
+- Automation runner limits are configurable via `[automations.runner]` in `config/default.toml`: `default_max_concurrent` (default 8) and `backstop_timeout_secs` (default 3600). They are no longer hard-coded in `crates/automations/src/lib.rs`.
+- Rate limiting on write endpoints is configurable via `[api.rate_limit]` in `config/default.toml` (`enabled`, `requests_per_second`, `burst_size`). When enabled, excess requests return HTTP 429.
+- Graceful shutdown drains in-flight requests with a 30-second timeout (`SHUTDOWN_DRAIN_SECS`). The server handles both SIGTERM and ctrl-c.
 
 ## Persistence And API
 
 - Default persistence is SQLite with `database_url = "sqlite://data/smart-home.db"` and `auto_create = true`.
 - SQLite schema creation and migrations are handled inside `crates/store-sql/src/sqlite.rs`; there is no separate migration tool or `build.rs`.
-- `postgres` is listed in config/types but `crates/api` currently rejects it as unimplemented.
+- PostgreSQL is a fully implemented alternative backend (`crates/store-postgres`). Set `persistence.backend = "postgres"` and supply a `database_url` (e.g. `"postgres://user:pass@localhost/smart_home"`) to use it. `PgPoolOptions::new().max_connections(5)` is used; no TimescaleDB or other extensions are required.
 - Useful live inspection endpoints while developing: `/health`, `/ready`, `/diagnostics`, `/adapters`, `/devices`, `/rooms`, `/capabilities`, and WebSocket `/events`.
 - History and audit endpoints are implemented; this repo is not current-state-only anymore.
 

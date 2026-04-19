@@ -17,6 +17,8 @@ smart-home-automations = { path = "../automations" }
 smart-home-core = { path = "../core" }
 smart-home-scenes = { path = "../scenes" }
 store-sql = { path = "../store-sql" }
+store-postgres = { path = "../store-postgres" }
+tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tracing = "0.1"

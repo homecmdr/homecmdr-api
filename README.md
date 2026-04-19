@@ -6,7 +6,7 @@ Smart Home is a Rust workspace for a local home automation runtime built around:
 - an in-memory device and room registry
 - an HTTP API for inspection and commands
 - a WebSocket event stream for live updates
-- SQLite-backed current-state persistence
+- SQLite-backed current-state and history persistence (PostgreSQL also supported)
 - a factory-based adapter model designed to be easy for humans and agentic AI to extend
 
 This project is moving toward a workflow where agents can safely add adapters, automations, scenes, and eventually Lua-based scripting with MCP tooling layered on top.
@@ -62,7 +62,8 @@ smart-home/
 │   ├── core/
 │   ├── lua-host/
 │   ├── scenes/
-│   └── store-sql/
+│   ├── store-sql/
+│   └── store-postgres/
 └── README.md
 ```
 
@@ -72,7 +73,8 @@ smart-home/
 
 - `crates/core` defines the runtime contracts, device model, command model, capability catalog, registry, and event bus.
 - `crates/api` starts the runtime and exposes HTTP and WebSocket interfaces.
-- `crates/store-sql` persists the current state for restart recovery.
+- `crates/store-sql` is the default SQLite persistence backend. Stores current device and room state, full device/attribute history, command audit log, and scene/automation execution history.
+- `crates/store-postgres` is an alternative PostgreSQL backend implementing the same traits. Enable it with `persistence.backend = "postgres"` and a `database_url` in `config/default.toml`.
 
 ### Adapters
 
@@ -107,12 +109,29 @@ This means adapter polls should preserve room assignment rather than overwrite i
 
 ### Persistence
 
-Persistence is current-state only.
+Two backends are supported, both implementing the same `DeviceStore` and `ApiKeyStore` traits:
 
-- latest known rooms are persisted
-- latest known devices are persisted
-- startup hydrates the registry from SQLite before adapters begin polling
-- event history is not stored yet
+**SQLite (default)**
+
+- configured via `persistence.backend = "sqlite"` and `database_url = "sqlite://data/smart-home.db"`
+- schema is created and migrated automatically inside `crates/store-sql`; no external tool needed
+- startup hydrates the registry from stored device and room rows before adapters begin polling
+
+**PostgreSQL**
+
+- configured via `persistence.backend = "postgres"` and `database_url = "postgres://user:pass@host/db"`
+- implemented in `crates/store-postgres`; no TimescaleDB or other extensions required
+- a `docker-compose.yml` ships at the workspace root with a `postgres:16-alpine` service for local use
+
+Both backends store:
+
+- latest known devices and rooms
+- full device and attribute history
+- command audit log
+- scene and automation execution history
+
+Rate limiting on write endpoints is configurable via `[api.rate_limit]` in `config/default.toml`.
+The server handles SIGTERM and ctrl-c and drains in-flight requests with a 30-second timeout before exit.
 
 ## Current Adapters
 

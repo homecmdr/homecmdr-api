@@ -126,6 +126,10 @@ pub trait DeviceStore: Send + Sync + 'static {
         &self,
         state: &AutomationRuntimeState,
     ) -> anyhow::Result<()>;
+    /// Prune stale history rows according to the store's configured retention
+    /// window.  Intended to be called from a background timer task; impls that
+    /// already prune inline may choose to make this a no-op.
+    async fn prune_history(&self) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

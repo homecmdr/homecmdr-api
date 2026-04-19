@@ -510,11 +510,11 @@ impl SqliteDeviceStore {
             })?;
         }
 
-        self.prune_history().await?;
+        self.prune_history_impl().await?;
         Ok(())
     }
 
-    async fn prune_history(&self) -> Result<()> {
+    async fn prune_history_impl(&self) -> Result<()> {
         let Some(retention) = self.history.retention else {
             return Ok(());
         };
@@ -1123,6 +1123,10 @@ impl DeviceStore for SqliteDeviceStore {
         })?;
 
         Ok(())
+    }
+
+    async fn prune_history(&self) -> Result<()> {
+        self.prune_history_impl().await
     }
 }
 

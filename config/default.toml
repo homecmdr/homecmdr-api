@@ -16,6 +16,12 @@ bind_address = "127.0.0.1:3001"
 enabled = true
 allowed_origins = ["http://127.0.0.1:8080"]
 
+[api.rate_limit]
+# Set enabled = true to enforce a token-bucket rate limit on write endpoints.
+enabled = false
+requests_per_second = 100
+burst_size = 20
+
 [auth]
 # Master key grants the Admin role.  Override at runtime via the
 # SMART_HOME_MASTER_KEY environment variable — never commit a real key.
@@ -50,6 +56,13 @@ watch = false
 enabled = true
 directory = "config/automations"
 watch = false
+
+[automations.runner]
+# Maximum concurrent executions per automation when mode = "parallel" is used
+# without an explicit max in the Lua script.
+default_max_concurrent = 8
+# Hard ceiling (seconds) on a single automation execution before it is cancelled.
+backstop_timeout_secs = 3600
 
 [scripts]
 enabled = true

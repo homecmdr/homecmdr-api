@@ -193,9 +193,11 @@ dependencies = [
  "smart-home-automations",
  "smart-home-core",
  "smart-home-scenes",
+ "store-postgres",
  "store-sql",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2794,6 +2796,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "store-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "smart-home-core",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "store-sql"
 version = "0.1.0"
 dependencies = [
@@ -3100,6 +3115,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

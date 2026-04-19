@@ -116,7 +116,7 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Phase 5 — Hardening
 
-- [ ] Rate limiting on command and scene execution endpoints
-- [ ] Graceful shutdown: drain in-flight requests with a timeout
-- [ ] Make automation concurrency limit and execution timeout configurable
-- [ ] PostgreSQL backend (implement or formally defer with docs)
+- [x] Rate limiting on command and scene execution endpoints
+- [x] Graceful shutdown: drain in-flight requests with a timeout
+- [x] Make automation concurrency limit and execution timeout configurable
+- [x] PostgreSQL backend (implement or formally defer with docs)

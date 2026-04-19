@@ -34,6 +34,7 @@ use smart_home_core::capability::{
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use smart_home_core::event::Event;
+use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
 use smart_home_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use smart_home_core::runtime::Runtime;
 use smart_home_core::store::{
@@ -51,6 +52,51 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::Level;
+
+/// Maximum time (in seconds) to wait for in-flight requests to drain after a
+/// shutdown signal before forcibly exiting.
+const SHUTDOWN_DRAIN_SECS: u64 = 30;
+
+/// A token-bucket rate limiter that can be shared across cloned axum services.
+///
+/// Implements a leaky-bucket / token-bucket algorithm.  `try_acquire` returns
+/// `true` when a token is available (request should proceed) and `false` when
+/// the bucket is empty (request should be rejected with 429).
+#[derive(Clone)]
+struct SharedRateLimit(Arc<std::sync::Mutex<TokenBucket>>);
+
+struct TokenBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_refill: std::time::Instant,
+}
+
+impl SharedRateLimit {
+    fn new(requests_per_second: u64, burst_size: u64) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(TokenBucket {
+            tokens: burst_size as f64,
+            max_tokens: burst_size as f64,
+            refill_rate: requests_per_second as f64,
+            last_refill: std::time::Instant::now(),
+        })))
+    }
+
+    fn try_acquire(&self) -> bool {
+        let mut bucket = self.0.lock().expect("rate limiter mutex not poisoned");
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens =
+            (bucket.tokens + elapsed * bucket.refill_rate).min(bucket.max_tokens);
+        bucket.last_refill = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct AdapterSummary {
@@ -195,6 +241,7 @@ struct AppState {
     scripts_watch: bool,
     scripts_enabled: bool,
     scripts_directory: String,
+    backstop_timeout: Duration,
 }
 
 const _: fn() = || {
@@ -255,6 +302,7 @@ struct ReloadController {
     store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
     runtime: Arc<Runtime>,
+    backstop_timeout: Duration,
 }
 
 struct ReloadOutcome {
@@ -693,13 +741,9 @@ async fn main() -> Result<()> {
 
     init_tracing(&config.logging.level)?;
 
-    let concrete_store = create_device_store(&config)
+    let (device_store, auth_key_store) = create_device_store(&config)
         .await
         .context("failed to create persistence store")?;
-    let device_store: Option<Arc<dyn DeviceStore>> =
-        concrete_store.clone().map(|s| s as Arc<dyn DeviceStore>);
-    let auth_key_store: Option<Arc<dyn ApiKeyStore>> =
-        concrete_store.map(|s| s as Arc<dyn ApiKeyStore>);
 
     // Allow SMART_HOME_MASTER_KEY env var to override config value at runtime.
     let master_key = std::env::var("SMART_HOME_MASTER_KEY")
@@ -776,11 +820,14 @@ async fn main() -> Result<()> {
             }
         });
     let trigger_context = trigger_context_from_config(&config);
+    let backstop_timeout =
+        Duration::from_secs(config.automations.runner.backstop_timeout_secs);
     let automation_runner = build_automation_runner(
         (*automations).clone(),
         automation_observer.clone(),
         device_store.clone(),
         trigger_context,
+        backstop_timeout,
     );
     let automation_control = Arc::new(automation_runner.controller());
     let (automation_runner_tx, automation_runner_rx) = watch::channel(automation_runner.clone());
@@ -806,6 +853,7 @@ async fn main() -> Result<()> {
         scripts_watch: config.scripts.watch,
         scripts_enabled: config.scripts.enabled,
         scripts_directory: config.scripts.directory.clone(),
+        backstop_timeout,
     };
     let app = app(app_state.clone(), &config);
     let reload_controller = ReloadController {
@@ -823,6 +871,7 @@ async fn main() -> Result<()> {
         store: app_state.store.clone(),
         trigger_context,
         runtime: runtime.clone(),
+        backstop_timeout,
     };
     let listener = tokio::net::TcpListener::bind(&config.api.bind_address)
         .await
@@ -835,6 +884,18 @@ async fn main() -> Result<()> {
         let health = health.clone();
         tokio::spawn(async move {
             run_persistence_worker(runtime, store, health, persistence_shutdown_rx).await;
+        })
+    });
+
+    // Periodically prune old history entries according to the configured retention policy.
+    let prune_task = device_store.clone().map(|store| {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                if let Err(e) = store.prune_history().await {
+                    tracing::warn!("history pruning failed: {e:#}");
+                }
+            }
         })
     });
 
@@ -890,12 +951,33 @@ async fn main() -> Result<()> {
 
     health.mark_startup_complete();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .context("API server failed")?;
+    // Spawn the HTTP server so we can race it against a drain timeout after the
+    // shutdown signal fires.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = drain_rx.await;
+            })
+            .await
+    });
+
+    shutdown_signal().await;
+    tracing::info!(
+        "shutdown signal received, draining in-flight requests ({}s timeout)...",
+        SHUTDOWN_DRAIN_SECS
+    );
+    let _ = drain_tx.send(());
+
+    match tokio::time::timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECS), server_task).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => return Err(anyhow::Error::from(e)).context("API server failed"),
+        Ok(Err(join_err)) => tracing::error!("server task panicked: {join_err}"),
+        Err(_elapsed) => tracing::warn!(
+            "graceful drain timed out after {}s, forcing exit",
+            SHUTDOWN_DRAIN_SECS
+        ),
+    }
 
     runtime_task.abort();
     let _ = runtime_task.await;
@@ -904,6 +986,11 @@ async fn main() -> Result<()> {
     let _ = automation_task.await;
 
     if let Some(task) = watcher_task {
+        task.abort();
+        let _ = task.await;
+    }
+
+    if let Some(task) = prune_task {
         task.abort();
         let _ = task.await;
     }
@@ -990,9 +1077,11 @@ fn resolve_database_url(url: &str, auto_create: bool) -> Result<String> {
     Ok(resolved)
 }
 
-async fn create_device_store(config: &Config) -> Result<Option<Arc<SqliteDeviceStore>>> {
+async fn create_device_store(
+    config: &Config,
+) -> Result<(Option<Arc<dyn DeviceStore>>, Option<Arc<dyn ApiKeyStore>>)> {
     if !config.persistence.enabled {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let database_url = config
@@ -1004,30 +1093,66 @@ async fn create_device_store(config: &Config) -> Result<Option<Arc<SqliteDeviceS
     let database_url = resolve_database_url(database_url, config.persistence.auto_create)
         .context("failed to resolve database URL")?;
 
-    let store: Arc<SqliteDeviceStore> = match config.persistence.backend {
-        PersistenceBackend::Sqlite => Arc::new(
-            SqliteDeviceStore::new_with_history(
-                &database_url,
-                config.persistence.auto_create,
-                SqliteHistoryConfig {
-                    enabled: config.persistence.history.enabled,
-                    retention: config
-                        .persistence
-                        .history
-                        .retention_days
-                        .map(|days| Duration::from_secs(days.saturating_mul(24 * 60 * 60))),
-                    selection: history_selection_from_config(config),
-                },
-            )
-            .await
-            .with_context(|| format!("failed to initialize SQLite store '{database_url}'"))?,
-        ),
-        PersistenceBackend::Postgres => {
-            anyhow::bail!("persistence backend 'postgres' is not implemented yet")
+    match config.persistence.backend {
+        PersistenceBackend::Sqlite => {
+            let store: Arc<SqliteDeviceStore> = Arc::new(
+                SqliteDeviceStore::new_with_history(
+                    &database_url,
+                    config.persistence.auto_create,
+                    SqliteHistoryConfig {
+                        enabled: config.persistence.history.enabled,
+                        retention: config
+                            .persistence
+                            .history
+                            .retention_days
+                            .map(|days| Duration::from_secs(days.saturating_mul(24 * 60 * 60))),
+                        selection: history_selection_from_config(config),
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to initialize SQLite store '{database_url}'")
+                })?,
+            );
+            Ok((
+                Some(store.clone() as Arc<dyn DeviceStore>),
+                Some(store as Arc<dyn ApiKeyStore>),
+            ))
         }
-    };
-
-    Ok(Some(store))
+        PersistenceBackend::Postgres => {
+            let selection = if config.telemetry.enabled {
+                PgHistorySelection {
+                    device_ids: config.telemetry.selection.device_ids.clone(),
+                    capabilities: config.telemetry.selection.capabilities.clone(),
+                    adapter_names: config.telemetry.selection.adapter_names.clone(),
+                }
+            } else {
+                PgHistorySelection::default()
+            };
+            let history_config = PostgresHistoryConfig {
+                enabled: config.persistence.history.enabled,
+                retention: config.persistence.history.retention_days.map(|days| {
+                    Duration::from_secs(days.saturating_mul(24 * 60 * 60))
+                }),
+                selection,
+            };
+            let store: Arc<PostgresDeviceStore> = Arc::new(
+                PostgresDeviceStore::new_with_history(
+                    &database_url,
+                    config.persistence.auto_create,
+                    history_config,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to initialize PostgreSQL store '{database_url}'")
+                })?,
+            );
+            Ok((
+                Some(store.clone() as Arc<dyn DeviceStore>),
+                Some(store as Arc<dyn ApiKeyStore>),
+            ))
+        }
+    }
 }
 
 fn history_selection_from_config(config: &Config) -> HistorySelection {
@@ -1059,13 +1184,17 @@ fn build_automation_runner(
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
     store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
+    backstop_timeout: Duration,
 ) -> AutomationRunner {
     let runner = if let Some(observer) = observer {
         AutomationRunner::new(catalog)
             .with_observer(observer)
             .with_trigger_context(trigger_context)
+            .with_backstop_timeout(backstop_timeout)
     } else {
-        AutomationRunner::new(catalog).with_trigger_context(trigger_context)
+        AutomationRunner::new(catalog)
+            .with_trigger_context(trigger_context)
+            .with_backstop_timeout(backstop_timeout)
     };
 
     if let Some(store) = store {
@@ -1104,6 +1233,7 @@ fn make_state(
         observer.clone(),
         store.clone(),
         trigger_context,
+        Duration::from_secs(3600),
     );
     let control = Arc::new(runner.controller());
     let (automation_runner_tx, _automation_runner_rx) = watch::channel(runner);
@@ -1133,6 +1263,7 @@ fn make_state(
             .as_ref()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default(),
+        backstop_timeout: Duration::from_secs(3600),
     }
 }
 
@@ -1166,6 +1297,7 @@ fn reload_controller_from_state(state: &AppState) -> ReloadController {
         store: state.store.clone(),
         trigger_context: state.trigger_context,
         runtime: state.runtime.clone(),
+        backstop_timeout: state.backstop_timeout,
     }
 }
 
@@ -1314,6 +1446,7 @@ fn reload_automations_internal(
                 controller.automation_observer.clone(),
                 controller.store.clone(),
                 controller.trigger_context,
+                controller.backstop_timeout,
             );
             let next_controller = Arc::new(runner.controller());
 
@@ -2033,6 +2166,13 @@ fn app(state: AppState, config: &Config) -> Router {
         });
 
     // Write — bearer token with at least `write` role.
+    let rate_limiter: Option<SharedRateLimit> =
+        config.api.rate_limit.enabled.then(|| {
+            SharedRateLimit::new(
+                config.api.rate_limit.requests_per_second,
+                config.api.rate_limit.burst_size,
+            )
+        });
     let write_routes = Router::new()
         .route("/rooms", post(create_room))
         .route("/rooms/{id}", delete(delete_room))
@@ -2050,6 +2190,21 @@ fn app(state: AppState, config: &Config) -> Router {
             post(execute_automation_manually),
         )
         .route("/automations/{id}/validate", post(validate_automation))
+        .route_layer(middleware::from_fn(move |req: Request, next: Next| {
+            let rate_limiter = rate_limiter.clone();
+            async move {
+                if let Some(limiter) = &rate_limiter {
+                    if !limiter.try_acquire() {
+                        return (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            "rate limit exceeded",
+                        )
+                            .into_response();
+                    }
+                }
+                next.run(req).await
+            }
+        }))
         .route_layer({
             let s = state.clone();
             middleware::from_fn(move |req: Request, next: Next| {
@@ -2125,6 +2280,31 @@ fn cors_layer(config: &Config) -> CorsLayer {
         .allow_origin(AllowOrigin::list(allowed_origins))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+/// Resolves when `Ctrl+C` is pressed or a `SIGTERM` signal is received.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -4022,6 +4202,10 @@ mod tests {
                 .insert(state.automation_id.clone(), state.clone());
             Ok(())
         }
+
+        async fn prune_history(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -4172,6 +4356,7 @@ mod tests {
             api: smart_home_core::config::ApiConfig {
                 bind_address: "127.0.0.1:3001".to_string(),
                 cors: smart_home_core::config::ApiCorsConfig::default(),
+                rate_limit: smart_home_core::config::RateLimitConfig::default(),
             },
             locale: smart_home_core::config::LocaleConfig::default(),
             logging: smart_home_core::config::LoggingConfig {
@@ -5226,6 +5411,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -5377,6 +5563,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -5657,6 +5844,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -6173,6 +6361,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -7052,48 +7241,6 @@ mod tests {
         assert_eq!(
             store.load_all_devices().await.expect("load succeeds"),
             vec![current]
-        );
-    }
-
-    #[test]
-    fn create_device_store_rejects_unimplemented_postgres_backend() {
-        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime creates");
-        let config = Config {
-            runtime: RuntimeConfig {
-                event_bus_capacity: 16,
-            },
-            api: smart_home_core::config::ApiConfig {
-                bind_address: "127.0.0.1:3001".to_string(),
-                cors: smart_home_core::config::ApiCorsConfig::default(),
-            },
-            locale: smart_home_core::config::LocaleConfig::default(),
-            logging: smart_home_core::config::LoggingConfig {
-                level: "info".to_string(),
-            },
-            persistence: smart_home_core::config::PersistenceConfig {
-                enabled: true,
-                backend: PersistenceBackend::Postgres,
-                database_url: Some("postgres://localhost/smart-home".to_string()),
-                auto_create: true,
-                history: HistoryConfig::default(),
-            },
-            scenes: smart_home_core::config::ScenesConfig::default(),
-            automations: smart_home_core::config::AutomationsConfig::default(),
-            scripts: smart_home_core::config::ScriptsConfig::default(),
-            telemetry: smart_home_core::config::TelemetryConfig::default(),
-            auth: smart_home_core::config::AuthConfig::default(),
-            adapters: HashMap::new(),
-            dashboard: smart_home_core::config::DashboardConfig::default(),
-        };
-
-        let error = runtime
-            .block_on(create_device_store(&config))
-            .err()
-            .expect("postgres backend should not be implemented yet");
-
-        assert_eq!(
-            error.to_string(),
-            "persistence backend 'postgres' is not implemented yet"
         );
     }
 

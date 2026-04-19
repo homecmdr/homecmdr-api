@@ -31,6 +31,7 @@ If documentation and code disagree, prefer the code unless the task is explicitl
 When an agent starts work, it should usually inspect:
 
 - `README.md`
+- `config/default.toml`
 - `config/docs/api_reference.md`
 - `config/docs/lua_runtime_guide.md`
 - `config/docs/adapter_authoring_guide.md`
@@ -97,6 +98,8 @@ Example:
 { "capability": "power", "action": "toggle" }
 ```
 
+Write endpoints (`/command`, `/execute`) are subject to optional rate limiting. When the rate limit is enabled in `config/default.toml`, excess requests return `HTTP 429`. See `config/docs/api_reference.md` for details.
+
 ### Control a room
 
 Use `POST /rooms/{id}/command`.
@@ -110,6 +113,8 @@ Use:
 - `config/scenes/` for manual user-invoked flows
 - `config/automations/` for trigger-driven flows
 - `config/docs/lua_runtime_guide.md` for the current contract
+
+Automation runner concurrency and the backstop execution timeout are tunable via `[automations.runner]` in `config/default.toml` — no code changes needed.
 
 Current automation trigger types:
 
