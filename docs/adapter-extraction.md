@@ -31,9 +31,9 @@ pull official adapters into their local workspace.
 
 ## Phase 1 — Create `homecmdr/adapters` monorepo
 
-- [ ] `gh repo create homecmdr/adapters --public`
-- [ ] `git init /home/andy/projects/homecmdr/adapters`
-- [ ] Create directory structure:
+- [x] `gh repo create homecmdr/adapters --public`
+- [x] `git init /home/andy/projects/homecmdr/adapters`
+- [x] Create directory structure:
   ```
   adapters/
   ├── adapters.toml
@@ -55,12 +55,12 @@ pull official adapters into their local workspace.
       ├── src/lib.rs
       └── README.md
   ```
-- [ ] Copy each adapter's `Cargo.toml`, `src/lib.rs`, `README.md` from `homecmdr-api`
-- [ ] Add standard "how to install" header to each adapter `README.md`
-- [ ] Write `adapters.toml` registry manifest (all 4 adapters)
-- [ ] Write top-level `README.md`
-- [ ] Add `.gitignore`
-- [ ] Initial commit → push → tag `v0.1.0` → GitHub Release
+- [x] Copy each adapter's `Cargo.toml`, `src/lib.rs`, `README.md` from `homecmdr-api`
+- [x] Add standard "how to install" header to each adapter `README.md`
+- [x] Write `adapters.toml` registry manifest (all 4 adapters)
+- [x] Write top-level `README.md`
+- [x] Add `.gitignore`
+- [x] Initial commit → push → tag `v0.1.0` → GitHub Release
 
 ### `adapters.toml` format
 
@@ -98,17 +98,17 @@ version = "0.1.0"
 
 ## Phase 2 — Create `homecmdr/homecmdr-cli`
 
-- [ ] `gh repo create homecmdr/homecmdr-cli --public`
-- [ ] `cargo new --bin homecmdr-cli` at `/home/andy/projects/homecmdr/homecmdr-cli`
-- [ ] Add dependencies to `Cargo.toml`:
+- [x] `gh repo create homecmdr/homecmdr-cli --public`
+- [x] `cargo new --bin homecmdr-cli` at `/home/andy/projects/homecmdr/homecmdr-cli`
+- [x] Add dependencies to `Cargo.toml`:
   - `clap = { version = "4", features = ["derive"] }`
   - `reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }`
   - `serde = { version = "1", features = ["derive"] }`
   - `toml = "0.8"`
   - `zip = "2"`
   - `anyhow = "1"`
-- [ ] Implement `src/main.rs` — clap entrypoint, `pull` subcommand
-- [ ] Implement `src/commands/pull.rs`:
+- [x] Implement `src/main.rs` — clap entrypoint, `pull` subcommand
+- [x] Implement `src/commands/pull.rs`:
   1. Walk up from `$CWD` to find workspace root (`Cargo.toml` containing `[workspace]`)
   2. Fetch `https://raw.githubusercontent.com/homecmdr/adapters/main/adapters.toml`
   3. Match adapter name — clear error if not found, list available adapters
@@ -117,9 +117,9 @@ version = "0.1.0"
   6. Patch workspace `Cargo.toml` — append to `members` if not already present
   7. Patch `crates/adapters/Cargo.toml` — append `<name> = { path = "../<name>" }`
   8. Print: `adapter-<name> added. Run 'cargo build' to rebuild.`
-- [ ] Write `README.md`
-- [ ] `cargo build` — verify it compiles
-- [ ] Initial commit → push → tag `v0.1.0` → GitHub Release
+- [x] Write `README.md`
+- [x] `cargo build` — verify it compiles
+- [x] Initial commit → push → tag `v0.1.0` → GitHub Release
 
 ---
 
@@ -128,56 +128,59 @@ version = "0.1.0"
 Branch: `feat/extract-adapters`
 
 ### Files to delete
-- [ ] `git rm -r crates/adapter-elgato-lights`
-- [ ] `git rm -r crates/adapter-ollama`
-- [ ] `git rm -r crates/adapter-roku-tv`
-- [ ] `git rm -r crates/adapter-zigbee2mqtt`
+- [x] `git rm -r crates/adapter-elgato-lights`
+- [x] `git rm -r crates/adapter-ollama`
+- [x] `git rm -r crates/adapter-roku-tv`
+- [x] `git rm -r crates/adapter-zigbee2mqtt`
 
 ### `Cargo.toml` (workspace root)
-- [ ] Remove from `members`:
+- [x] Remove from `members`:
   - `"crates/adapter-zigbee2mqtt"`
   - `"crates/adapter-ollama"`
   - `"crates/adapter-elgato-lights"`
   - `"crates/adapter-roku-tv"`
 
 ### `crates/adapters/Cargo.toml`
-- [ ] Remove deps: `adapter-zigbee2mqtt`, `adapter-elgato-lights`, `adapter-ollama`, `adapter-roku-tv`
-- [ ] Keep: `adapter-open-meteo = { path = "../adapter-open-meteo" }`
+- [x] Remove deps: `adapter-zigbee2mqtt`, `adapter-elgato-lights`, `adapter-ollama`, `adapter-roku-tv`
+- [x] Keep: `adapter-open-meteo = { path = "../adapter-open-meteo" }`
+
+### `crates/adapters/src/lib.rs`
+- [x] Remove 4 `use ... as _` imports; keep only `adapter-open-meteo`
 
 ### `config/default.toml`
-- [ ] Remove `[adapters.elgato_lights]`, `[adapters.roku_tv]`, `[adapters.ollama]`, `[adapters.zigbee2mqtt]` blocks
-- [ ] Keep `[adapters.open_meteo]`
-- [ ] Add comment above `[adapters.open_meteo]` pointing to the adapters repo and CLI
+- [x] Remove `[adapters.elgato_lights]`, `[adapters.roku_tv]`, `[adapters.ollama]`, `[adapters.zigbee2mqtt]` blocks
+- [x] Keep `[adapters.open_meteo]`
+- [x] Add comment above `[adapters.open_meteo]` pointing to the adapters repo and CLI
 
 ### `README.md`
-- [ ] "Adapter-specific docs" — remove 4 adapter links, keep `adapter-open-meteo`; add link to `https://github.com/homecmdr/adapters`
-- [ ] "Current Adapters" section — remove 4 adapters; add note pointing to the adapters repo and CLI
+- [x] "Adapter-specific docs" — remove 4 adapter links, keep `adapter-open-meteo`; add link to `https://github.com/homecmdr/adapters`
+- [x] "Current Adapters" section — remove 4 adapters; add note pointing to the adapters repo and CLI
 
 ### `AGENTS.md`
-- [ ] Remove `adapter-elgato-lights`, `adapter-ollama`, `adapter-roku-tv`, `adapter-zigbee2mqtt` from focused test commands
-- [ ] Update workspace map note for `crates/adapter-*`
-- [ ] Adapter Rules — add note that adapters are installed via `homecmdr pull`
+- [x] Remove `adapter-elgato-lights`, `adapter-ollama`, `adapter-roku-tv`, `adapter-zigbee2mqtt` from focused test commands
+- [x] Update workspace map note for `crates/adapter-*`
+- [x] Adapter Rules — add note that adapters are installed via `homecmdr pull`
 
 ### `config/docs/adapter_authoring_guide.md`
-- [ ] Add note at top pointing to `https://github.com/homecmdr/adapters` for publishing official adapters
+- [x] Add note at top pointing to `https://github.com/homecmdr/adapters` for publishing official adapters
 
 ### Version bump — all crates `0.1.0` → `0.2.0`
-- [ ] `crates/core/Cargo.toml`
-- [ ] `crates/api/Cargo.toml`
-- [ ] `crates/adapters/Cargo.toml`
-- [ ] `crates/automations/Cargo.toml`
-- [ ] `crates/scenes/Cargo.toml`
-- [ ] `crates/lua-host/Cargo.toml`
-- [ ] `crates/store-sql/Cargo.toml`
-- [ ] `crates/store-postgres/Cargo.toml`
-- [ ] `crates/mcp-server/Cargo.toml`
-- [ ] `crates/adapter-open-meteo/Cargo.toml`
+- [x] `crates/core/Cargo.toml`
+- [x] `crates/api/Cargo.toml`
+- [x] `crates/adapters/Cargo.toml`
+- [x] `crates/automations/Cargo.toml`
+- [x] `crates/scenes/Cargo.toml`
+- [x] `crates/lua-host/Cargo.toml`
+- [x] `crates/store-sql/Cargo.toml`
+- [x] `crates/store-postgres/Cargo.toml`
+- [x] `crates/mcp-server/Cargo.toml`
+- [x] `crates/adapter-open-meteo/Cargo.toml`
 
 ### Verify and ship
-- [ ] `cargo check --workspace` — must pass cleanly
-- [ ] Commit all changes on `feat/extract-adapters`
-- [ ] Push → PR to `main` → merge → delete branch
-- [ ] Tag `v0.2.0` → GitHub Release
+- [x] `cargo check --workspace` — must pass cleanly
+- [x] Commit all changes on `feat/extract-adapters`
+- [x] Push → PR to `main` → merge → delete branch
+- [x] Tag `v0.2.0` → GitHub Release
 
 ---
 
@@ -185,8 +188,8 @@ Branch: `feat/extract-adapters`
 
 ```
 github.com/homecmdr/
-├── homecmdr-api     v0.2.0  (open-meteo bundled; 4 adapters extracted)
-├── homecmdr-dash    v0.1.0  (unchanged)
-├── homecmdr-cli     v0.1.0  (homecmdr pull <adapter>)
-└── adapters         v0.1.0  (monorepo: 4 official adapters + registry manifest)
+├── homecmdr-api     v0.2.0  (open-meteo bundled; 4 adapters extracted) ✅
+├── homecmdr-dash    v0.1.0  (unchanged) ✅
+├── homecmdr-cli     v0.1.0  (homecmdr pull <adapter>) ✅
+└── adapters         v0.1.0  (monorepo: 4 official adapters + registry manifest) ✅
 ```
