@@ -6,10 +6,21 @@ meta {
 
 post {
   url: {{baseUrl}}/scenes/:id/execute
+  body: none
+  auth: bearer
 }
 
 params:path {
   id: {{sceneId}}
+}
+
+auth:bearer {
+  token: change-me-before-use
+}
+
+vars:pre-request {
+  baseUrl: 127.0.01:3001
+  sceneId: bedtime
 }
 
 settings {

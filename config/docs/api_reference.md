@@ -20,6 +20,27 @@ allowed_origins = ["http://127.0.0.1:8080"]
 
 Only bare `http` and `https` origins are accepted. Paths, queries, fragments, and wildcard origins are not supported.
 
+## Rate Limiting
+
+Write endpoints (`POST /devices/{id}/command`, `POST /rooms/{id}/command`, `POST /groups/{id}/command`, `POST /scenes/{id}/execute`) are subject to an optional token-bucket rate limiter.
+
+When enabled, requests that exceed the configured rate return:
+
+```
+HTTP 429 Too Many Requests
+```
+
+Rate limiting is controlled via `[api.rate_limit]` in `config/default.toml`:
+
+```toml
+[api.rate_limit]
+enabled = false
+requests_per_second = 100
+burst_size = 20
+```
+
+It is disabled by default. MCP tools and agents that issue many rapid commands should either keep rate limiting disabled or set `requests_per_second` and `burst_size` high enough to avoid 429 responses.
+
 ## Conventions
 
 - request and response bodies are JSON unless stated otherwise

@@ -289,15 +289,21 @@
           <input x-model="draftApiBase" type="text" placeholder="http://127.0.0.1:3001">
         </label>
 
+        <label>
+          API token (bearer key)
+          <input x-model="draftToken" type="password" placeholder="change-me-before-use">
+        </label>
+
         <div class="actions">
           <button type="button" @click="applyApiBase()">Reconnect</button>
           <button type="button" class="secondary" @click="loadWeather()">Refresh now</button>
         </div>
 
         <p class="hint">
-          Tip: when serving this file from a different origin, enable <code>api.cors</code> in
-          <code>config/default.toml</code> for the dashboard origin. For local testing, point it at
-          your API listener such as <code>http://127.0.0.1:3001</code>.
+          Tip: pass the API base and token in the URL to avoid re-entering them:
+          <code>?api=http://127.0.0.1:3001&amp;token=your-key</code>.
+          When serving from a different origin, enable <code>api.cors</code> in
+          <code>config/default.toml</code> for the dashboard origin.
         </p>
       </section>
     </main>
@@ -313,6 +319,8 @@
         return {
           apiBase: inferApiBase(),
           draftApiBase: inferApiBase(),
+          token: inferToken(),
+          draftToken: inferToken(),
           socket: null,
           reconnectTimer: null,
           reconnectAttempt: 0,
@@ -327,6 +335,7 @@
 
           async applyApiBase() {
             this.apiBase = sanitizeBaseUrl(this.draftApiBase);
+            this.token = this.draftToken.trim();
             this.errorMessage = "";
             this.weather = emptyWeatherState();
             this.closeSocket();
@@ -336,9 +345,11 @@
 
           async loadWeather() {
             try {
-              const response = await fetch(this.devicesUrl(), {
-                headers: { Accept: "application/json" },
-              });
+              const headers = { Accept: "application/json" };
+              if (this.token) {
+                headers["Authorization"] = `Bearer ${this.token}`;
+              }
+              const response = await fetch(this.devicesUrl(), { headers });
 
               if (!response.ok) {
                 throw new Error(`device request failed with ${response.status}`);
@@ -356,7 +367,7 @@
           },
 
           connectEvents() {
-            const socketUrl = toWebSocketUrl(this.apiBase, "/events");
+            const socketUrl = toWebSocketUrl(this.apiBase, "/events", this.token);
             this.connectionState = this.reconnectAttempt > 0 ? "reconnecting" : "connecting";
             this.socket = new WebSocket(socketUrl);
 
@@ -526,13 +537,20 @@
         return `${window.location.protocol}//${window.location.host}`;
       }
 
+      function inferToken() {
+        return new URLSearchParams(window.location.search).get("token") || "";
+      }
+
       function sanitizeBaseUrl(url) {
         return (url || "").trim().replace(/\/$/, "");
       }
 
-      function toWebSocketUrl(baseUrl, path) {
+      function toWebSocketUrl(baseUrl, path, token) {
         const url = new URL(sanitizeBaseUrl(baseUrl) + path);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        if (token) {
+          url.searchParams.set("token", token);
+        }
         return url.toString();
       }
 

@@ -658,12 +658,12 @@ Both scenes and automations support an optional `mode` field that controls what 
 
 | Mode | Behaviour |
 |---|---|
-| `parallel` (default) | Up to `max` (default 8) concurrent executions; additional triggers are dropped. |
+| `parallel` (default) | Up to `max` (default `automations.runner.default_max_concurrent`) concurrent executions; additional triggers are dropped. |
 | `single` | At most one execution at a time; concurrent triggers are dropped. |
 | `queued` | One execution at a time; up to `max` (default unbounded) pending triggers are queued and run in order. |
 | `restart` | Cancels the running execution and starts a fresh one immediately. |
 
-`parallel` with `max = 8` is the default for all scenes and automations that do not declare `mode`.
+`parallel` mode is the default for all scenes and automations that do not declare `mode`. The effective `max` defaults to the value of `automations.runner.default_max_concurrent` in `config/default.toml` (shipped as `8`); override it there without changing Rust code.
 
 ### Lua syntax
 
@@ -821,13 +821,20 @@ directory = "config/scenes"
 [automations]
 enabled = true
 directory = "config/automations"
+
+[automations.runner]
+# Maximum number of concurrently executing automation runs across all automations
+# that use the default parallel mode (i.e. no explicit `max` in their `mode` block).
+default_max_concurrent = 8
+# Hard ceiling on how long any single automation execution may run (seconds).
+# Executions that exceed this are cancelled.
+backstop_timeout_secs = 3600
 ```
 
 ## Current Limitations
 
 Not implemented yet:
 
-- hot reload for scenes or automations
 - first-class OR / nested boolean condition groups
 - per-condition timezone overrides
 

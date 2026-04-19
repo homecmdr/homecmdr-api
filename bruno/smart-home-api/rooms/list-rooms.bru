@@ -6,6 +6,16 @@ meta {
 
 get {
   url: {{baseUrl}}/rooms
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: change-me-before-use
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
 }
 
 settings {

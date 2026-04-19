@@ -630,16 +630,17 @@ Do not blindly copy stale docs over the source of truth in the code.
 
 When there is disagreement, prefer the current implementation unless the task is explicitly to clean up or change the contract.
 
-## Future MCP Direction
+## MCP Tooling
 
-This repository may later expose tooling through MCP or other agent-facing interfaces.
+The MCP server (`crates/mcp-server`) exposes tools that assist with adapter authoring:
 
-If that happens, this guide should still remain useful because the adapter authoring contract is currently source-level and factory-based.
+- `scaffold_adapter` — generates a new adapter crate skeleton with the correct
+  `inventory::submit!` factory boilerplate and prints the three manual registration steps
+  (root `Cargo.toml`, `crates/adapters/Cargo.toml`, `crates/adapters/src/lib.rs`)
+- `run_cargo_check` — runs `cargo check` on the workspace or a focused package
+- `run_cargo_test` — runs `cargo test` on the workspace or a focused package
+- `list_capabilities` — lists the canonical capability schemas the runtime knows about
 
-The likely future evolution is:
-
-- this guide remains the adapter implementation contract
-- MCP tools help scaffold crates, run targeted tests, inspect capabilities, and validate linkage
-- adapters still translate external vendor protocols into canonical state and command semantics
-
-Until that exists, use this guide plus the existing adapter crates as the authoritative implementation references.
+This guide remains the authoritative implementation contract. The MCP tools handle
+scaffolding and verification; adapters still translate external vendor protocols into
+canonical state and command semantics.

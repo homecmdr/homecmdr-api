@@ -536,7 +536,7 @@ fn load_scene_file(path: &Path, scripts_root: Option<&Path>) -> Result<Scene> {
             )
         })?;
 
-    let mode = parse_execution_mode(module.get("mode").unwrap_or(mlua::Value::Nil))
+    let mode = parse_execution_mode(module.get("mode").unwrap_or(mlua::Value::Nil), 8)
         .with_context(|| format!("scene file {} has invalid 'mode' field", path.display()))?;
 
     Ok(Scene {

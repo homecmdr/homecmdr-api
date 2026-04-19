@@ -12,5 +12,7 @@ members = [
     "crates/adapter-open-meteo",
     "crates/adapter-roku-tv",
     "crates/store-sql",
+    "crates/store-postgres",
+    "crates/mcp-server",
 ]
 resolver = "2"

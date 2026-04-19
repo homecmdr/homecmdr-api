@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: smart_home
+      POSTGRES_USER: smart_home
+      POSTGRES_PASSWORD: smart_home
+    volumes:
+      - smart-home-pg-data:/var/lib/postgresql/data
+
+  smart-home:
+    build: .
+    image: smart-home:latest
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      # Bind-mount your local config directory into the container.
+      # Place default.toml, scenes/, automations/, and scripts/ here.
+      - ./config:/config:ro
+      # Persistent data directory — holds the SQLite database (or other data).
+      - smart-home-data:/data
+    environment:
+      SMART_HOME_CONFIG: /config/default.toml
+      SMART_HOME_DATA_DIR: /data
+      # Override the master key here or inject from a .env file.
+      # SMART_HOME_MASTER_KEY: change-me-before-use
+      # Uncomment to switch to PostgreSQL (update database_url in default.toml):
+      # DATABASE_URL: postgres://smart_home:smart_home@postgres/smart_home
+    # Uncomment to forward host MQTT broker (zigbee2mqtt default port).
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+
+volumes:
+  smart-home-data:
+  smart-home-pg-data:

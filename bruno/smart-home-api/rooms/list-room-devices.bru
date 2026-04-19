@@ -6,10 +6,17 @@ meta {
 
 get {
   url: {{baseUrl}}/rooms/:id/devices
+  body: none
+  auth: none
 }
 
 params:path {
   id: {{roomId}}
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
+  roomId: bedroom
 }
 
 settings {

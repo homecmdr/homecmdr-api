@@ -27,6 +27,10 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub adapters: AdaptersConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
 }
 
 pub type AdapterConfig = serde_json::Value;
@@ -43,6 +47,23 @@ pub struct ApiConfig {
     pub bind_address: String,
     #[serde(default)]
     pub cors: ApiCorsConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Token-bucket rate limit applied to command and scene-execution endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Enable rate limiting on write endpoints.  Defaults to false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum number of requests allowed per second across all write
+    /// endpoints.  Defaults to 100.
+    #[serde(default = "default_rate_limit_requests_per_second")]
+    pub requests_per_second: u64,
+    /// Maximum burst size above the steady-state rate.  Defaults to 20.
+    #[serde(default = "default_rate_limit_burst_size")]
+    pub burst_size: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -94,6 +115,22 @@ pub struct AutomationsConfig {
     pub directory: String,
     #[serde(default)]
     pub watch: bool,
+    #[serde(default)]
+    pub runner: AutomationRunnerConfig,
+}
+
+/// Limits applied to the automation runner at startup.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutomationRunnerConfig {
+    /// Maximum number of concurrent executions per automation when `mode =
+    /// "parallel"` is specified without an explicit `max` in the Lua script.
+    /// Defaults to 8.
+    #[serde(default = "default_automation_default_max_concurrent")]
+    pub default_max_concurrent: usize,
+    /// Hard ceiling (in seconds) on how long any single automation execution
+    /// may run before it is forcibly cancelled.  Defaults to 3600 (1 hour).
+    #[serde(default = "default_automation_backstop_timeout_secs")]
+    pub backstop_timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +166,26 @@ impl Default for ApiConfig {
         Self {
             bind_address: default_api_bind_address(),
             cors: ApiCorsConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            requests_per_second: default_rate_limit_requests_per_second(),
+            burst_size: default_rate_limit_burst_size(),
+        }
+    }
+}
+
+impl Default for AutomationRunnerConfig {
+    fn default() -> Self {
+        Self {
+            default_max_concurrent: default_automation_default_max_concurrent(),
+            backstop_timeout_secs: default_automation_backstop_timeout_secs(),
         }
     }
 }
@@ -139,6 +196,7 @@ impl Default for AutomationsConfig {
             enabled: true,
             directory: "config/automations".to_string(),
             watch: false,
+            runner: AutomationRunnerConfig::default(),
         }
     }
 }
@@ -198,6 +256,36 @@ pub struct TelemetrySelectionConfig {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub adapter_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_master_key")]
+    pub master_key: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            master_key: default_master_key(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DashboardConfig {
+    pub enabled: bool,
+    #[serde(default = "default_dashboard_directory")]
+    pub directory: String,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: default_dashboard_directory(),
+        }
+    }
 }
 
 impl Config {
@@ -315,6 +403,14 @@ impl Config {
             );
         }
 
+        if self.auth.master_key.trim().is_empty() {
+            bail!("auth.master_key must not be empty");
+        }
+
+        if self.dashboard.enabled && self.dashboard.directory.trim().is_empty() {
+            bail!("dashboard.directory is required when dashboard is enabled");
+        }
+
         Ok(())
     }
 }
@@ -333,4 +429,28 @@ fn default_api_bind_address() -> String {
 
 fn default_history_max_query_limit() -> usize {
     1000
+}
+
+fn default_master_key() -> String {
+    "change-me-in-production".to_string()
+}
+
+fn default_dashboard_directory() -> String {
+    "config/dashboard".to_string()
+}
+
+fn default_rate_limit_requests_per_second() -> u64 {
+    100
+}
+
+fn default_rate_limit_burst_size() -> u64 {
+    20
+}
+
+fn default_automation_default_max_concurrent() -> usize {
+    8
+}
+
+fn default_automation_backstop_timeout_secs() -> u64 {
+    3600
 }

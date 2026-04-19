@@ -12,9 +12,10 @@ use serde_json::{Map, Value};
 use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
 use smart_home_core::bus::EventBus;
 use smart_home_core::capability::{
-    accumulation_value, measurement_value, BRIGHTNESS, COLOR_MODE, COLOR_TEMPERATURE, COLOR_XY,
-    CURRENT, ENERGY_MONTH, ENERGY_TODAY, ENERGY_TOTAL, ENERGY_YESTERDAY, POWER, POWER_CONSUMPTION,
-    STATE, VOLTAGE,
+    accumulation_value, measurement_value, BATTERY, BRIGHTNESS, COLOR_MODE, COLOR_TEMPERATURE,
+    COLOR_XY, CONTACT, COVER_POSITION, COVER_TILT, CURRENT, ENERGY_MONTH, ENERGY_TODAY,
+    ENERGY_TOTAL, ENERGY_YESTERDAY, HUMIDITY, LOCK, MOTION, OCCUPANCY, POWER, POWER_CONSUMPTION,
+    SMOKE, STATE, TEMPERATURE, VOLTAGE, WATER_LEAK,
 };
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::AdapterConfig;
@@ -328,6 +329,12 @@ impl Zigbee2MqttAdapter {
             .await
             .with_context(|| format!("failed to publish command to '{topic}'"))?;
 
+        // Cover commands (open/close/stop/set) return immediately — covers
+        // move on their own schedule and do not confirm via MQTT state.
+        if matches!(expected, CommandExpectation::Immediate) {
+            return Ok(true);
+        }
+
         // Transition commands are handled entirely in device firmware — the bulb
         // fades on its own schedule.  Return immediately so the caller (e.g. a Lua
         // scene using ctx:sleep) can own the timing without racing the confirmation.
@@ -516,6 +523,12 @@ impl DiscoveredDevice {
             Some(SupportedDeviceKind::Light)
         } else if capability_set.is_plug() {
             Some(SupportedDeviceKind::Plug)
+        } else if capability_set.is_lock() {
+            Some(SupportedDeviceKind::Lock)
+        } else if capability_set.is_cover() {
+            Some(SupportedDeviceKind::Cover)
+        } else if capability_set.is_sensor() {
+            Some(SupportedDeviceKind::Sensor)
         } else {
             None
         };
@@ -545,6 +558,9 @@ impl DiscoveredDevice {
 enum SupportedDeviceKind {
     Light,
     Plug,
+    Sensor,
+    Lock,
+    Cover,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -561,6 +577,17 @@ struct DeviceCapabilitySet {
     energy_month: bool,
     voltage: bool,
     current: bool,
+    motion: bool,
+    contact: bool,
+    occupancy: bool,
+    smoke: bool,
+    water_leak: bool,
+    temperature: bool,
+    humidity: bool,
+    battery: bool,
+    lock: bool,
+    cover_position: bool,
+    cover_tilt: bool,
 }
 
 impl DeviceCapabilitySet {
@@ -580,6 +607,17 @@ impl DeviceCapabilitySet {
                 Some("energy_month") => capability_set.energy_month = true,
                 Some("voltage") => capability_set.voltage = true,
                 Some("current") => capability_set.current = true,
+                Some("motion") => capability_set.motion = true,
+                Some("contact") => capability_set.contact = true,
+                Some("occupancy") => capability_set.occupancy = true,
+                Some("smoke") => capability_set.smoke = true,
+                Some("water_leak") => capability_set.water_leak = true,
+                Some("temperature") => capability_set.temperature = true,
+                Some("humidity") => capability_set.humidity = true,
+                Some("battery") => capability_set.battery = true,
+                Some("lock_state") => capability_set.lock = true,
+                Some("position") => capability_set.cover_position = true,
+                Some("tilt") => capability_set.cover_tilt = true,
                 _ => {}
             }
         }
@@ -592,6 +630,24 @@ impl DeviceCapabilitySet {
 
     fn is_plug(&self) -> bool {
         self.state && (self.power_measurement || self.energy_total || self.voltage || self.current)
+    }
+
+    fn is_lock(&self) -> bool {
+        self.lock
+    }
+
+    fn is_cover(&self) -> bool {
+        self.cover_position
+    }
+
+    fn is_sensor(&self) -> bool {
+        self.motion
+            || self.contact
+            || self.occupancy
+            || self.smoke
+            || self.water_leak
+            || self.temperature
+            || self.humidity
     }
 }
 
@@ -789,7 +845,13 @@ enum CommandExpectation {
     PowerState(&'static str),
     Brightness(i64),
     ColorTemperature(i64),
-    ColorXy { x: f64, y: f64 },
+    ColorXy {
+        x: f64,
+        y: f64,
+    },
+    LockState(&'static str),
+    /// Return success immediately without waiting for a confirmation message.
+    Immediate,
 }
 
 impl CommandExpectation {
@@ -824,6 +886,12 @@ impl CommandExpectation {
                         .unwrap_or(false)
                 })
                 .unwrap_or(false),
+            Self::LockState(expected) => payload
+                .get("lock_state")
+                .and_then(Value::as_str)
+                .map(|value| value.eq_ignore_ascii_case(expected))
+                .unwrap_or(false),
+            Self::Immediate => true,
         }
     }
 }
@@ -958,21 +1026,27 @@ fn build_device_from_observed(
         .context("expected device payload to be a JSON object")?;
     let mut attributes = Attributes::new();
 
-    let power_state = object
-        .get("state")
-        .and_then(Value::as_str)
-        .map(|value| {
-            if value.eq_ignore_ascii_case("on") {
-                "on"
-            } else {
-                "off"
-            }
-        })
-        .unwrap_or("off");
-    attributes.insert(
-        POWER.to_string(),
-        AttributeValue::Text(power_state.to_string()),
-    );
+    // Only Light and Plug have a meaningful on/off power toggle.
+    match observed.discovered.device_kind {
+        SupportedDeviceKind::Light | SupportedDeviceKind::Plug => {
+            let power_state = object
+                .get("state")
+                .and_then(Value::as_str)
+                .map(|value| {
+                    if value.eq_ignore_ascii_case("on") {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                })
+                .unwrap_or("off");
+            attributes.insert(
+                POWER.to_string(),
+                AttributeValue::Text(power_state.to_string()),
+            );
+        }
+        _ => {}
+    }
 
     let availability = observed
         .availability
@@ -986,6 +1060,15 @@ fn build_device_from_observed(
         }
         SupportedDeviceKind::Plug => {
             fill_plug_attributes(&mut attributes, object, &observed.discovered.capability_set)
+        }
+        SupportedDeviceKind::Sensor => {
+            fill_sensor_attributes(&mut attributes, object, &observed.discovered.capability_set)
+        }
+        SupportedDeviceKind::Lock => {
+            fill_lock_attributes(&mut attributes, object, &observed.discovered.capability_set)
+        }
+        SupportedDeviceKind::Cover => {
+            fill_cover_attributes(&mut attributes, object, &observed.discovered.capability_set)
         }
     }
 
@@ -1135,6 +1218,111 @@ fn fill_plug_attributes(
     }
 }
 
+fn fill_sensor_attributes(
+    attributes: &mut Attributes,
+    object: &Map<String, Value>,
+    capability_set: &DeviceCapabilitySet,
+) {
+    if capability_set.motion {
+        if let Some(detected) = object.get("motion").and_then(Value::as_bool) {
+            attributes.insert(
+                MOTION.to_string(),
+                AttributeValue::Text(if detected { "detected" } else { "clear" }.to_string()),
+            );
+        }
+    }
+    if capability_set.contact {
+        if let Some(closed) = object.get("contact").and_then(Value::as_bool) {
+            // In Zigbee2MQTT: contact=true means the contact is made (closed).
+            attributes.insert(
+                CONTACT.to_string(),
+                AttributeValue::Text(if closed { "closed" } else { "open" }.to_string()),
+            );
+        }
+    }
+    if capability_set.occupancy {
+        if let Some(occupied) = object.get("occupancy").and_then(Value::as_bool) {
+            attributes.insert(
+                OCCUPANCY.to_string(),
+                AttributeValue::Text(if occupied { "occupied" } else { "unoccupied" }.to_string()),
+            );
+        }
+    }
+    if capability_set.smoke {
+        if let Some(detected) = object.get("smoke").and_then(Value::as_bool) {
+            attributes.insert(SMOKE.to_string(), AttributeValue::Bool(detected));
+        }
+    }
+    if capability_set.water_leak {
+        if let Some(leaking) = object.get("water_leak").and_then(Value::as_bool) {
+            attributes.insert(WATER_LEAK.to_string(), AttributeValue::Bool(leaking));
+        }
+    }
+    if capability_set.temperature {
+        if let Some(temp) = object.get("temperature").and_then(Value::as_f64) {
+            attributes.insert(TEMPERATURE.to_string(), measurement_value(temp, "celsius"));
+        }
+    }
+    if capability_set.humidity {
+        if let Some(hum) = object.get("humidity").and_then(Value::as_f64) {
+            attributes.insert(HUMIDITY.to_string(), measurement_value(hum, "percent"));
+        }
+    }
+    fill_battery_attribute(attributes, object, capability_set);
+}
+
+fn fill_lock_attributes(
+    attributes: &mut Attributes,
+    object: &Map<String, Value>,
+    capability_set: &DeviceCapabilitySet,
+) {
+    if capability_set.lock {
+        if let Some(state) = object.get("lock_state").and_then(Value::as_str) {
+            let normalized = match state.to_ascii_lowercase().as_str() {
+                "locked" => "locked",
+                "unlocked" => "unlocked",
+                "jammed" => "jammed",
+                _ => "unlocked",
+            };
+            attributes.insert(
+                LOCK.to_string(),
+                AttributeValue::Text(normalized.to_string()),
+            );
+        }
+    }
+    fill_battery_attribute(attributes, object, capability_set);
+}
+
+fn fill_cover_attributes(
+    attributes: &mut Attributes,
+    object: &Map<String, Value>,
+    capability_set: &DeviceCapabilitySet,
+) {
+    if capability_set.cover_position {
+        if let Some(pos) = object.get("position").and_then(Value::as_i64) {
+            attributes.insert(COVER_POSITION.to_string(), AttributeValue::Integer(pos));
+        }
+    }
+    if capability_set.cover_tilt {
+        if let Some(tilt) = object.get("tilt").and_then(Value::as_i64) {
+            attributes.insert(COVER_TILT.to_string(), AttributeValue::Integer(tilt));
+        }
+    }
+    fill_battery_attribute(attributes, object, capability_set);
+}
+
+fn fill_battery_attribute(
+    attributes: &mut Attributes,
+    object: &Map<String, Value>,
+    capability_set: &DeviceCapabilitySet,
+) {
+    if capability_set.battery {
+        if let Some(battery) = object.get("battery").and_then(Value::as_i64) {
+            attributes.insert(BATTERY.to_string(), AttributeValue::Integer(battery));
+        }
+    }
+}
+
 fn build_metadata(discovered: &DiscoveredDevice, object: &Map<String, Value>) -> Metadata {
     let mut vendor_specific = HashMap::from([
         (
@@ -1208,6 +1396,39 @@ fn build_command_payload(discovered: &DiscoveredDevice, command: &DeviceCommand)
             let mireds = parse_color_temperature_mireds(command.value.as_ref())?;
             serde_json::json!({ "color_temp": mireds })
         }
+        (SupportedDeviceKind::Lock, LOCK, "lock") => serde_json::json!({ "state": "LOCK" }),
+        (SupportedDeviceKind::Lock, LOCK, "unlock") => serde_json::json!({ "state": "UNLOCK" }),
+        (SupportedDeviceKind::Cover, COVER_POSITION, "open") => {
+            serde_json::json!({ "state": "OPEN" })
+        }
+        (SupportedDeviceKind::Cover, COVER_POSITION, "close") => {
+            serde_json::json!({ "state": "CLOSE" })
+        }
+        (SupportedDeviceKind::Cover, COVER_POSITION, "stop") => {
+            serde_json::json!({ "state": "STOP" })
+        }
+        (SupportedDeviceKind::Cover, COVER_POSITION, "set") => {
+            let pos = command
+                .value
+                .as_ref()
+                .and_then(|value| match value {
+                    AttributeValue::Integer(value) => Some(*value),
+                    _ => None,
+                })
+                .context("cover position set requires integer value")?;
+            serde_json::json!({ "position": pos })
+        }
+        (SupportedDeviceKind::Cover, COVER_TILT, "set") => {
+            let tilt = command
+                .value
+                .as_ref()
+                .and_then(|value| match value {
+                    AttributeValue::Integer(value) => Some(*value),
+                    _ => None,
+                })
+                .context("cover tilt set requires integer value")?;
+            serde_json::json!({ "tilt": tilt })
+        }
         _ => bail!(
             "zigbee2mqtt does not support '{}' command for capability '{}'",
             command.action,
@@ -1277,6 +1498,15 @@ fn expected_command_matcher(
                 parse_color_temperature_mireds(command.value.as_ref())?,
             ))
         }
+        (SupportedDeviceKind::Lock, LOCK, "lock") => Ok(CommandExpectation::LockState("locked")),
+        (SupportedDeviceKind::Lock, LOCK, "unlock") => {
+            Ok(CommandExpectation::LockState("unlocked"))
+        }
+        // Cover commands return immediately — covers move asynchronously.
+        (SupportedDeviceKind::Cover, COVER_POSITION, "open" | "close" | "stop" | "set") => {
+            Ok(CommandExpectation::Immediate)
+        }
+        (SupportedDeviceKind::Cover, COVER_TILT, "set") => Ok(CommandExpectation::Immediate),
         _ => bail!(
             "zigbee2mqtt does not support '{}' command for capability '{}'",
             command.action,
@@ -1297,6 +1527,11 @@ fn supports_command(discovered: &DiscoveredDevice, command: &DeviceCommand) -> b
         (SupportedDeviceKind::Light, COLOR_TEMPERATURE, "set") => {
             discovered.capability_set.color_temp
         }
+        (SupportedDeviceKind::Lock, LOCK, "lock" | "unlock") => discovered.capability_set.lock,
+        (SupportedDeviceKind::Cover, COVER_POSITION, "open" | "close" | "stop" | "set") => {
+            discovered.capability_set.cover_position
+        }
+        (SupportedDeviceKind::Cover, COVER_TILT, "set") => discovered.capability_set.cover_tilt,
         _ => false,
     }
 }
@@ -1390,6 +1625,9 @@ impl SupportedDeviceKind {
         match self {
             Self::Light => DeviceKind::Light,
             Self::Plug => DeviceKind::Switch,
+            Self::Sensor => DeviceKind::Sensor,
+            Self::Lock => DeviceKind::Switch,
+            Self::Cover => DeviceKind::Switch,
         }
     }
 }
@@ -2055,6 +2293,358 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&published[0].1).expect("published payload parses"),
             serde_json::json!({"brightness": 0, "transition": 10.0})
+        );
+    }
+
+    fn bridge_sensor_payload() -> Value {
+        serde_json::json!([
+            {
+                "ieee_address": "0xmotion1",
+                "type": "EndDevice",
+                "supported": true,
+                "disabled": false,
+                "friendly_name": "hallway_motion",
+                "definition": {
+                    "model": "MS-S1",
+                    "vendor": "Acme",
+                    "description": "Motion sensor",
+                    "exposes": [
+                        {"property": "motion"},
+                        {"property": "battery"},
+                        {"property": "temperature"},
+                        {"property": "humidity"}
+                    ]
+                }
+            },
+            {
+                "ieee_address": "0xcontact1",
+                "type": "EndDevice",
+                "supported": true,
+                "disabled": false,
+                "friendly_name": "front_door_contact",
+                "definition": {
+                    "model": "CS-1",
+                    "vendor": "Acme",
+                    "description": "Door/window sensor",
+                    "exposes": [
+                        {"property": "contact"},
+                        {"property": "battery"}
+                    ]
+                }
+            },
+            {
+                "ieee_address": "0xlock1",
+                "type": "EndDevice",
+                "supported": true,
+                "disabled": false,
+                "friendly_name": "front_door_lock",
+                "definition": {
+                    "model": "L-1",
+                    "vendor": "Acme",
+                    "description": "Smart lock",
+                    "exposes": [
+                        {"property": "lock_state"},
+                        {"property": "battery"}
+                    ]
+                }
+            },
+            {
+                "ieee_address": "0xcover1",
+                "type": "EndDevice",
+                "supported": true,
+                "disabled": false,
+                "friendly_name": "living_room_blind",
+                "definition": {
+                    "model": "CV-1",
+                    "vendor": "Acme",
+                    "description": "Roller blind",
+                    "exposes": [
+                        {"property": "position"},
+                        {"property": "tilt"},
+                        {"property": "battery"}
+                    ]
+                }
+            }
+        ])
+    }
+
+    #[tokio::test]
+    async fn sensor_lock_cover_devices_discovered_from_bridge() {
+        let broker = Arc::new(FakeBroker::default());
+        let adapter = build_test_adapter(broker).await;
+        let registry = DeviceRegistry::new(EventBus::new(16));
+
+        adapter
+            .process_message(
+                "zigbee2mqtt/bridge/devices",
+                bridge_sensor_payload().to_string().as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("bridge devices message applies");
+
+        let motion = registry
+            .get(&DeviceId("zigbee2mqtt:hallway_motion".to_string()))
+            .expect("motion sensor exists");
+        assert_eq!(motion.kind, DeviceKind::Sensor);
+
+        let contact = registry
+            .get(&DeviceId("zigbee2mqtt:front_door_contact".to_string()))
+            .expect("contact sensor exists");
+        assert_eq!(contact.kind, DeviceKind::Sensor);
+
+        let lock = registry
+            .get(&DeviceId("zigbee2mqtt:front_door_lock".to_string()))
+            .expect("lock exists");
+        assert_eq!(lock.kind, DeviceKind::Switch);
+
+        let cover = registry
+            .get(&DeviceId("zigbee2mqtt:living_room_blind".to_string()))
+            .expect("cover exists");
+        assert_eq!(cover.kind, DeviceKind::Switch);
+    }
+
+    #[tokio::test]
+    async fn sensor_state_maps_motion_temperature_humidity_battery() {
+        let broker = Arc::new(FakeBroker::default());
+        let adapter = build_test_adapter(broker).await;
+        let registry = DeviceRegistry::new(EventBus::new(16));
+
+        adapter
+            .process_message(
+                "zigbee2mqtt/bridge/devices",
+                bridge_sensor_payload().to_string().as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("bridge devices message applies");
+        adapter
+            .process_message(
+                "zigbee2mqtt/hallway_motion",
+                serde_json::json!({
+                    "motion": true,
+                    "battery": 85,
+                    "temperature": 21.5,
+                    "humidity": 58.0,
+                    "linkquality": 120
+                })
+                .to_string()
+                .as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("motion sensor payload applies");
+
+        let device = registry
+            .get(&DeviceId("zigbee2mqtt:hallway_motion".to_string()))
+            .expect("sensor exists");
+        assert_eq!(
+            device.attributes.get(MOTION),
+            Some(&AttributeValue::Text("detected".to_string()))
+        );
+        assert_eq!(
+            device.attributes.get(BATTERY),
+            Some(&AttributeValue::Integer(85))
+        );
+        assert_eq!(
+            device.attributes.get(TEMPERATURE),
+            Some(&measurement_value(21.5, "celsius"))
+        );
+        assert_eq!(
+            device.attributes.get(HUMIDITY),
+            Some(&measurement_value(58.0, "percent"))
+        );
+        // Sensors have no POWER attribute
+        assert!(device.attributes.get(POWER).is_none());
+    }
+
+    #[tokio::test]
+    async fn contact_sensor_maps_open_closed() {
+        let broker = Arc::new(FakeBroker::default());
+        let adapter = build_test_adapter(broker).await;
+        let registry = DeviceRegistry::new(EventBus::new(16));
+
+        adapter
+            .process_message(
+                "zigbee2mqtt/bridge/devices",
+                bridge_sensor_payload().to_string().as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("bridge devices message applies");
+
+        // contact=false → open
+        adapter
+            .process_message(
+                "zigbee2mqtt/front_door_contact",
+                serde_json::json!({"contact": false, "battery": 90})
+                    .to_string()
+                    .as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("contact payload applies");
+
+        let device = registry
+            .get(&DeviceId("zigbee2mqtt:front_door_contact".to_string()))
+            .expect("contact sensor exists");
+        assert_eq!(
+            device.attributes.get(CONTACT),
+            Some(&AttributeValue::Text("open".to_string()))
+        );
+
+        // contact=true → closed
+        adapter
+            .process_message(
+                "zigbee2mqtt/front_door_contact",
+                serde_json::json!({"contact": true, "battery": 90})
+                    .to_string()
+                    .as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("contact closed payload applies");
+
+        let device = registry
+            .get(&DeviceId("zigbee2mqtt:front_door_contact".to_string()))
+            .expect("contact sensor exists");
+        assert_eq!(
+            device.attributes.get(CONTACT),
+            Some(&AttributeValue::Text("closed".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_state_maps_and_commands_publish_correctly() {
+        let broker = Arc::new(FakeBroker::default());
+        let adapter = build_test_adapter(Arc::clone(&broker)).await;
+        let registry = DeviceRegistry::new(EventBus::new(16));
+
+        adapter
+            .process_message(
+                "zigbee2mqtt/bridge/devices",
+                bridge_sensor_payload().to_string().as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("bridge devices message applies");
+
+        // Apply initial lock state
+        adapter
+            .process_message(
+                "zigbee2mqtt/front_door_lock",
+                serde_json::json!({"lock_state": "locked", "battery": 72})
+                    .to_string()
+                    .as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("lock state payload applies");
+
+        let device = registry
+            .get(&DeviceId("zigbee2mqtt:front_door_lock".to_string()))
+            .expect("lock exists");
+        assert_eq!(
+            device.attributes.get(LOCK),
+            Some(&AttributeValue::Text("locked".to_string()))
+        );
+        assert_eq!(
+            device.attributes.get(BATTERY),
+            Some(&AttributeValue::Integer(72))
+        );
+
+        // Send an unlock command; simulate the confirmation arriving
+        let sender = adapter.event_sender.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = sender.send(ObservedDeviceUpdate {
+                device_id: DeviceId("zigbee2mqtt:front_door_lock".to_string()),
+                payload: serde_json::json!({"lock_state": "unlocked"}),
+            });
+        });
+
+        assert!(adapter
+            .command(
+                &DeviceId("zigbee2mqtt:front_door_lock".to_string()),
+                DeviceCommand {
+                    capability: LOCK.to_string(),
+                    action: "unlock".to_string(),
+                    value: None,
+                    transition_secs: None,
+                },
+                registry,
+            )
+            .await
+            .expect("unlock command succeeds"));
+
+        let published = broker.published.lock().await;
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0, "zigbee2mqtt/front_door_lock/set");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&published[0].1).expect("published payload parses"),
+            serde_json::json!({"state": "UNLOCK"})
+        );
+    }
+
+    #[tokio::test]
+    async fn cover_state_maps_position_tilt_and_commands_return_immediately() {
+        let broker = Arc::new(FakeBroker::default());
+        let adapter = build_test_adapter(Arc::clone(&broker)).await;
+        let registry = DeviceRegistry::new(EventBus::new(16));
+
+        adapter
+            .process_message(
+                "zigbee2mqtt/bridge/devices",
+                bridge_sensor_payload().to_string().as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("bridge devices message applies");
+
+        adapter
+            .process_message(
+                "zigbee2mqtt/living_room_blind",
+                serde_json::json!({"position": 45, "tilt": 30, "battery": 88})
+                    .to_string()
+                    .as_bytes(),
+                &registry,
+            )
+            .await
+            .expect("cover payload applies");
+
+        let device = registry
+            .get(&DeviceId("zigbee2mqtt:living_room_blind".to_string()))
+            .expect("cover exists");
+        assert_eq!(
+            device.attributes.get(COVER_POSITION),
+            Some(&AttributeValue::Integer(45))
+        );
+        assert_eq!(
+            device.attributes.get(COVER_TILT),
+            Some(&AttributeValue::Integer(30))
+        );
+
+        // Cover commands return immediately (no confirmation event needed)
+        assert!(adapter
+            .command(
+                &DeviceId("zigbee2mqtt:living_room_blind".to_string()),
+                DeviceCommand {
+                    capability: COVER_POSITION.to_string(),
+                    action: "set".to_string(),
+                    value: Some(AttributeValue::Integer(75)),
+                    transition_secs: None,
+                },
+                registry,
+            )
+            .await
+            .expect("cover set position command succeeds"));
+
+        let published = broker.published.lock().await;
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0, "zigbee2mqtt/living_room_blind/set");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&published[0].1).expect("published payload parses"),
+            serde_json::json!({"position": 75})
         );
     }
 }

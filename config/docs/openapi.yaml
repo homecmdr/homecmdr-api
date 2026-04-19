@@ -11,6 +11,9 @@ info:
     Notes:
     - The default bind address in `config/default.toml` is `127.0.0.1:3001`.
     - `GET /events` upgrades to a WebSocket connection. Bruno may import it as a normal GET request; the event frame schemas are included in `components.schemas.EventFrame` for reference.
+    - All routes except `GET /health` and `GET /ready` require `Authorization: Bearer <token>`.
+      The token may be the master key (from `auth.master_key` in config or `SMART_HOME_MASTER_KEY`
+      env var, which always grants `admin`) or an API key created via `POST /auth/keys`.
 servers:
   - url: http://127.0.0.1:3001
     description: Default local API server from `config/default.toml`
@@ -24,12 +27,16 @@ tags:
   - name: Devices
   - name: History
   - name: Events
+  - name: Auth
+security:
+  - BearerAuth: []
 paths:
   /health:
     get:
       tags: [System]
       operationId: getHealth
       summary: Get system health
+      security: []
       responses:
         '200':
           description: Health snapshot
@@ -42,6 +49,7 @@ paths:
       tags: [System]
       operationId: getReady
       summary: Check readiness
+      security: []
       responses:
         '200':
           description: System is ready
@@ -63,6 +71,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DiagnosticsResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
   /diagnostics/reload_watch:
     get:
       tags: [Diagnostics]
@@ -75,6 +87,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReloadWatchResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
   /adapters:
     get:
       tags: [Adapters]
@@ -89,6 +105,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/AdapterSummary'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
   /adapters/{id}:
     get:
       tags: [Adapters]
@@ -103,6 +121,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AdapterDetailResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /capabilities:
@@ -117,6 +137,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CapabilityCatalogResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
   /scenes:
     get:
       tags: [Scenes]
@@ -131,6 +153,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/SceneSummary'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
   /scenes/reload:
     post:
       tags: [Scenes]
@@ -144,6 +168,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReloadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
   /scenes/{id}/execute:
     post:
       tags: [Scenes]
@@ -160,6 +188,10 @@ paths:
                 $ref: '#/components/schemas/SceneExecuteResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /scenes/{id}/history:
@@ -181,6 +213,8 @@ paths:
                 $ref: '#/components/schemas/SceneHistoryResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -199,6 +233,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/AutomationResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /automations/reload:
@@ -214,6 +250,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReloadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
   /scripts/reload:
     post:
       tags: [Scripts]
@@ -227,6 +267,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReloadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
   /automations/{id}:
     get:
       tags: [Automations]
@@ -241,6 +285,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AutomationResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -267,6 +313,10 @@ paths:
                 $ref: '#/components/schemas/AutomationResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -287,6 +337,8 @@ paths:
                 $ref: '#/components/schemas/AutomationValidateResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -313,6 +365,10 @@ paths:
                 $ref: '#/components/schemas/AutomationExecuteResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /automations/{id}/history:
@@ -334,6 +390,8 @@ paths:
                 $ref: '#/components/schemas/AutomationHistoryResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -352,6 +410,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Room'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
     post:
       tags: [Rooms]
       operationId: createRoom
@@ -371,6 +431,10 @@ paths:
                 $ref: '#/components/schemas/Room'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
   /rooms/{id}:
     get:
       tags: [Rooms]
@@ -385,6 +449,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Room'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
     delete:
@@ -396,6 +462,10 @@ paths:
       responses:
         '204':
           description: Room deleted
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /rooms/{id}/devices:
@@ -414,6 +484,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /rooms/{id}/command:
@@ -440,6 +512,10 @@ paths:
                   $ref: '#/components/schemas/RoomCommandResult'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /devices:
@@ -456,6 +532,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
   /devices/{id}:
     get:
       tags: [Devices]
@@ -470,6 +548,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /devices/{id}/room:
@@ -494,6 +574,10 @@ paths:
                 $ref: '#/components/schemas/Device'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
   /devices/{id}/command:
@@ -518,6 +602,10 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '501':
@@ -541,6 +629,8 @@ paths:
                 $ref: '#/components/schemas/DeviceHistoryResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -565,6 +655,8 @@ paths:
                 $ref: '#/components/schemas/AttributeHistoryResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -587,6 +679,8 @@ paths:
                 $ref: '#/components/schemas/CommandAuditResponse'
         '400':
           $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
         '404':
           $ref: '#/components/responses/ErrorResponse'
         '500':
@@ -605,6 +699,72 @@ paths:
           description: Switching Protocols to WebSocket
         '400':
           description: Invalid WebSocket upgrade request
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /auth/keys:
+    post:
+      tags: [Auth]
+      operationId: createApiKey
+      summary: Create an API key
+      description: Creates a new API key. Requires the `admin` role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '200':
+          description: Newly created API key — the plain-text key is shown only once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateApiKeyResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+    get:
+      tags: [Auth]
+      operationId: listApiKeys
+      summary: List API keys
+      description: Lists all API keys with key hashes redacted. Requires the `admin` role.
+      responses:
+        '200':
+          description: API key list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+  /auth/keys/{id}:
+    delete:
+      tags: [Auth]
+      operationId: deleteApiKey
+      summary: Revoke an API key
+      description: Permanently deletes an API key by ID. Requires the `admin` role.
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyId'
+      responses:
+        '200':
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteApiKeyResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
 components:
   parameters:
     AdapterId:
@@ -673,9 +833,28 @@ components:
         type: integer
         minimum: 1
       description: Query limit. The runtime enforces the configured max limit; the default config uses 200 by default and 1000 as the max.
+    ApiKeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: API key identifier.
   responses:
     ErrorResponse:
       description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnauthorizedResponse:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ForbiddenResponse:
+      description: Authenticated but insufficient role for this endpoint
       content:
         application/json:
           schema:
@@ -1290,6 +1469,58 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AutomationExecutionHistoryEntry'
+    CreateApiKeyRequest:
+      type: object
+      required: [label, role]
+      properties:
+        label:
+          type: string
+          description: Human-readable label for the key.
+        role:
+          type: string
+          enum: [read, write, admin, automation]
+          description: Role granted to this key.
+    CreateApiKeyResponse:
+      type: object
+      required: [id, label, role, created_at, plain_key]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        role:
+          type: string
+          enum: [read, write, admin, automation]
+        created_at:
+          type: string
+          format: date-time
+        plain_key:
+          type: string
+          description: The plain-text API key — shown only once at creation time.
+    ApiKeyResponse:
+      type: object
+      required: [id, label, role, created_at]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        role:
+          type: string
+          enum: [read, write, admin, automation]
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+    DeleteApiKeyResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
     EventFrame:
       description: Public JSON frames emitted over the `/events` WebSocket.
       oneOf:
@@ -1380,3 +1611,11 @@ components:
           enum: [system.error]
         message:
           type: string
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        All routes except `GET /health` and `GET /ready` require `Authorization: Bearer <token>`.
+        Accepted values: the master key (from `auth.master_key` in config or `SMART_HOME_MASTER_KEY`
+        env var, always grants `admin`) or an API key created via `POST /auth/keys`.

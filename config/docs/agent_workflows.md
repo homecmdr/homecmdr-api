@@ -2,7 +2,7 @@
 
 This document explains how an agentic AI should approach work in this repository.
 
-It is written for future MCP-assisted tooling, but it is useful now even without MCP.
+It is useful both directly and when working through the MCP server (`crates/mcp-server`).
 
 ## Primary Agent Goals
 
@@ -31,6 +31,7 @@ If documentation and code disagree, prefer the code unless the task is explicitl
 When an agent starts work, it should usually inspect:
 
 - `README.md`
+- `config/default.toml`
 - `config/docs/api_reference.md`
 - `config/docs/lua_runtime_guide.md`
 - `config/docs/adapter_authoring_guide.md`
@@ -97,6 +98,8 @@ Example:
 { "capability": "power", "action": "toggle" }
 ```
 
+Write endpoints (`/command`, `/execute`) are subject to optional rate limiting. When the rate limit is enabled in `config/default.toml`, excess requests return `HTTP 429`. See `config/docs/api_reference.md` for details.
+
 ### Control a room
 
 Use `POST /rooms/{id}/command`.
@@ -110,6 +113,8 @@ Use:
 - `config/scenes/` for manual user-invoked flows
 - `config/automations/` for trigger-driven flows
 - `config/docs/lua_runtime_guide.md` for the current contract
+
+Automation runner concurrency and the backstop execution timeout are tunable via `[automations.runner]` in `config/default.toml` — no code changes needed.
 
 Current automation trigger types:
 
@@ -166,16 +171,40 @@ cargo check --workspace
 cargo test --workspace
 ```
 
-## Future MCP Tooling Fit
+## MCP Tooling
 
-MCP tooling will likely help agents with:
+The MCP server (`crates/mcp-server`) is a standalone binary that speaks JSON-RPC 2.0
+over stdio (protocol version `2024-11-05`). It is launched by an MCP host as a subprocess
+and does not start automatically with the API. The API must be running before the MCP
+server is started.
 
-- scaffolding adapter crates
-- reading the live device graph from the API
-- listing available capabilities and commands
-- validating workspace linkage
-- generating config examples
-- running focused tests
-- creating automation, scene, and Lua assets consistently
+Run it with:
 
-The current docs are structured so that those future tools have a clear textual contract to follow.
+```bash
+cargo run -p mcp-server -- --token <BEARER_TOKEN>
+# --api-url defaults to http://127.0.0.1:3001
+# --workspace defaults to .
+# SMART_HOME_TOKEN env var can substitute for --token
+```
+
+Available tools:
+
+| Tool | What it does |
+|---|---|
+| `list_devices` | Proxies `GET /devices` — full canonical device graph |
+| `list_rooms` | Proxies `GET /rooms` |
+| `list_capabilities` | Proxies `GET /capabilities` — capability schemas |
+| `list_adapters` | Proxies `GET /adapters` — adapter runtime status |
+| `list_files` | Proxies `GET /files` — Lua assets in scenes/automations/scripts dirs |
+| `read_file` | Proxies `GET /files/{path}` — read a Lua asset by relative path |
+| `write_file` | Proxies `PUT /files/{path}` — create or overwrite a Lua asset |
+| `reload_scenes` | Proxies `POST /scenes/reload` |
+| `reload_automations` | Proxies `POST /automations/reload` |
+| `reload_scripts` | Proxies `POST /scripts/reload` |
+| `scaffold_adapter` | Creates a new adapter crate skeleton on disk with the correct factory boilerplate |
+| `run_cargo_check` | Runs `cargo check` as a subprocess (workspace or single package) |
+| `run_cargo_test` | Runs `cargo test` as a subprocess (workspace or single package) |
+
+`scaffold_adapter` prints the three manual registration steps required after scaffolding
+(root `Cargo.toml`, `crates/adapters/Cargo.toml`, `crates/adapters/src/lib.rs`) but does
+not modify those files automatically.

@@ -6,6 +6,12 @@ meta {
 
 get {
   url: {{baseUrl}}/capabilities
+  body: none
+  auth: none
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
 }
 
 settings {

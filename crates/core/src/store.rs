@@ -126,4 +126,54 @@ pub trait DeviceStore: Send + Sync + 'static {
         &self,
         state: &AutomationRuntimeState,
     ) -> anyhow::Result<()>;
+    /// Prune stale history rows according to the store's configured retention
+    /// window.  Intended to be called from a background timer task; impls that
+    /// already prune inline may choose to make this a no-op.
+    async fn prune_history(&self) -> anyhow::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyRole {
+    Read,
+    Write,
+    Admin,
+    Automation,
+}
+
+impl ApiKeyRole {
+    /// Returns true when `self` grants at least the privileges of `required`.
+    pub fn satisfies(self, required: ApiKeyRole) -> bool {
+        use ApiKeyRole::*;
+        match required {
+            Read => matches!(self, Read | Write | Admin | Automation),
+            Write => matches!(self, Write | Admin | Automation),
+            Admin => matches!(self, Admin),
+            Automation => matches!(self, Automation | Admin),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyRecord {
+    pub id: i64,
+    pub key_hash: String,
+    pub label: String,
+    pub role: ApiKeyRole,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[async_trait::async_trait]
+pub trait ApiKeyStore: Send + Sync + 'static {
+    async fn create_api_key(
+        &self,
+        key_hash: &str,
+        label: &str,
+        role: ApiKeyRole,
+    ) -> anyhow::Result<ApiKeyRecord>;
+    async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyRecord>>;
+    async fn revoke_api_key(&self, id: i64) -> anyhow::Result<bool>;
+    async fn lookup_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<ApiKeyRecord>>;
+    async fn touch_api_key(&self, id: i64) -> anyhow::Result<()>;
 }

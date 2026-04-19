@@ -6,7 +6,9 @@ use serde::Deserialize;
 use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
 use smart_home_core::bus::EventBus;
 use smart_home_core::capability::{
-    measurement_value, TEMPERATURE_OUTDOOR, WIND_DIRECTION, WIND_SPEED,
+    accumulation_value, measurement_value, CLOUD_COVERAGE, HUMIDITY, PRESSURE,
+    TEMPERATURE_APPARENT, TEMPERATURE_OUTDOOR, UV_INDEX, WEATHER_CONDITION, WIND_DIRECTION,
+    WIND_GUST, WIND_SPEED,
 };
 use smart_home_core::config::AdapterConfig;
 use smart_home_core::event::Event;
@@ -86,24 +88,78 @@ impl OpenMeteoAdapter {
     async fn poll_once(&self, registry: &DeviceRegistry) -> Result<()> {
         let weather = self.fetch_weather().await?;
 
+        let is_day = weather.is_day != 0;
+        let condition = wmo_code_to_description(weather.weather_code);
+
         for (vendor_id, attributes) in [
             (
                 TEMPERATURE_OUTDOOR,
                 single_attribute(
                     TEMPERATURE_OUTDOOR,
-                    measurement_value(weather.temperature, "celsius"),
+                    measurement_value(weather.temperature_2m, "celsius"),
                 ),
             ),
             (
                 WIND_SPEED,
-                single_attribute(WIND_SPEED, measurement_value(weather.wind_speed, "km/h")),
+                single_attribute(
+                    WIND_SPEED,
+                    measurement_value(weather.wind_speed_10m, "km/h"),
+                ),
             ),
             (
                 WIND_DIRECTION,
                 single_attribute(
                     WIND_DIRECTION,
-                    AttributeValue::Integer(weather.wind_direction as i64),
+                    AttributeValue::Integer(weather.wind_direction_10m as i64),
                 ),
+            ),
+            (
+                TEMPERATURE_APPARENT,
+                single_attribute(
+                    TEMPERATURE_APPARENT,
+                    measurement_value(weather.apparent_temperature, "celsius"),
+                ),
+            ),
+            (
+                HUMIDITY,
+                single_attribute(
+                    HUMIDITY,
+                    measurement_value(weather.relative_humidity_2m, "percent"),
+                ),
+            ),
+            (
+                "rainfall",
+                single_attribute(
+                    "rainfall",
+                    accumulation_value(weather.precipitation, "mm", "hour"),
+                ),
+            ),
+            (
+                CLOUD_COVERAGE,
+                single_attribute(
+                    CLOUD_COVERAGE,
+                    AttributeValue::Integer(weather.cloud_cover as i64),
+                ),
+            ),
+            (
+                UV_INDEX,
+                single_attribute(UV_INDEX, AttributeValue::Float(weather.uv_index)),
+            ),
+            (
+                PRESSURE,
+                single_attribute(PRESSURE, measurement_value(weather.surface_pressure, "hPa")),
+            ),
+            (
+                WIND_GUST,
+                single_attribute(WIND_GUST, measurement_value(weather.wind_gusts_10m, "km/h")),
+            ),
+            (
+                WEATHER_CONDITION,
+                single_attribute(WEATHER_CONDITION, AttributeValue::Text(condition.clone())),
+            ),
+            (
+                "is_day",
+                single_attribute("custom.open_meteo.is_day", AttributeValue::Bool(is_day)),
             ),
         ] {
             let previous = registry.get(&DeviceId(format!("{ADAPTER_NAME}:{vendor_id}")));
@@ -126,7 +182,14 @@ impl OpenMeteoAdapter {
                 .query(&[
                     ("latitude", self.config.latitude.to_string()),
                     ("longitude", self.config.longitude.to_string()),
-                    ("current_weather", "true".to_string()),
+                    (
+                        "current",
+                        "temperature_2m,apparent_temperature,relative_humidity_2m,\
+                         precipitation,cloud_cover,uv_index,surface_pressure,\
+                         wind_speed_10m,wind_gusts_10m,wind_direction_10m,\
+                         weather_code,is_day"
+                            .to_string(),
+                    ),
                 ]),
             "Open-Meteo forecast",
         )
@@ -137,7 +200,7 @@ impl OpenMeteoAdapter {
             .await
             .context("failed to parse Open-Meteo response")?;
 
-        Ok(body.current_weather)
+        Ok(body.current)
     }
 
     async fn handle_poll_error(&self, bus: &EventBus, error: anyhow::Error) {
@@ -195,17 +258,53 @@ impl Adapter for OpenMeteoAdapter {
 
 #[derive(Debug, Deserialize)]
 struct ForecastResponse {
-    current_weather: CurrentWeather,
+    current: CurrentWeather,
 }
 
 #[derive(Debug, Deserialize)]
 struct CurrentWeather {
-    #[serde(rename = "temperature")]
-    temperature: f64,
-    #[serde(rename = "windspeed")]
-    wind_speed: f64,
-    #[serde(rename = "winddirection")]
-    wind_direction: f64,
+    temperature_2m: f64,
+    apparent_temperature: f64,
+    relative_humidity_2m: f64,
+    precipitation: f64,
+    cloud_cover: u8,
+    uv_index: f64,
+    surface_pressure: f64,
+    wind_speed_10m: f64,
+    wind_gusts_10m: f64,
+    wind_direction_10m: f64,
+    weather_code: u8,
+    is_day: u8,
+}
+
+fn wmo_code_to_description(code: u8) -> String {
+    let description = match code {
+        0 => "Clear sky",
+        1 => "Mainly clear",
+        2 => "Partly cloudy",
+        3 => "Overcast",
+        45 | 48 => "Fog",
+        51 => "Light drizzle",
+        53 => "Moderate drizzle",
+        55 => "Dense drizzle",
+        56 | 57 => "Freezing drizzle",
+        61 => "Slight rain",
+        63 => "Moderate rain",
+        65 => "Heavy rain",
+        66 | 67 => "Freezing rain",
+        71 => "Slight snow",
+        73 => "Moderate snow",
+        75 => "Heavy snow",
+        77 => "Snow grains",
+        80 => "Slight showers",
+        81 => "Moderate showers",
+        82 => "Violent showers",
+        85 | 86 => "Snow showers",
+        95 => "Thunderstorm",
+        96 | 99 => "Thunderstorm with hail",
+        _ => "Unknown",
+    };
+    description.to_string()
 }
 
 fn single_attribute(name: &str, value: AttributeValue) -> Attributes {
@@ -361,7 +460,11 @@ mod tests {
     async fn adapter_produces_expected_devices_from_successful_response() -> Result<()> {
         let server = MockServer::start(vec![MockResponse {
             status_line: "HTTP/1.1 200 OK",
-            body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+            body: "{\"current\":{\"temperature_2m\":18.25,\"apparent_temperature\":16.0,\
+                   \"relative_humidity_2m\":62.0,\"precipitation\":0.0,\"cloud_cover\":25,\
+                   \"uv_index\":3.5,\"surface_pressure\":1012.0,\"wind_speed_10m\":11.5,\
+                   \"wind_gusts_10m\":18.0,\"wind_direction_10m\":225.0,\
+                   \"weather_code\":2,\"is_day\":1}}",
         }])
         .await;
 
@@ -392,12 +495,76 @@ mod tests {
                 .attributes,
             single_attribute(WIND_DIRECTION, AttributeValue::Integer(225))
         );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:temperature_apparent".to_string()))
+                .expect("apparent temperature device exists")
+                .attributes,
+            single_attribute(TEMPERATURE_APPARENT, measurement_value(16.0, "celsius"))
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:humidity".to_string()))
+                .expect("humidity device exists")
+                .attributes,
+            single_attribute(HUMIDITY, measurement_value(62.0, "percent"))
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:cloud_coverage".to_string()))
+                .expect("cloud coverage device exists")
+                .attributes,
+            single_attribute(CLOUD_COVERAGE, AttributeValue::Integer(25))
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:uv_index".to_string()))
+                .expect("uv index device exists")
+                .attributes,
+            single_attribute(UV_INDEX, AttributeValue::Float(3.5))
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:pressure".to_string()))
+                .expect("pressure device exists")
+                .attributes,
+            single_attribute(PRESSURE, measurement_value(1012.0, "hPa"))
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:wind_gust".to_string()))
+                .expect("wind gust device exists")
+                .attributes,
+            single_attribute(WIND_GUST, measurement_value(18.0, "km/h"))
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:weather_condition".to_string()))
+                .expect("weather condition device exists")
+                .attributes,
+            single_attribute(
+                WEATHER_CONDITION,
+                AttributeValue::Text("Partly cloudy".to_string())
+            )
+        );
+        assert_eq!(
+            registry
+                .get(&DeviceId("open_meteo:is_day".to_string()))
+                .expect("is_day device exists")
+                .attributes,
+            single_attribute("custom.open_meteo.is_day", AttributeValue::Bool(true))
+        );
 
         Ok(())
     }
 
     #[tokio::test]
     async fn adapter_retries_after_http_error_and_recovers() -> Result<()> {
+        let v2_body = "{\"current\":{\"temperature_2m\":18.25,\"apparent_temperature\":16.0,\
+                       \"relative_humidity_2m\":62.0,\"precipitation\":0.0,\"cloud_cover\":25,\
+                       \"uv_index\":3.5,\"surface_pressure\":1012.0,\"wind_speed_10m\":11.5,\
+                       \"wind_gusts_10m\":18.0,\"wind_direction_10m\":225.0,\
+                       \"weather_code\":0,\"is_day\":1}}";
         let server = MockServer::start(vec![
             MockResponse {
                 status_line: "HTTP/1.1 500 Internal Server Error",
@@ -405,7 +572,7 @@ mod tests {
             },
             MockResponse {
                 status_line: "HTTP/1.1 200 OK",
-                body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+                body: v2_body,
             },
         ])
         .await;
@@ -471,14 +638,19 @@ mod tests {
     #[tokio::test]
     async fn adapter_refreshes_last_seen_without_bumping_updated_at_for_identical_poll(
     ) -> Result<()> {
+        let v2_body = "{\"current\":{\"temperature_2m\":18.25,\"apparent_temperature\":16.0,\
+                       \"relative_humidity_2m\":62.0,\"precipitation\":0.0,\"cloud_cover\":25,\
+                       \"uv_index\":3.5,\"surface_pressure\":1012.0,\"wind_speed_10m\":11.5,\
+                       \"wind_gusts_10m\":18.0,\"wind_direction_10m\":225.0,\
+                       \"weather_code\":0,\"is_day\":1}}";
         let server = MockServer::start(vec![
             MockResponse {
                 status_line: "HTTP/1.1 200 OK",
-                body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+                body: v2_body,
             },
             MockResponse {
                 status_line: "HTTP/1.1 200 OK",
-                body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+                body: v2_body,
             },
         ])
         .await;

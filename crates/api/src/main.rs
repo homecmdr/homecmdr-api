@@ -8,16 +8,20 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::RawQuery;
+use axum::extract::Request;
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use notify::{EventKind as NotifyEventKind, RecursiveMode, Watcher};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use smart_home_adapters as _;
 use smart_home_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
@@ -30,11 +34,13 @@ use smart_home_core::capability::{
 use smart_home_core::command::DeviceCommand;
 use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use smart_home_core::event::Event;
+use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
 use smart_home_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use smart_home_core::runtime::Runtime;
 use smart_home_core::store::{
-    AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry, DeviceHistoryEntry,
-    DeviceStore, SceneExecutionHistoryEntry, SceneStepResult,
+    ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
+    CommandAuditEntry, DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
+    SceneStepResult,
 };
 use smart_home_scenes::{
     SceneCatalog, SceneExecutionResult, SceneRunOutcome, SceneRunner, SceneSummary,
@@ -43,7 +49,54 @@ use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
+use tower_http::trace::TraceLayer;
 use tracing::Level;
+
+/// Maximum time (in seconds) to wait for in-flight requests to drain after a
+/// shutdown signal before forcibly exiting.
+const SHUTDOWN_DRAIN_SECS: u64 = 30;
+
+/// A token-bucket rate limiter that can be shared across cloned axum services.
+///
+/// Implements a leaky-bucket / token-bucket algorithm.  `try_acquire` returns
+/// `true` when a token is available (request should proceed) and `false` when
+/// the bucket is empty (request should be rejected with 429).
+#[derive(Clone)]
+struct SharedRateLimit(Arc<std::sync::Mutex<TokenBucket>>);
+
+struct TokenBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_refill: std::time::Instant,
+}
+
+impl SharedRateLimit {
+    fn new(requests_per_second: u64, burst_size: u64) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(TokenBucket {
+            tokens: burst_size as f64,
+            max_tokens: burst_size as f64,
+            refill_rate: requests_per_second as f64,
+            last_refill: std::time::Instant::now(),
+        })))
+    }
+
+    fn try_acquire(&self) -> bool {
+        let mut bucket = self.0.lock().expect("rate limiter mutex not poisoned");
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens =
+            (bucket.tokens + elapsed * bucket.refill_rate).min(bucket.max_tokens);
+        bucket.last_refill = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct AdapterSummary {
@@ -141,6 +194,30 @@ struct GroupCommandResult {
     message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateApiKeyRequest {
+    label: String,
+    role: ApiKeyRole,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateApiKeyResponse {
+    id: i64,
+    label: String,
+    role: ApiKeyRole,
+    token: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiKeyResponse {
+    id: i64,
+    label: String,
+    role: ApiKeyRole,
+    created_at: DateTime<Utc>,
+    last_used_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
@@ -152,6 +229,8 @@ struct AppState {
     trigger_context: TriggerContext,
     health: HealthState,
     store: Option<Arc<dyn DeviceStore>>,
+    auth_key_store: Option<Arc<dyn ApiKeyStore>>,
+    master_key_hash: String,
     history: HistorySettings,
     scenes_enabled: bool,
     automations_enabled: bool,
@@ -162,7 +241,15 @@ struct AppState {
     scripts_watch: bool,
     scripts_enabled: bool,
     scripts_directory: String,
+    backstop_timeout: Duration,
 }
+
+const _: fn() = || {
+    fn assert_sync<T: Sync>() {}
+    fn assert_send<T: Send>() {}
+    assert_sync::<AppState>();
+    assert_send::<AppState>();
+};
 
 #[derive(Clone)]
 struct HistorySettings {
@@ -215,6 +302,7 @@ struct ReloadController {
     store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
     runtime: Arc<Runtime>,
+    backstop_timeout: Duration,
 }
 
 struct ReloadOutcome {
@@ -233,6 +321,21 @@ struct ReloadWatchItem {
     target: &'static str,
     enabled: bool,
     directory: String,
+}
+
+/// A single Lua file entry returned by `GET /files`.
+#[derive(Debug, Serialize)]
+struct FileEntry {
+    /// Relative path in the form `{type}/{filename}`, e.g. `scenes/wakeup.lua`.
+    path: String,
+    /// Top-level category: `scenes`, `automations`, or `scripts`.
+    #[serde(rename = "type")]
+    file_type: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct PutFileRequest {
+    content: String,
 }
 
 type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<String>);
@@ -638,9 +741,16 @@ async fn main() -> Result<()> {
 
     init_tracing(&config.logging.level)?;
 
-    let device_store = create_device_store(&config)
+    let (device_store, auth_key_store) = create_device_store(&config)
         .await
         .context("failed to create persistence store")?;
+
+    // Allow SMART_HOME_MASTER_KEY env var to override config value at runtime.
+    let master_key = std::env::var("SMART_HOME_MASTER_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| config.auth.master_key.clone());
+    let master_key_hash = sha256_hex(&master_key);
 
     let (adapters, adapter_summaries) =
         build_adapters(&config).context("failed to build adapters")?;
@@ -710,11 +820,14 @@ async fn main() -> Result<()> {
             }
         });
     let trigger_context = trigger_context_from_config(&config);
+    let backstop_timeout =
+        Duration::from_secs(config.automations.runner.backstop_timeout_secs);
     let automation_runner = build_automation_runner(
         (*automations).clone(),
         automation_observer.clone(),
         device_store.clone(),
         trigger_context,
+        backstop_timeout,
     );
     let automation_control = Arc::new(automation_runner.controller());
     let (automation_runner_tx, automation_runner_rx) = watch::channel(automation_runner.clone());
@@ -728,6 +841,8 @@ async fn main() -> Result<()> {
         trigger_context,
         health: health.clone(),
         store: device_store.clone(),
+        auth_key_store,
+        master_key_hash,
         history: HistorySettings::from_config(&config),
         scenes_enabled: config.scenes.enabled,
         automations_enabled: config.automations.enabled,
@@ -738,6 +853,7 @@ async fn main() -> Result<()> {
         scripts_watch: config.scripts.watch,
         scripts_enabled: config.scripts.enabled,
         scripts_directory: config.scripts.directory.clone(),
+        backstop_timeout,
     };
     let app = app(app_state.clone(), &config);
     let reload_controller = ReloadController {
@@ -755,6 +871,7 @@ async fn main() -> Result<()> {
         store: app_state.store.clone(),
         trigger_context,
         runtime: runtime.clone(),
+        backstop_timeout,
     };
     let listener = tokio::net::TcpListener::bind(&config.api.bind_address)
         .await
@@ -767,6 +884,18 @@ async fn main() -> Result<()> {
         let health = health.clone();
         tokio::spawn(async move {
             run_persistence_worker(runtime, store, health, persistence_shutdown_rx).await;
+        })
+    });
+
+    // Periodically prune old history entries according to the configured retention policy.
+    let prune_task = device_store.clone().map(|store| {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                if let Err(e) = store.prune_history().await {
+                    tracing::warn!("history pruning failed: {e:#}");
+                }
+            }
         })
     });
 
@@ -822,12 +951,33 @@ async fn main() -> Result<()> {
 
     health.mark_startup_complete();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .context("API server failed")?;
+    // Spawn the HTTP server so we can race it against a drain timeout after the
+    // shutdown signal fires.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = drain_rx.await;
+            })
+            .await
+    });
+
+    shutdown_signal().await;
+    tracing::info!(
+        "shutdown signal received, draining in-flight requests ({}s timeout)...",
+        SHUTDOWN_DRAIN_SECS
+    );
+    let _ = drain_tx.send(());
+
+    match tokio::time::timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECS), server_task).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => return Err(anyhow::Error::from(e)).context("API server failed"),
+        Ok(Err(join_err)) => tracing::error!("server task panicked: {join_err}"),
+        Err(_elapsed) => tracing::warn!(
+            "graceful drain timed out after {}s, forcing exit",
+            SHUTDOWN_DRAIN_SECS
+        ),
+    }
 
     runtime_task.abort();
     let _ = runtime_task.await;
@@ -836,6 +986,11 @@ async fn main() -> Result<()> {
     let _ = automation_task.await;
 
     if let Some(task) = watcher_task {
+        task.abort();
+        let _ = task.await;
+    }
+
+    if let Some(task) = prune_task {
         task.abort();
         let _ = task.await;
     }
@@ -883,9 +1038,50 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
     Ok((adapters, summaries))
 }
 
-async fn create_device_store(config: &Config) -> Result<Option<Arc<dyn DeviceStore>>> {
+/// Rewrites a relative `sqlite://` path using `SMART_HOME_DATA_DIR` when set.
+///
+/// If the path component of the URL is already absolute (starts with `/`) or the
+/// env var is not set, the URL is returned unchanged.  When the env var is set
+/// the parent directory tree is created so sqlx can open the database file
+/// without requiring it to pre-exist.
+fn resolve_database_url(url: &str, auto_create: bool) -> Result<String> {
+    let data_dir = std::env::var("SMART_HOME_DATA_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    let resolved = if let Some(ref data_dir) = data_dir {
+        let path_part = url.strip_prefix("sqlite://").unwrap_or(url);
+        if path_part.starts_with('/') {
+            // Already absolute — nothing to do.
+            url.to_string()
+        } else {
+            let full = std::path::Path::new(data_dir).join(path_part);
+            format!("sqlite://{}", full.display())
+        }
+    } else {
+        url.to_string()
+    };
+
+    // Ensure the parent directory exists when auto_create is requested.
+    if auto_create {
+        let path_part = resolved.strip_prefix("sqlite://").unwrap_or(&resolved);
+        if let Some(parent) = std::path::Path::new(path_part).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create data directory '{}'", parent.display())
+                })?;
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+async fn create_device_store(
+    config: &Config,
+) -> Result<(Option<Arc<dyn DeviceStore>>, Option<Arc<dyn ApiKeyStore>>)> {
     if !config.persistence.enabled {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let database_url = config
@@ -894,30 +1090,69 @@ async fn create_device_store(config: &Config) -> Result<Option<Arc<dyn DeviceSto
         .as_deref()
         .context("persistence.database_url is required when persistence is enabled")?;
 
-    let store: Arc<dyn DeviceStore> = match config.persistence.backend {
-        PersistenceBackend::Sqlite => Arc::new(
-            SqliteDeviceStore::new_with_history(
-                database_url,
-                config.persistence.auto_create,
-                SqliteHistoryConfig {
-                    enabled: config.persistence.history.enabled,
-                    retention: config
-                        .persistence
-                        .history
-                        .retention_days
-                        .map(|days| Duration::from_secs(days.saturating_mul(24 * 60 * 60))),
-                    selection: history_selection_from_config(config),
-                },
-            )
-            .await
-            .with_context(|| format!("failed to initialize SQLite store '{database_url}'"))?,
-        ),
-        PersistenceBackend::Postgres => {
-            anyhow::bail!("persistence backend 'postgres' is not implemented yet")
-        }
-    };
+    let database_url = resolve_database_url(database_url, config.persistence.auto_create)
+        .context("failed to resolve database URL")?;
 
-    Ok(Some(store))
+    match config.persistence.backend {
+        PersistenceBackend::Sqlite => {
+            let store: Arc<SqliteDeviceStore> = Arc::new(
+                SqliteDeviceStore::new_with_history(
+                    &database_url,
+                    config.persistence.auto_create,
+                    SqliteHistoryConfig {
+                        enabled: config.persistence.history.enabled,
+                        retention: config
+                            .persistence
+                            .history
+                            .retention_days
+                            .map(|days| Duration::from_secs(days.saturating_mul(24 * 60 * 60))),
+                        selection: history_selection_from_config(config),
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to initialize SQLite store '{database_url}'")
+                })?,
+            );
+            Ok((
+                Some(store.clone() as Arc<dyn DeviceStore>),
+                Some(store as Arc<dyn ApiKeyStore>),
+            ))
+        }
+        PersistenceBackend::Postgres => {
+            let selection = if config.telemetry.enabled {
+                PgHistorySelection {
+                    device_ids: config.telemetry.selection.device_ids.clone(),
+                    capabilities: config.telemetry.selection.capabilities.clone(),
+                    adapter_names: config.telemetry.selection.adapter_names.clone(),
+                }
+            } else {
+                PgHistorySelection::default()
+            };
+            let history_config = PostgresHistoryConfig {
+                enabled: config.persistence.history.enabled,
+                retention: config.persistence.history.retention_days.map(|days| {
+                    Duration::from_secs(days.saturating_mul(24 * 60 * 60))
+                }),
+                selection,
+            };
+            let store: Arc<PostgresDeviceStore> = Arc::new(
+                PostgresDeviceStore::new_with_history(
+                    &database_url,
+                    config.persistence.auto_create,
+                    history_config,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to initialize PostgreSQL store '{database_url}'")
+                })?,
+            );
+            Ok((
+                Some(store.clone() as Arc<dyn DeviceStore>),
+                Some(store as Arc<dyn ApiKeyStore>),
+            ))
+        }
+    }
 }
 
 fn history_selection_from_config(config: &Config) -> HistorySelection {
@@ -949,13 +1184,17 @@ fn build_automation_runner(
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
     store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
+    backstop_timeout: Duration,
 ) -> AutomationRunner {
     let runner = if let Some(observer) = observer {
         AutomationRunner::new(catalog)
             .with_observer(observer)
             .with_trigger_context(trigger_context)
+            .with_backstop_timeout(backstop_timeout)
     } else {
-        AutomationRunner::new(catalog).with_trigger_context(trigger_context)
+        AutomationRunner::new(catalog)
+            .with_trigger_context(trigger_context)
+            .with_backstop_timeout(backstop_timeout)
     };
 
     if let Some(store) = store {
@@ -973,6 +1212,8 @@ fn make_state(
     trigger_context: TriggerContext,
     health: HealthState,
     store: Option<Arc<dyn DeviceStore>>,
+    auth_key_store: Option<Arc<dyn ApiKeyStore>>,
+    master_key_hash: String,
     history: HistorySettings,
     scenes_enabled: bool,
     automations_enabled: bool,
@@ -992,6 +1233,7 @@ fn make_state(
         observer.clone(),
         store.clone(),
         trigger_context,
+        Duration::from_secs(3600),
     );
     let control = Arc::new(runner.controller());
     let (automation_runner_tx, _automation_runner_rx) = watch::channel(runner);
@@ -1006,6 +1248,8 @@ fn make_state(
         trigger_context,
         health,
         store,
+        auth_key_store,
+        master_key_hash,
         history,
         scenes_enabled,
         automations_enabled,
@@ -1019,6 +1263,7 @@ fn make_state(
             .as_ref()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default(),
+        backstop_timeout: Duration::from_secs(3600),
     }
 }
 
@@ -1052,6 +1297,7 @@ fn reload_controller_from_state(state: &AppState) -> ReloadController {
         store: state.store.clone(),
         trigger_context: state.trigger_context,
         runtime: state.runtime.clone(),
+        backstop_timeout: state.backstop_timeout,
     }
 }
 
@@ -1200,6 +1446,7 @@ fn reload_automations_internal(
                 controller.automation_observer.clone(),
                 controller.store.clone(),
                 controller.trigger_context,
+                controller.backstop_timeout,
             );
             let next_controller = Arc::new(runner.controller());
 
@@ -1737,39 +1984,170 @@ async fn reconcile_device_store(
     Ok(())
 }
 
+/// Validate `path` and resolve it to a concrete filesystem `PathBuf`.
+///
+/// `path` must be in the form `{type}/{filename}` where:
+/// - `{type}` is one of `scenes`, `automations`, `scripts`
+/// - `{filename}` has a `.lua` extension
+/// - No component is `..`
+fn resolve_lua_path(state: &AppState, path: &str) -> Result<(PathBuf, &'static str), ApiError> {
+    // Guard against path traversal at the raw string level.
+    for component in path.split('/') {
+        if component == ".." || component == "." {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "path traversal is not allowed",
+            ));
+        }
+    }
+
+    let (type_prefix, rest) = path.split_once('/').ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "path must be in the form {type}/{filename} (e.g. scenes/my-scene.lua)",
+        )
+    })?;
+
+    if rest.is_empty() || rest.contains('/') {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "path must be a single filename inside a type directory",
+        ));
+    }
+
+    if !rest.ends_with(".lua") {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "only .lua files are allowed",
+        ));
+    }
+
+    let (base_dir, file_type): (&str, &'static str) = match type_prefix {
+        "scenes" => (&state.scenes_directory, "scenes"),
+        "automations" => (&state.automations_directory, "automations"),
+        "scripts" => (&state.scripts_directory, "scripts"),
+        other => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("unknown file type '{other}'; must be scenes, automations, or scripts"),
+            ));
+        }
+    };
+
+    Ok((PathBuf::from(base_dir).join(rest), file_type))
+}
+
+/// Collect all `.lua` files from a directory as `FileEntry` values.
+fn collect_lua_entries(dir: &str, file_type: &'static str) -> Vec<FileEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut result: Vec<FileEntry> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.path().is_file()
+                && entry.path().extension().and_then(|ext| ext.to_str()) == Some("lua")
+        })
+        .filter_map(|entry| {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            Some(FileEntry {
+                path: format!("{file_type}/{filename}"),
+                file_type,
+            })
+        })
+        .collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    result
+}
+
+async fn list_files(State(state): State<AppState>) -> Json<Vec<FileEntry>> {
+    let mut entries = Vec::new();
+    if !state.scenes_directory.is_empty() {
+        entries.extend(collect_lua_entries(&state.scenes_directory, "scenes"));
+    }
+    if !state.automations_directory.is_empty() {
+        entries.extend(collect_lua_entries(
+            &state.automations_directory,
+            "automations",
+        ));
+    }
+    if !state.scripts_directory.is_empty() {
+        entries.extend(collect_lua_entries(&state.scripts_directory, "scripts"));
+    }
+    Json(entries)
+}
+
+async fn get_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (full_path, _file_type) = resolve_lua_path(&state, &path)?;
+
+    let content = tokio::fs::read_to_string(&full_path).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ApiError::not_found(format!("file '{path}' not found"))
+        } else {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read file '{path}': {err}"),
+            )
+        }
+    })?;
+
+    Ok(content)
+}
+
+async fn put_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Json(body): Json<PutFileRequest>,
+) -> Result<StatusCode, ApiError> {
+    let (full_path, _file_type) = resolve_lua_path(&state, &path)?;
+
+    // Ensure the parent directory exists.
+    if let Some(parent) = full_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create directory for '{path}': {err}"),
+            )
+        })?;
+    }
+
+    tokio::fs::write(&full_path, body.content.as_bytes())
+        .await
+        .map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to write file '{path}': {err}"),
+            )
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn app(state: AppState, config: &Config) -> Router {
-    Router::new()
+    // Public — no authentication required.
+    let public_routes = Router::new()
         .route("/health", get(health))
-        .route("/ready", get(ready))
+        .route("/ready", get(ready));
+
+    // Read — bearer token with at least `read` role.
+    let read_routes = Router::new()
         .route("/adapters", get(adapters))
         .route("/adapters/{id}", get(get_adapter))
         .route("/capabilities", get(list_capabilities))
-        .route("/diagnostics", get(diagnostics))
-        .route("/diagnostics/reload_watch", get(reload_watch_diagnostics))
         .route("/scenes", get(list_scenes))
-        .route("/scenes/reload", post(reload_scenes))
-        .route("/automations", get(list_automations))
-        .route("/automations/reload", post(reload_automations))
-        .route("/scripts/reload", post(reload_scripts))
-        .route("/automations/{id}", get(get_automation))
-        .route("/automations/{id}/enabled", post(set_automation_enabled))
-        .route("/automations/{id}/validate", post(validate_automation))
-        .route(
-            "/automations/{id}/execute",
-            post(execute_automation_manually),
-        )
         .route("/scenes/{id}/history", get(get_scene_history))
-        .route("/scenes/{id}/execute", post(execute_scene))
+        .route("/automations", get(list_automations))
+        .route("/automations/{id}", get(get_automation))
         .route("/automations/{id}/history", get(get_automation_history))
-        .route("/rooms", get(list_rooms).post(create_room))
-        .route("/rooms/{id}", get(get_room).delete(delete_room))
+        .route("/rooms", get(list_rooms))
+        .route("/rooms/{id}", get(get_room))
         .route("/rooms/{id}/devices", get(list_room_devices))
-        .route("/rooms/{id}/command", post(command_room_devices))
-        .route("/groups", get(list_groups).post(create_group))
-        .route("/groups/{id}", get(get_group).delete(delete_group))
+        .route("/groups", get(list_groups))
+        .route("/groups/{id}", get(get_group))
         .route("/groups/{id}/devices", get(list_group_devices))
-        .route("/groups/{id}/members", post(set_group_members))
-        .route("/groups/{id}/command", post(command_group_devices))
         .route("/devices", get(list_devices))
         .route("/devices/{id}", get(get_device))
         .route("/devices/{id}/history", get(get_device_history))
@@ -1778,10 +2156,106 @@ fn app(state: AppState, config: &Config) -> Router {
             get(get_attribute_history),
         )
         .route("/audit/commands", get(get_command_audit))
+        .route("/events", get(events))
+        .route_layer({
+            let s = state.clone();
+            middleware::from_fn(move |req: Request, next: Next| {
+                let s = s.clone();
+                async move { check_auth(s, req, next, ApiKeyRole::Read).await }
+            })
+        });
+
+    // Write — bearer token with at least `write` role.
+    let rate_limiter: Option<SharedRateLimit> =
+        config.api.rate_limit.enabled.then(|| {
+            SharedRateLimit::new(
+                config.api.rate_limit.requests_per_second,
+                config.api.rate_limit.burst_size,
+            )
+        });
+    let write_routes = Router::new()
+        .route("/rooms", post(create_room))
+        .route("/rooms/{id}", delete(delete_room))
+        .route("/rooms/{id}/command", post(command_room_devices))
         .route("/devices/{id}/room", post(assign_device_room))
         .route("/devices/{id}/command", post(command_device))
-        .route("/events", get(events))
+        .route("/groups", post(create_group))
+        .route("/groups/{id}", delete(delete_group))
+        .route("/groups/{id}/members", post(set_group_members))
+        .route("/groups/{id}/command", post(command_group_devices))
+        .route("/scenes/{id}/execute", post(execute_scene))
+        .route("/automations/{id}/enabled", post(set_automation_enabled))
+        .route(
+            "/automations/{id}/execute",
+            post(execute_automation_manually),
+        )
+        .route("/automations/{id}/validate", post(validate_automation))
+        .route_layer(middleware::from_fn(move |req: Request, next: Next| {
+            let rate_limiter = rate_limiter.clone();
+            async move {
+                if let Some(limiter) = &rate_limiter {
+                    if !limiter.try_acquire() {
+                        return (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            "rate limit exceeded",
+                        )
+                            .into_response();
+                    }
+                }
+                next.run(req).await
+            }
+        }))
+        .route_layer({
+            let s = state.clone();
+            middleware::from_fn(move |req: Request, next: Next| {
+                let s = s.clone();
+                async move { check_auth(s, req, next, ApiKeyRole::Write).await }
+            })
+        });
+
+    // Admin — bearer token with `admin` role.
+    let admin_routes = Router::new()
+        .route("/diagnostics", get(diagnostics))
+        .route("/diagnostics/reload_watch", get(reload_watch_diagnostics))
+        .route("/scenes/reload", post(reload_scenes))
+        .route("/automations/reload", post(reload_automations))
+        .route("/scripts/reload", post(reload_scripts))
+        .route("/auth/keys", post(create_api_key).get(list_api_keys))
+        .route("/auth/keys/{id}", delete(delete_api_key))
+        .route_layer({
+            let s = state.clone();
+            middleware::from_fn(move |req: Request, next: Next| {
+                let s = s.clone();
+                async move { check_auth(s, req, next, ApiKeyRole::Admin).await }
+            })
+        });
+
+    // Automation — bearer token with `automation` or `admin` role.
+    let automation_routes = Router::new()
+        .route("/files", get(list_files))
+        .route("/files/{*path}", get(get_file).put(put_file))
+        .route_layer({
+            let s = state.clone();
+            middleware::from_fn(move |req: Request, next: Next| {
+                let s = s.clone();
+                async move { check_auth(s, req, next, ApiKeyRole::Automation).await }
+            })
+        });
+
+    let mut router = Router::new()
+        .merge(public_routes)
+        .merge(read_routes)
+        .merge(write_routes)
+        .merge(admin_routes)
+        .merge(automation_routes);
+
+    if config.dashboard.enabled {
+        router = router.nest_service("/dashboard", ServeDir::new(&config.dashboard.directory));
+    }
+
+    router
         .layer(cors_layer(config))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -1806,6 +2280,31 @@ fn cors_layer(config: &Config) -> CorsLayer {
         .allow_origin(AllowOrigin::list(allowed_origins))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+/// Resolves when `Ctrl+C` is pressed or a `SIGTERM` signal is received.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -1957,6 +2456,82 @@ async fn reload_scripts(State(state): State<AppState>) -> Result<Json<ReloadResp
         .await
         .map_err(|error| internal_api_error(anyhow::anyhow!(error.to_string())))?;
     Ok(Json(reload_response_from_result("scripts", result)))
+}
+
+async fn create_api_key(
+    State(state): State<AppState>,
+    Json(req): Json<CreateApiKeyRequest>,
+) -> Result<Json<CreateApiKeyResponse>, ApiError> {
+    let key_store = state
+        .auth_key_store
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "key store not available"))?;
+
+    let token: String = {
+        let bytes: [u8; 32] = rand::thread_rng().gen();
+        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    };
+    let token_hash = sha256_hex(&token);
+
+    let record = key_store
+        .create_api_key(&token_hash, &req.label, req.role)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(CreateApiKeyResponse {
+        id: record.id,
+        label: record.label,
+        role: record.role,
+        token,
+        created_at: record.created_at,
+    }))
+}
+
+async fn list_api_keys(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ApiKeyResponse>>, ApiError> {
+    let key_store = state
+        .auth_key_store
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "key store not available"))?;
+
+    let keys = key_store
+        .list_api_keys()
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(
+        keys.into_iter()
+            .map(|r| ApiKeyResponse {
+                id: r.id,
+                label: r.label,
+                role: r.role,
+                created_at: r.created_at,
+                last_used_at: r.last_used_at,
+            })
+            .collect(),
+    ))
+}
+
+async fn delete_api_key(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let key_store = state
+        .auth_key_store
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "key store not available"))?;
+
+    let deleted = key_store
+        .revoke_api_key(id)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!("api key {id} not found")))
+    }
 }
 
 async fn get_automation(
@@ -3088,6 +3663,13 @@ fn event_to_frame(event: Event) -> serde_json::Value {
 }
 
 fn config_path_from_args() -> Result<String> {
+    // Environment variable takes priority over the command-line flag.
+    if let Ok(path) = std::env::var("SMART_HOME_CONFIG") {
+        if !path.trim().is_empty() {
+            return Ok(path);
+        }
+    }
+
     let mut args = std::env::args().skip(1);
 
     match (args.next().as_deref(), args.next()) {
@@ -3109,6 +3691,76 @@ fn init_tracing(level: &str) -> Result<()> {
 
     tracing_subscriber::fmt().with_max_level(level).init();
     Ok(())
+}
+
+fn sha256_hex(input: &str) -> String {
+    let hash = Sha256::digest(input.as_bytes());
+    hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+async fn authenticate_token(state: &AppState, token: &str) -> Option<ApiKeyRole> {
+    let token_hash = sha256_hex(token);
+
+    // Check master key first.
+    if token_hash == state.master_key_hash {
+        return Some(ApiKeyRole::Admin);
+    }
+
+    // Fall through to stored API keys.
+    if let Some(key_store) = &state.auth_key_store {
+        if let Ok(Some(record)) = key_store.lookup_api_key_by_hash(&token_hash).await {
+            let key_store = key_store.clone();
+            let id = record.id;
+            tokio::spawn(async move {
+                let _ = key_store.touch_api_key(id).await;
+            });
+            return Some(record.role);
+        }
+    }
+
+    None
+}
+
+/// Extract the bearer token from a request as an owned `String`, so callers
+/// don't hold a `&Request` across any `.await` point.
+///
+/// Checks the `Authorization: Bearer <token>` header first, then falls back to
+/// the `?token=<token>` query parameter.  The query-parameter fallback exists
+/// for browser WebSocket connections, which cannot set custom headers.
+fn extract_bearer_token(req: &Request) -> Option<String> {
+    // Authorization header takes precedence.
+    if let Some(token) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_owned())
+    {
+        return Some(token);
+    }
+
+    // Fall back to ?token= query parameter (browser WebSocket connections
+    // cannot set the Authorization header).
+    req.uri().query().and_then(|query| {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token=").map(|v| v.to_owned()))
+    })
+}
+
+async fn check_auth(state: AppState, req: Request, next: Next, required: ApiKeyRole) -> Response {
+    // Extract the token into an owned String before any `.await` so that no
+    // `&Request` is held across an await point (Body: !Sync makes &Request: !Send).
+    let token = extract_bearer_token(&req);
+    let role = match token {
+        None => None,
+        Some(t) => authenticate_token(&state, &t).await,
+    };
+    match role {
+        Some(role) if role.satisfies(required) => next.run(req).await,
+        Some(_) => ApiError::new(StatusCode::FORBIDDEN, "insufficient permissions").into_response(),
+        None => ApiError::new(StatusCode::UNAUTHORIZED, "authentication required").into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -3141,6 +3793,37 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use super::*;
+
+    const TEST_MASTER_KEY: &str = "smart-home-test-key-for-tests-only";
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .default_headers({
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {TEST_MASTER_KEY}"))
+                        .expect("valid header value"),
+                );
+                headers
+            })
+            .build()
+            .expect("test client builds")
+    }
+
+    /// Build a WebSocket `connect_async` request that includes the test master-key
+    /// bearer token, so it passes the auth middleware on the `/events` route.
+    fn authed_ws_request(url: &str) -> tokio_tungstenite::tungstenite::http::Request<()> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut req = url.into_client_request().expect("valid ws url");
+        req.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            format!("Bearer {TEST_MASTER_KEY}")
+                .parse()
+                .expect("valid auth header value"),
+        );
+        req
+    }
 
     struct MockResponse {
         status_line: &'static str,
@@ -3519,6 +4202,10 @@ mod tests {
                 .insert(state.automation_id.clone(), state.clone());
             Ok(())
         }
+
+        async fn prune_history(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -3669,6 +4356,7 @@ mod tests {
             api: smart_home_core::config::ApiConfig {
                 bind_address: "127.0.0.1:3001".to_string(),
                 cors: smart_home_core::config::ApiCorsConfig::default(),
+                rate_limit: smart_home_core::config::RateLimitConfig::default(),
             },
             locale: smart_home_core::config::LocaleConfig::default(),
             logging: smart_home_core::config::LoggingConfig {
@@ -3686,6 +4374,10 @@ mod tests {
             scripts: smart_home_core::config::ScriptsConfig::default(),
             telemetry: smart_home_core::config::TelemetryConfig::default(),
             adapters: adapters.into_iter().collect(),
+            auth: smart_home_core::config::AuthConfig {
+                master_key: TEST_MASTER_KEY.to_string(),
+            },
+            dashboard: smart_home_core::config::DashboardConfig::default(),
         }
     }
 
@@ -3740,12 +4432,152 @@ mod tests {
                 TriggerContext::default(),
                 test_health(&["open_meteo"]),
                 None,
+                None,
+                sha256_hex(TEST_MASTER_KEY),
                 history_settings(false),
                 config.scenes.enabled,
                 config.automations.enabled,
                 config.scenes.directory.clone(),
                 config.automations.directory.clone(),
                 scripts_root,
+            ),
+            &config,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        (addr, shutdown_tx, handle)
+    }
+
+    async fn spawn_test_server(
+        runtime: Arc<Runtime>,
+    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let automations = Arc::new(AutomationCatalog::empty());
+        let config = test_config(serde_json::Map::new());
+        let app = app(
+            make_state(
+                runtime,
+                empty_scenes(),
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                None,
+                None,
+                sha256_hex(TEST_MASTER_KEY),
+                history_settings(false),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                config
+                    .scripts
+                    .enabled
+                    .then(|| PathBuf::from(&config.scripts.directory)),
+            ),
+            &config,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        (addr, shutdown_tx, handle)
+    }
+
+    async fn spawn_test_server_with_scenes(
+        runtime: Arc<Runtime>,
+        scenes: SceneRunner,
+    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let automations = Arc::new(AutomationCatalog::empty());
+        let config = test_config(serde_json::Map::new());
+        let app = app(
+            make_state(
+                runtime,
+                scenes,
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                None,
+                None,
+                sha256_hex(TEST_MASTER_KEY),
+                history_settings(false),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                config
+                    .scripts
+                    .enabled
+                    .then(|| PathBuf::from(&config.scripts.directory)),
+            ),
+            &config,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
+
+        (addr, shutdown_tx, handle)
+    }
+
+    async fn spawn_test_server_with_store(
+        runtime: Arc<Runtime>,
+        store: Arc<dyn DeviceStore>,
+        history_enabled: bool,
+    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let automations = Arc::new(AutomationCatalog::empty());
+        let config = test_config(serde_json::Map::new());
+        let app = app(
+            make_state(
+                runtime,
+                empty_scenes(),
+                automations.clone(),
+                TriggerContext::default(),
+                test_health(&["open_meteo"]),
+                Some(store),
+                None,
+                sha256_hex(TEST_MASTER_KEY),
+                history_settings(history_enabled),
+                config.scenes.enabled,
+                config.automations.enabled,
+                config.scenes.directory.clone(),
+                config.automations.directory.clone(),
+                config
+                    .scripts
+                    .enabled
+                    .then(|| PathBuf::from(&config.scripts.directory)),
             ),
             &config,
         );
@@ -3845,138 +4677,6 @@ mod tests {
         runtime
     }
 
-    async fn spawn_test_server(
-        runtime: Arc<Runtime>,
-    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-        let automations = Arc::new(AutomationCatalog::empty());
-        let config = test_config(serde_json::Map::new());
-        let app = app(
-            make_state(
-                runtime,
-                empty_scenes(),
-                automations.clone(),
-                TriggerContext::default(),
-                test_health(&["open_meteo"]),
-                None,
-                history_settings(false),
-                config.scenes.enabled,
-                config.automations.enabled,
-                config.scenes.directory.clone(),
-                config.automations.directory.clone(),
-                config
-                    .scripts
-                    .enabled
-                    .then(|| PathBuf::from(&config.scripts.directory)),
-            ),
-            &config,
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("read test listener address");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("test server exits cleanly");
-        });
-
-        (addr, shutdown_tx, handle)
-    }
-
-    async fn spawn_test_server_with_scenes(
-        runtime: Arc<Runtime>,
-        scenes: SceneRunner,
-    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-        let automations = Arc::new(AutomationCatalog::empty());
-        let config = test_config(serde_json::Map::new());
-        let app = app(
-            make_state(
-                runtime,
-                scenes,
-                automations.clone(),
-                TriggerContext::default(),
-                test_health(&["open_meteo"]),
-                None,
-                history_settings(false),
-                config.scenes.enabled,
-                config.automations.enabled,
-                config.scenes.directory.clone(),
-                config.automations.directory.clone(),
-                config
-                    .scripts
-                    .enabled
-                    .then(|| PathBuf::from(&config.scripts.directory)),
-            ),
-            &config,
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("read test listener address");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("test server exits cleanly");
-        });
-
-        (addr, shutdown_tx, handle)
-    }
-
-    async fn spawn_test_server_with_store(
-        runtime: Arc<Runtime>,
-        store: Arc<dyn DeviceStore>,
-        history_enabled: bool,
-    ) -> (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-        let automations = Arc::new(AutomationCatalog::empty());
-        let config = test_config(serde_json::Map::new());
-        let app = app(
-            make_state(
-                runtime,
-                empty_scenes(),
-                automations.clone(),
-                TriggerContext::default(),
-                test_health(&["open_meteo"]),
-                Some(store),
-                history_settings(history_enabled),
-                config.scenes.enabled,
-                config.automations.enabled,
-                config.scenes.directory.clone(),
-                config.automations.directory.clone(),
-                config
-                    .scripts
-                    .enabled
-                    .then(|| PathBuf::from(&config.scripts.directory)),
-            ),
-            &config,
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("read test listener address");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("test server exits cleanly");
-        });
-
-        (addr, shutdown_tx, handle)
-    }
-
     fn write_temp_scene_dir(files: &[(&str, &str)]) -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4006,7 +4706,9 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!("http://{addr}/health"))
+        let response = test_client()
+            .get(format!("http://{addr}/health"))
+            .send()
             .await
             .expect("health request succeeds");
 
@@ -4016,7 +4718,9 @@ mod tests {
         assert_eq!(body["ready"], true);
         assert_eq!(body["runtime"]["status"], "ok");
 
-        let ready = reqwest::get(format!("http://{addr}/ready"))
+        let ready = test_client()
+            .get(format!("http://{addr}/ready"))
+            .send()
             .await
             .expect("ready request succeeds");
         assert_eq!(ready.status(), StatusCode::OK);
@@ -4104,7 +4808,9 @@ mod tests {
             .expect("valid test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!("http://{addr}/devices"))
+        let response = test_client()
+            .get(format!("http://{addr}/devices"))
+            .send()
             .await
             .expect("devices request succeeds");
 
@@ -4130,7 +4836,7 @@ mod tests {
         config.api.cors.allowed_origins = vec!["http://127.0.0.1:8080".to_string()];
         let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .get(format!("http://{addr}/devices"))
             .header("Origin", "http://127.0.0.1:8080")
             .send()
@@ -4163,7 +4869,7 @@ mod tests {
         config.api.cors.allowed_origins = vec!["http://127.0.0.1:8080".to_string()];
         let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
 
-        let denied = reqwest::Client::new()
+        let denied = test_client()
             .get(format!("http://{addr}/devices"))
             .header("Origin", "http://evil.example")
             .send()
@@ -4174,7 +4880,7 @@ mod tests {
             .get("access-control-allow-origin")
             .is_none());
 
-        let preflight = reqwest::Client::new()
+        let preflight = test_client()
             .request(reqwest::Method::OPTIONS, format!("http://{addr}/devices"))
             .header("Origin", "http://127.0.0.1:8080")
             .header("Access-Control-Request-Method", "GET")
@@ -4223,11 +4929,13 @@ mod tests {
             .expect("second test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!(
-            "http://{addr}/devices?ids=test:second&ids=test:first"
-        ))
-        .await
-        .expect("filtered devices request succeeds");
+        let response = test_client()
+            .get(format!(
+                "http://{addr}/devices?ids=test:second&ids=test:first"
+            ))
+            .send()
+            .await
+            .expect("filtered devices request succeeds");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response
@@ -4265,11 +4973,13 @@ mod tests {
             .expect("valid test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!(
-            "http://{addr}/devices?ids=missing&ids=test:device&ids=test:device"
-        ))
-        .await
-        .expect("filtered devices request succeeds");
+        let response = test_client()
+            .get(format!(
+                "http://{addr}/devices?ids=missing&ids=test:device&ids=test:device"
+            ))
+            .send()
+            .await
+            .expect("filtered devices request succeeds");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response
@@ -4303,7 +5013,7 @@ mod tests {
             .expect("valid test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let client = reqwest::Client::new();
+        let client = test_client();
         let create = client
             .post(format!("http://{addr}/rooms"))
             .json(&json!({ "id": "outside", "name": "Outside" }))
@@ -4324,7 +5034,9 @@ mod tests {
             "outside"
         );
 
-        let rooms = reqwest::get(format!("http://{addr}/rooms"))
+        let rooms = test_client()
+            .get(format!("http://{addr}/rooms"))
+            .send()
             .await
             .expect("rooms request succeeds")
             .json::<Value>()
@@ -4332,7 +5044,9 @@ mod tests {
             .expect("rooms json body");
         assert_eq!(rooms.as_array().expect("rooms array").len(), 1);
 
-        let room_devices = reqwest::get(format!("http://{addr}/rooms/outside/devices"))
+        let room_devices = test_client()
+            .get(format!("http://{addr}/rooms/outside/devices"))
+            .send()
             .await
             .expect("room devices request succeeds")
             .json::<Value>()
@@ -4376,7 +5090,7 @@ mod tests {
             .expect("device exists");
         let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .delete(format!("http://{addr}/rooms/outside"))
             .send()
             .await
@@ -4442,7 +5156,7 @@ mod tests {
 
         let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .post(format!("http://{addr}/rooms/outside/command"))
             .json(&json!({
                 "capability": "brightness",
@@ -4496,7 +5210,7 @@ mod tests {
             .expect("device-b upsert succeeds");
 
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let create = client
             .post(format!("http://{addr}/groups"))
@@ -4510,7 +5224,9 @@ mod tests {
             .expect("create group request succeeds");
         assert_eq!(create.status(), StatusCode::OK);
 
-        let groups = reqwest::get(format!("http://{addr}/groups"))
+        let groups = test_client()
+            .get(format!("http://{addr}/groups"))
+            .send()
             .await
             .expect("groups request succeeds")
             .json::<Value>()
@@ -4581,7 +5297,7 @@ mod tests {
             .expect("group upsert succeeds");
 
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let updated = client
             .post(format!("http://{addr}/groups/bedroom_lamps/members"))
@@ -4624,7 +5340,9 @@ mod tests {
         );
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime, scenes).await;
 
-        let response = reqwest::get(format!("http://{addr}/scenes"))
+        let response = test_client()
+            .get(format!("http://{addr}/scenes"))
+            .send()
             .await
             .expect("scenes request succeeds");
 
@@ -4681,6 +5399,8 @@ mod tests {
                 trigger_context: TriggerContext::default(),
                 health: test_health(&["open_meteo"]),
                 store: None,
+                auth_key_store: None,
+                master_key_hash: sha256_hex(TEST_MASTER_KEY),
                 history: history_settings(false),
                 scenes_enabled: false,
                 automations_enabled: true,
@@ -4691,6 +5411,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -4708,7 +5429,9 @@ mod tests {
                 .expect("test server exits cleanly");
         });
 
-        let response = reqwest::get(format!("http://{addr}/automations"))
+        let response = test_client()
+            .get(format!("http://{addr}/automations"))
+            .send()
             .await
             .expect("automations request succeeds");
 
@@ -4724,7 +5447,9 @@ mod tests {
         assert_eq!(body[0]["status"], "enabled");
         assert!(body[0]["last_run"].is_null());
 
-        let detail = reqwest::get(format!("http://{addr}/automations/rain_check"))
+        let detail = test_client()
+            .get(format!("http://{addr}/automations/rain_check"))
+            .send()
             .await
             .expect("automation detail request succeeds");
         assert_eq!(detail.status(), StatusCode::OK);
@@ -4826,6 +5551,8 @@ mod tests {
                 trigger_context: TriggerContext::default(),
                 health: test_health(&["open_meteo"]),
                 store: None,
+                auth_key_store: None,
+                master_key_hash: sha256_hex(TEST_MASTER_KEY),
                 history: history_settings(false),
                 scenes_enabled: false,
                 automations_enabled: true,
@@ -4836,6 +5563,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -4853,7 +5581,7 @@ mod tests {
                 .expect("test server exits cleanly");
         });
 
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let disable = client
             .post(format!("http://{addr}/automations/rain_check/enabled"))
@@ -4953,7 +5681,7 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let scene_reload = client
             .post(format!("http://{addr}/scenes/reload"))
@@ -5020,7 +5748,9 @@ mod tests {
             .expect("valid test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let capabilities = reqwest::get(format!("http://{addr}/capabilities"))
+        let capabilities = test_client()
+            .get(format!("http://{addr}/capabilities"))
+            .send()
             .await
             .expect("capabilities request succeeds");
         assert_eq!(capabilities.status(), StatusCode::OK);
@@ -5056,7 +5786,9 @@ mod tests {
         );
         assert!(capability_body["ownership"]["rules"].is_array());
 
-        let diagnostics = reqwest::get(format!("http://{addr}/diagnostics"))
+        let diagnostics = test_client()
+            .get(format!("http://{addr}/diagnostics"))
+            .send()
             .await
             .expect("diagnostics request succeeds");
         assert_eq!(diagnostics.status(), StatusCode::OK);
@@ -5100,6 +5832,8 @@ mod tests {
                 trigger_context: TriggerContext::default(),
                 health,
                 store: None,
+                auth_key_store: None,
+                master_key_hash: sha256_hex(TEST_MASTER_KEY),
                 history: history_settings(false),
                 scenes_enabled: false,
                 automations_enabled: false,
@@ -5110,6 +5844,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -5127,7 +5862,9 @@ mod tests {
                 .expect("test server exits cleanly");
         });
 
-        let response = reqwest::get(format!("http://{addr}/adapters/open_meteo"))
+        let response = test_client()
+            .get(format!("http://{addr}/adapters/open_meteo"))
+            .send()
             .await
             .expect("adapter detail request succeeds");
 
@@ -5176,7 +5913,7 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
 
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let disable = client
             .post(format!("http://{addr}/automations/rain_check/enabled"))
@@ -5245,7 +5982,7 @@ mod tests {
         );
         let (addr, shutdown, handle) = spawn_test_server_with_scenes(runtime.clone(), scenes).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .post(format!("http://{addr}/scenes/set_brightness/execute"))
             .send()
             .await
@@ -5283,7 +6020,9 @@ mod tests {
         .await;
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!("http://{addr}/devices"))
+        let response = test_client()
+            .get(format!("http://{addr}/devices"))
+            .send()
             .await
             .expect("devices request succeeds");
 
@@ -5362,11 +6101,13 @@ mod tests {
 
         let (addr, shutdown, handle) = spawn_test_server_with_store(runtime, store, true).await;
 
-        let response = reqwest::get(format!(
-            "http://{addr}/devices/test:history/history?limit=1"
-        ))
-        .await
-        .expect("history request succeeds");
+        let response = test_client()
+            .get(format!(
+                "http://{addr}/devices/test:history/history?limit=1"
+            ))
+            .send()
+            .await
+            .expect("history request succeeds");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.json::<Value>().await.expect("history json body");
@@ -5435,7 +6176,7 @@ mod tests {
 
         let (addr, shutdown, handle) = spawn_test_server_with_store(runtime, store, true).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .get(format!(
                 "http://{addr}/devices/test:history/history/{TEMPERATURE_OUTDOOR}"
             ))
@@ -5497,7 +6238,7 @@ mod tests {
         let (addr, shutdown, handle) =
             spawn_test_server_with_store(runtime.clone(), store.clone(), true).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .post(format!("http://{addr}/devices/test:device/command"))
             .json(&json!({
                 "capability": "brightness",
@@ -5524,7 +6265,9 @@ mod tests {
         .await
         .expect("command audit persists in time");
 
-        let audit = reqwest::get(format!("http://{addr}/audit/commands"))
+        let audit = test_client()
+            .get(format!("http://{addr}/audit/commands"))
+            .send()
             .await
             .expect("command audit request succeeds");
         assert_eq!(audit.status(), StatusCode::OK);
@@ -5606,6 +6349,8 @@ mod tests {
                 trigger_context: TriggerContext::default(),
                 health: test_health(&["open_meteo"]),
                 store: Some(store.clone()),
+                auth_key_store: None,
+                master_key_hash: sha256_hex(TEST_MASTER_KEY),
                 history: history_settings(true),
                 scenes_enabled: true,
                 automations_enabled: false,
@@ -5616,6 +6361,7 @@ mod tests {
                 scripts_watch: false,
                 scripts_enabled: false,
                 scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
             },
             &config,
         );
@@ -5633,7 +6379,7 @@ mod tests {
                 .expect("test server exits cleanly");
         });
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .post(format!("http://{addr}/scenes/set_brightness/execute"))
             .send()
             .await
@@ -5655,7 +6401,9 @@ mod tests {
         .await
         .expect("scene history persists in time");
 
-        let history = reqwest::get(format!("http://{addr}/scenes/set_brightness/history"))
+        let history = test_client()
+            .get(format!("http://{addr}/scenes/set_brightness/history"))
+            .send()
             .await
             .expect("scene history request succeeds");
         assert_eq!(history.status(), StatusCode::OK);
@@ -5777,7 +6525,9 @@ mod tests {
         .await
         .expect("automation history persists in time");
 
-        let response = reqwest::get(format!("http://{addr}/automations/rain_check/history"))
+        let response = test_client()
+            .get(format!("http://{addr}/automations/rain_check/history"))
+            .send()
             .await
             .expect("automation history request succeeds");
         assert_eq!(response.status(), StatusCode::OK);
@@ -5815,7 +6565,9 @@ mod tests {
             .expect("valid test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!("http://{addr}/devices/test:device/history"))
+        let response = test_client()
+            .get(format!("http://{addr}/devices/test:device/history"))
+            .send()
             .await
             .expect("history request succeeds");
 
@@ -5839,7 +6591,9 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::get(format!("http://{addr}/devices/nonexistent"))
+        let response = test_client()
+            .get(format!("http://{addr}/devices/nonexistent"))
+            .send()
             .await
             .expect("device request succeeds");
 
@@ -5872,7 +6626,7 @@ mod tests {
             .expect("test device exists");
         let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .post(format!("http://{addr}/devices/test:device/command"))
             .json(&json!({
                 "capability": "brightness",
@@ -5917,7 +6671,7 @@ mod tests {
             .expect("test device exists");
         let (addr, shutdown, handle) = spawn_test_server(runtime).await;
 
-        let response = reqwest::Client::new()
+        let response = test_client()
             .post(format!("http://{addr}/devices/test:device/command"))
             .json(&json!({
                 "capability": "brightness",
@@ -5956,7 +6710,7 @@ mod tests {
             .expect("valid test device upsert succeeds");
         let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{addr}/events"))
+        let (mut socket, _) = connect_async(authed_ws_request(&format!("ws://{addr}/events")))
             .await
             .expect("websocket connects");
 
@@ -6010,11 +6764,11 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{addr}/events"))
+        let (mut socket, _) = connect_async(authed_ws_request(&format!("ws://{addr}/events")))
             .await
             .expect("websocket connects");
 
-        let reload = reqwest::Client::new()
+        let reload = test_client()
             .post(format!("http://{addr}/scenes/reload"))
             .send()
             .await
@@ -6070,11 +6824,11 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{addr}/events"))
+        let (mut socket, _) = connect_async(authed_ws_request(&format!("ws://{addr}/events")))
             .await
             .expect("websocket connects");
 
-        let reload = reqwest::Client::new()
+        let reload = test_client()
             .post(format!("http://{addr}/scripts/reload"))
             .send()
             .await
@@ -6115,7 +6869,7 @@ mod tests {
         ));
         let (addr, shutdown, handle) = spawn_test_server(runtime.clone()).await;
 
-        let (socket, _) = connect_async(format!("ws://{addr}/events"))
+        let (socket, _) = connect_async(authed_ws_request(&format!("ws://{addr}/events")))
             .await
             .expect("websocket connects");
         drop(socket);
@@ -6141,7 +6895,11 @@ mod tests {
     async fn end_to_end_runtime_http_and_websocket_flow() {
         let server = MockServer::start(vec![MockResponse {
             status_line: "HTTP/1.1 200 OK",
-            body: "{\"current_weather\":{\"temperature\":18.25,\"windspeed\":11.5,\"winddirection\":225.0}}",
+            body: "{\"current\":{\"temperature_2m\":18.25,\"apparent_temperature\":16.0,\
+                   \"relative_humidity_2m\":62.0,\"precipitation\":0.0,\"cloud_cover\":25,\
+                   \"uv_index\":3.5,\"surface_pressure\":1012.0,\"wind_speed_10m\":11.5,\
+                   \"wind_gusts_10m\":18.0,\"wind_direction_10m\":225.0,\
+                   \"weather_code\":2,\"is_day\":1}}",
         }])
         .await;
 
@@ -6186,7 +6944,9 @@ mod tests {
         .await
         .expect("devices appear in registry within timeout");
 
-        let devices = reqwest::get(format!("http://{addr}/devices"))
+        let devices = test_client()
+            .get(format!("http://{addr}/devices"))
+            .send()
             .await
             .expect("devices request succeeds")
             .json::<Value>()
@@ -6205,7 +6965,7 @@ mod tests {
         assert!(device_ids.contains(&"open_meteo:wind_speed"));
         assert!(device_ids.contains(&"open_meteo:wind_direction"));
 
-        let (mut socket, _) = connect_async(format!("ws://{addr}/events"))
+        let (mut socket, _) = connect_async(authed_ws_request(&format!("ws://{addr}/events")))
             .await
             .expect("websocket connects");
 
@@ -6485,46 +7245,6 @@ mod tests {
     }
 
     #[test]
-    fn create_device_store_rejects_unimplemented_postgres_backend() {
-        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime creates");
-        let config = Config {
-            runtime: RuntimeConfig {
-                event_bus_capacity: 16,
-            },
-            api: smart_home_core::config::ApiConfig {
-                bind_address: "127.0.0.1:3001".to_string(),
-                cors: smart_home_core::config::ApiCorsConfig::default(),
-            },
-            locale: smart_home_core::config::LocaleConfig::default(),
-            logging: smart_home_core::config::LoggingConfig {
-                level: "info".to_string(),
-            },
-            persistence: smart_home_core::config::PersistenceConfig {
-                enabled: true,
-                backend: PersistenceBackend::Postgres,
-                database_url: Some("postgres://localhost/smart-home".to_string()),
-                auto_create: true,
-                history: HistoryConfig::default(),
-            },
-            scenes: smart_home_core::config::ScenesConfig::default(),
-            automations: smart_home_core::config::AutomationsConfig::default(),
-            scripts: smart_home_core::config::ScriptsConfig::default(),
-            telemetry: smart_home_core::config::TelemetryConfig::default(),
-            adapters: HashMap::new(),
-        };
-
-        let error = runtime
-            .block_on(create_device_store(&config))
-            .err()
-            .expect("postgres backend should not be implemented yet");
-
-        assert_eq!(
-            error.to_string(),
-            "persistence backend 'postgres' is not implemented yet"
-        );
-    }
-
-    #[test]
     fn temp_sqlite_url_points_to_temp_dir() {
         let url = temp_sqlite_url();
         assert!(url.starts_with("sqlite://"));
@@ -6572,5 +7292,182 @@ mod tests {
             error.to_string(),
             "no adapter factory registered for 'made_up_adapter'"
         );
+    }
+
+    // ── File API tests ────────────────────────────────────────────────────────
+
+    /// Spawn a test server with three writable temp dirs (scenes, automations,
+    /// scripts) that are pre-populated with the given files.
+    async fn spawn_test_server_for_files(
+        scenes_files: &[(&str, &str)],
+        automations_files: &[(&str, &str)],
+        scripts_files: &[(&str, &str)],
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let scenes_dir = write_temp_scene_dir(scenes_files);
+        let automations_dir = write_temp_automation_dir(automations_files);
+        let scripts_dir = write_temp_scene_dir(scripts_files);
+
+        let runtime = Arc::new(Runtime::new(
+            Vec::new(),
+            RuntimeConfig {
+                event_bus_capacity: 16,
+            },
+        ));
+        let mut config = test_config(serde_json::Map::new());
+        // The file API reads/writes files directly via the directory paths
+        // stored in AppState and works correctly without the catalogs being
+        // loaded.  Disable scene and automation loading so the server does not
+        // try to evaluate the placeholder Lua files (which are not valid scene
+        // or automation modules) and panic.
+        config.scenes.enabled = false;
+        config.scenes.directory = scenes_dir.to_string_lossy().to_string();
+        config.automations.enabled = false;
+        config.automations.directory = automations_dir.to_string_lossy().to_string();
+        // scripts.enabled = true so scripts_root is set and the scripts
+        // directory is propagated into AppState (no catalog loading happens
+        // for scripts, only a path is stored).
+        config.scripts.enabled = true;
+        config.scripts.directory = scripts_dir.to_string_lossy().to_string();
+
+        let (addr, shutdown, handle) = spawn_test_server_with_config(runtime, config).await;
+        (
+            addr,
+            shutdown,
+            handle,
+            scenes_dir,
+            automations_dir,
+            scripts_dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn file_api_lists_lua_files() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(
+            &[("wakeup.lua", "-- scene")],
+            &[("morning.lua", "-- automation")],
+            &[("helpers.lua", "-- helpers")],
+        )
+        .await;
+
+        let response = test_client()
+            .get(format!("http://{addr}/files"))
+            .send()
+            .await
+            .expect("list files request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .json::<Value>()
+            .await
+            .expect("list files json body");
+        let entries = body.as_array().expect("files array");
+
+        let paths: Vec<&str> = entries.iter().filter_map(|e| e["path"].as_str()).collect();
+        assert!(
+            paths.contains(&"scenes/wakeup.lua"),
+            "expected scenes/wakeup.lua in {paths:?}"
+        );
+        assert!(
+            paths.contains(&"automations/morning.lua"),
+            "expected automations/morning.lua in {paths:?}"
+        );
+        assert!(
+            paths.contains(&"scripts/helpers.lua"),
+            "expected scripts/helpers.lua in {paths:?}"
+        );
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_reads_file_content() {
+        let content = "-- this is the wakeup scene\nreturn {}";
+        let (addr, shutdown, handle, _, _, _) =
+            spawn_test_server_for_files(&[("wakeup.lua", content)], &[], &[]).await;
+
+        let response = test_client()
+            .get(format!("http://{addr}/files/scenes/wakeup.lua"))
+            .send()
+            .await
+            .expect("get file request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("get file text body");
+        assert_eq!(body, content);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_writes_and_reads_back() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(&[], &[], &[]).await;
+
+        let new_content = "return { id = 'test', name = 'Test' }";
+
+        let put = test_client()
+            .put(format!("http://{addr}/files/scenes/new.lua"))
+            .json(&json!({ "content": new_content }))
+            .send()
+            .await
+            .expect("put file request succeeds");
+        assert_eq!(put.status(), StatusCode::NO_CONTENT);
+
+        let get = test_client()
+            .get(format!("http://{addr}/files/scenes/new.lua"))
+            .send()
+            .await
+            .expect("get file request succeeds");
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(get.text().await.expect("get file text"), new_content);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_rejects_path_traversal() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(&[], &[], &[]).await;
+
+        // Use percent-encoded slashes (%2F) so that reqwest's URL parser does
+        // not normalise the ".." away before the request reaches the server.
+        // Axum's Path extractor decodes the segment back to "scenes/../etc/passwd.lua"
+        // and resolve_lua_path catches the ".." component → 400.
+        let response = test_client()
+            .get(format!(
+                "http://{addr}/files/scenes%2F..%2F..%2F..%2Fetc%2Fpasswd.lua"
+            ))
+            .send()
+            .await
+            .expect("traversal request completes");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
+    }
+
+    #[tokio::test]
+    async fn file_api_rejects_non_lua_extension() {
+        let (addr, shutdown, handle, _, _, _) = spawn_test_server_for_files(&[], &[], &[]).await;
+
+        let response = test_client()
+            .get(format!("http://{addr}/files/scenes/secret.txt"))
+            .send()
+            .await
+            .expect("non-lua request completes");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let _ = shutdown.send(());
+        handle.await.expect("server task completes");
     }
 }

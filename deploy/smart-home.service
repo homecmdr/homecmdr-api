@@ -1,0 +1,37 @@
+[Unit]
+Description=Smart Home automation server
+Documentation=https://github.com/anomalyco/smart-home
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smart-home
+Group=smart-home
+
+ExecStart=/usr/local/bin/smart-home
+Restart=on-failure
+RestartSec=5s
+
+# Configuration
+Environment=SMART_HOME_CONFIG=/etc/smart-home/default.toml
+Environment=SMART_HOME_DATA_DIR=/var/lib/smart-home
+
+# Override the master key without touching the config file:
+# EnvironmentFile=/etc/smart-home/secrets.env
+# (put SMART_HOME_MASTER_KEY=your-key-here in that file, mode 0600)
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/smart-home
+ReadOnlyPaths=/etc/smart-home
+
+# Allow binding to port 3001 (>1024 — no special capability needed).
+# If you move the bind address to a privileged port (<1024) add:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,8 @@ meta {
 
 post {
   url: {{baseUrl}}/devices/:id/room
+  body: json
+  auth: bearer
 }
 
 params:path {
@@ -16,10 +18,20 @@ headers {
   content-type: application/json
 }
 
-body {
+auth:bearer {
+  token: change-me-before-use
+}
+
+body:json {
   {
     "room_id": "{{roomId}}"
   }
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
+  deviceId: zigbee2mqtt:bedroom_lamp_left
+  roomId: bedroom
 }
 
 settings {

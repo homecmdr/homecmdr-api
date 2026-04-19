@@ -9,8 +9,9 @@ use smart_home_core::model::{
     RoomId,
 };
 use smart_home_core::store::{
-    AttributeHistoryEntry, AutomationExecutionHistoryEntry, AutomationRuntimeState,
-    CommandAuditEntry, DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
+    ApiKeyRecord, ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
+    AutomationRuntimeState, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
+    SceneExecutionHistoryEntry,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -157,6 +158,18 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 const SCHEMA_VERSION_V1: i64 = 1;
 const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
+const SCHEMA_VERSION_V4: i64 = 4;
+
+const CREATE_API_KEYS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_hash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+)
+"#;
 
 #[derive(Debug, Clone)]
 pub struct SqliteHistoryConfig {
@@ -242,6 +255,9 @@ impl SqliteDeviceStore {
         }
         if schema_version < 3 {
             self.migrate_to_v3().await?;
+        }
+        if schema_version < 4 {
+            self.migrate_to_v4().await?;
         }
 
         Ok(())
@@ -378,6 +394,28 @@ impl SqliteDeviceStore {
         Ok(())
     }
 
+    async fn migrate_to_v4(&self) -> Result<()> {
+        sqlx::query(CREATE_API_KEYS_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite api_keys table")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO schema_metadata (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+        )
+        .bind(SCHEMA_VERSION_KEY)
+        .bind(SCHEMA_VERSION_V4.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to write SQLite schema version")?;
+
+        Ok(())
+    }
+
     async fn load_persisted_device(&self, id: &DeviceId) -> Result<Option<Device>> {
         sqlx::query(
             r#"
@@ -472,11 +510,11 @@ impl SqliteDeviceStore {
             })?;
         }
 
-        self.prune_history().await?;
+        self.prune_history_impl().await?;
         Ok(())
     }
 
-    async fn prune_history(&self) -> Result<()> {
+    async fn prune_history_impl(&self) -> Result<()> {
         let Some(retention) = self.history.retention else {
             return Ok(());
         };
@@ -1086,6 +1124,91 @@ impl DeviceStore for SqliteDeviceStore {
 
         Ok(())
     }
+
+    async fn prune_history(&self) -> Result<()> {
+        self.prune_history_impl().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ApiKeyStore for SqliteDeviceStore {
+    async fn create_api_key(
+        &self,
+        key_hash: &str,
+        label: &str,
+        role: ApiKeyRole,
+    ) -> anyhow::Result<ApiKeyRecord> {
+        let now = Utc::now();
+        let role_str = api_key_role_to_str(role);
+
+        let result = sqlx::query(
+            "INSERT INTO api_keys (key_hash, label, role, created_at) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(key_hash)
+        .bind(label)
+        .bind(role_str)
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("failed to insert api key")?;
+
+        let id = result.last_insert_rowid();
+
+        let row = sqlx::query(
+            "SELECT id, key_hash, label, role, created_at, last_used_at FROM api_keys WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to load api key after insert")?;
+
+        api_key_from_row(row)
+    }
+
+    async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, key_hash, label, role, created_at, last_used_at FROM api_keys ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list api keys")?;
+
+        rows.into_iter().map(api_key_from_row).collect()
+    }
+
+    async fn revoke_api_key(&self, id: i64) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM api_keys WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("failed to revoke api key")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn lookup_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query(
+            "SELECT id, key_hash, label, role, created_at, last_used_at FROM api_keys WHERE key_hash = ?1",
+        )
+        .bind(key_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to lookup api key by hash")?;
+
+        row.map(api_key_from_row).transpose()
+    }
+
+    async fn touch_api_key(&self, id: i64) -> anyhow::Result<()> {
+        let now = Utc::now();
+        sqlx::query("UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2")
+            .bind(now.to_rfc3339())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("failed to update api key last_used_at")?;
+
+        Ok(())
+    }
 }
 
 fn sqlite_connect_options(database_url: &str, auto_create: bool) -> Result<SqliteConnectOptions> {
@@ -1315,6 +1438,55 @@ fn device_kind_from_str(value: &str) -> Result<DeviceKind> {
         "virtual" => Ok(DeviceKind::Virtual),
         other => anyhow::bail!("unsupported device kind '{other}'"),
     }
+}
+
+fn api_key_role_to_str(role: ApiKeyRole) -> &'static str {
+    match role {
+        ApiKeyRole::Read => "read",
+        ApiKeyRole::Write => "write",
+        ApiKeyRole::Admin => "admin",
+        ApiKeyRole::Automation => "automation",
+    }
+}
+
+fn api_key_role_from_str(value: &str) -> Result<ApiKeyRole> {
+    match value {
+        "read" => Ok(ApiKeyRole::Read),
+        "write" => Ok(ApiKeyRole::Write),
+        "admin" => Ok(ApiKeyRole::Admin),
+        "automation" => Ok(ApiKeyRole::Automation),
+        other => anyhow::bail!("unsupported api key role '{other}'"),
+    }
+}
+
+fn api_key_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ApiKeyRecord> {
+    let id: i64 = row.get("id");
+    let key_hash: String = row.get("key_hash");
+    let label: String = row.get("label");
+    let role_str: String = row.get("role");
+    let role = api_key_role_from_str(&role_str)
+        .with_context(|| format!("invalid api key role '{role_str}' for key {id}"))?;
+    let created_at_str: String = row.get("created_at");
+    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+        .with_context(|| format!("invalid created_at '{created_at_str}' for api key {id}"))?
+        .with_timezone(&Utc);
+    let last_used_at = row
+        .get::<Option<String>, _>("last_used_at")
+        .map(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .with_context(|| format!("invalid last_used_at '{s}' for api key {id}"))
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .transpose()?;
+
+    Ok(ApiKeyRecord {
+        id,
+        key_hash,
+        label,
+        role,
+        created_at,
+        last_used_at,
+    })
 }
 
 fn attribute_text(value: &AttributeValue) -> Option<&str> {
