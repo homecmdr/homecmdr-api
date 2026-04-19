@@ -1,5 +1,5 @@
 [package]
-name = "smart-home-core"
+name = "homecmdr-core"
 version = "0.1.0"
 edition = "2021"
 

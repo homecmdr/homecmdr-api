@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, UserData, UserDataMethods, Value};
-use smart_home_core::command::DeviceCommand;
-use smart_home_core::invoke::InvokeRequest;
-use smart_home_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room};
-use smart_home_core::runtime::Runtime;
+use homecmdr_core::command::DeviceCommand;
+use homecmdr_core::invoke::InvokeRequest;
+use homecmdr_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata, Room};
+use homecmdr_core::runtime::Runtime;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
@@ -233,7 +233,7 @@ impl UserData for LuaExecutionContext {
             let Some(room) = this
                 .runtime
                 .registry()
-                .get_room(&smart_home_core::model::RoomId(room_id))
+                .get_room(&homecmdr_core::model::RoomId(room_id))
             else {
                 return Ok(Value::Nil);
             };
@@ -257,7 +257,7 @@ impl UserData for LuaExecutionContext {
             let devices = this
                 .runtime
                 .registry()
-                .list_devices_in_room(&smart_home_core::model::RoomId(room_id))
+                .list_devices_in_room(&homecmdr_core::model::RoomId(room_id))
                 .into_iter()
                 .map(|device| device_to_attribute_value(&device))
                 .collect();
@@ -269,7 +269,7 @@ impl UserData for LuaExecutionContext {
             let Some(group) = this
                 .runtime
                 .registry()
-                .get_group(&smart_home_core::model::GroupId(group_id))
+                .get_group(&homecmdr_core::model::GroupId(group_id))
             else {
                 return Ok(Value::Nil);
             };
@@ -293,7 +293,7 @@ impl UserData for LuaExecutionContext {
             let devices = this
                 .runtime
                 .registry()
-                .list_devices_in_group(&smart_home_core::model::GroupId(group_id))
+                .list_devices_in_group(&homecmdr_core::model::GroupId(group_id))
                 .into_iter()
                 .map(|device| device_to_attribute_value(&device))
                 .collect();
@@ -307,7 +307,7 @@ impl UserData for LuaExecutionContext {
                 let command = lua_table_to_command(&command)?;
                 command.validate().map_err(mlua::Error::external)?;
 
-                let registry_group_id = smart_home_core::model::GroupId(group_id.clone());
+                let registry_group_id = homecmdr_core::model::GroupId(group_id.clone());
                 if this
                     .runtime
                     .registry()
@@ -433,7 +433,7 @@ fn room_to_attribute_value(room: &Room) -> AttributeValue {
     ]))
 }
 
-fn group_to_attribute_value(group: &smart_home_core::model::DeviceGroup) -> AttributeValue {
+fn group_to_attribute_value(group: &homecmdr_core::model::DeviceGroup) -> AttributeValue {
     AttributeValue::Object(HashMap::from([
         ("id".to_string(), AttributeValue::Text(group.id.0.clone())),
         ("name".to_string(), AttributeValue::Text(group.name.clone())),
@@ -748,21 +748,21 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use smart_home_core::adapter::Adapter;
-    use smart_home_core::bus::EventBus;
-    use smart_home_core::command::DeviceCommand;
-    use smart_home_core::model::{
+    use homecmdr_core::adapter::Adapter;
+    use homecmdr_core::bus::EventBus;
+    use homecmdr_core::command::DeviceCommand;
+    use homecmdr_core::model::{
         AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
     };
-    use smart_home_core::registry::DeviceRegistry;
-    use smart_home_core::runtime::{Runtime, RuntimeConfig};
+    use homecmdr_core::registry::DeviceRegistry;
+    use homecmdr_core::runtime::{Runtime, RuntimeConfig};
 
     fn temp_dir() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("smart-home-lua-host-{unique}"));
+        let path = std::env::temp_dir().join(format!("homecmdr-lua-host-{unique}"));
         fs::create_dir_all(&path).expect("create temp scripts dir");
         path
     }

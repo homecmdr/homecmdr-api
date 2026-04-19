@@ -161,7 +161,7 @@ For adapter work:
 
 ```bash
 cargo fmt --all
-cargo test -p adapter-your-name -p smart-home-adapters
+cargo test -p adapter-your-name -p homecmdr-adapters
 ```
 
 For broader safety:
@@ -184,7 +184,7 @@ Run it with:
 cargo run -p mcp-server -- --token <BEARER_TOKEN>
 # --api-url defaults to http://127.0.0.1:3001
 # --workspace defaults to .
-# SMART_HOME_TOKEN env var can substitute for --token
+# HOMECMDR_TOKEN env var can substitute for --token
 ```
 
 Available tools:

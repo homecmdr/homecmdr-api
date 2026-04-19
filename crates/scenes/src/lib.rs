@@ -7,8 +7,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use mlua::{Function, Lua};
 use serde::Serialize;
-use smart_home_core::runtime::Runtime;
-use smart_home_lua_host::{
+use homecmdr_core::runtime::Runtime;
+use homecmdr_lua_host::{
     evaluate_module, parse_execution_mode, CommandExecutionResult, ExecutionMode,
     LuaExecutionContext, LuaRuntimeOptions, DEFAULT_MAX_INSTRUCTIONS,
 };
@@ -576,12 +576,12 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use anyhow::Result;
-    use smart_home_core::adapter::Adapter;
-    use smart_home_core::bus::EventBus;
-    use smart_home_core::command::DeviceCommand;
-    use smart_home_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
-    use smart_home_core::registry::DeviceRegistry;
-    use smart_home_core::runtime::{Runtime, RuntimeConfig};
+    use homecmdr_core::adapter::Adapter;
+    use homecmdr_core::bus::EventBus;
+    use homecmdr_core::command::DeviceCommand;
+    use homecmdr_core::model::{AttributeValue, Device, DeviceId, DeviceKind, Metadata};
+    use homecmdr_core::registry::DeviceRegistry;
+    use homecmdr_core::runtime::{Runtime, RuntimeConfig};
     use tokio::time::{sleep, timeout, Duration};
 
     use super::*;
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn loads_valid_scene_catalog() {
-        let dir = temp_dir("smart-home-scenes");
+        let dir = temp_dir("homecmdr-scenes");
         write_scene(
             &dir,
             "video.lua",
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn rejects_scene_without_execute() {
-        let dir = temp_dir("smart-home-scenes");
+        let dir = temp_dir("homecmdr-scenes");
         write_scene(
             &dir,
             "broken.lua",
@@ -707,7 +707,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn executes_scene_commands_against_runtime() {
-        let dir = temp_dir("smart-home-scenes");
+        let dir = temp_dir("homecmdr-scenes");
         write_scene(
             &dir,
             "set-brightness.lua",
@@ -752,8 +752,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn executes_scene_using_required_script_module() {
-        let dir = temp_dir("smart-home-scenes");
-        let scripts_dir = temp_dir("smart-home-scripts");
+        let dir = temp_dir("homecmdr-scenes");
+        let scripts_dir = temp_dir("homecmdr-scripts");
         write_scene(
             &dir,
             "set-brightness.lua",
@@ -815,7 +815,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn single_mode_rejects_concurrent_scene_execution() {
-        let dir = temp_dir("smart-home-scenes");
+        let dir = temp_dir("homecmdr-scenes");
         write_scene(
             &dir,
             "single.lua",
@@ -875,7 +875,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn parallel_mode_allows_concurrent_executions() {
-        let dir = temp_dir("smart-home-scenes");
+        let dir = temp_dir("homecmdr-scenes");
         write_scene(
             &dir,
             "parallel.lua",
@@ -926,7 +926,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sleep_in_scene_works() {
-        let dir = temp_dir("smart-home-scenes");
+        let dir = temp_dir("homecmdr-scenes");
         write_scene(
             &dir,
             "sleepy.lua",

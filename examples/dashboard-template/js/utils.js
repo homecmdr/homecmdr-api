@@ -12,7 +12,7 @@
 /**
  * Format a device attribute value for display.
  *
- * The Smart Home API uses a consistent attribute shape:
+ * The HomeCmdr API uses a consistent attribute shape:
  *   - Measurements:  { value: number, unit: string }
  *   - Booleans:      true | false
  *   - Strings:       "on" | "off" | any string

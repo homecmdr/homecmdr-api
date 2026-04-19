@@ -5,15 +5,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
-use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
-use smart_home_core::bus::EventBus;
-use smart_home_core::capability::{MEDIA_APP, MEDIA_PLAYBACK, MEDIA_SOURCE, POWER, STATE};
-use smart_home_core::command::DeviceCommand;
-use smart_home_core::config::AdapterConfig;
-use smart_home_core::event::Event;
-use smart_home_core::http::{external_http_client, send_with_retry};
-use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
-use smart_home_core::registry::DeviceRegistry;
+use homecmdr_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
+use homecmdr_core::bus::EventBus;
+use homecmdr_core::capability::{MEDIA_APP, MEDIA_PLAYBACK, MEDIA_SOURCE, POWER, STATE};
+use homecmdr_core::command::DeviceCommand;
+use homecmdr_core::config::AdapterConfig;
+use homecmdr_core::event::Event;
+use homecmdr_core::http::{external_http_client, send_with_retry};
+use homecmdr_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
+use homecmdr_core::registry::DeviceRegistry;
 use tokio::time::{sleep, Duration};
 
 const ADAPTER_NAME: &str = "roku_tv";
@@ -576,7 +576,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
 
-    use smart_home_core::capability::{MEDIA_APP, MEDIA_PLAYBACK, MEDIA_SOURCE};
+    use homecmdr_core::capability::{MEDIA_APP, MEDIA_PLAYBACK, MEDIA_SOURCE};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;

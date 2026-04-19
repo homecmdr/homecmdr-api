@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  Smart Home Dashboard — Reference Example
+  HomeCmdr Dashboard — Reference Example
   =========================================
   Tech stack : Alpine.js v3 (reactive state + DOM templating)
   Styles     : Vanilla CSS with custom properties
@@ -12,7 +12,7 @@
                js/utils.js        → formatting helpers, URL utilities
                js/api.js          → authenticated HTTP client (createApiClient)
                js/websocket.js    → WebSocket manager with reconnect (createWebSocketManager)
-               js/app.js          → Alpine component registration (smartHomeApp)
+               js/app.js          → Alpine component registration (homeCmdrApp)
 
   Quick start:
     1. cargo run -p api
@@ -36,7 +36,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Smart Home Dashboard</title>
+  <title>HomeCmdr Dashboard</title>
 
   <!-- Styles — load order matters: tokens first, then layout, then components -->
   <link rel="stylesheet" href="css/base.css">
@@ -70,7 +70,7 @@
   x-cloak hides all content until Alpine has fully booted,
   preventing raw {{ }} or x-text placeholders from flashing.
 -->
-<div x-data="smartHomeApp()" x-init="init()" x-cloak>
+<div x-data="homeCmdrApp()" x-init="init()" x-cloak>
 
   <!-- ================================================================
        AUTH / SETUP SCREEN
@@ -90,7 +90,7 @@
       </svg>
     </div>
 
-    <h1 class="setup-screen__title">Smart Home</h1>
+    <h1 class="setup-screen__title">HomeCmdr</h1>
     <p class="setup-screen__subtitle">
       Enter the API base URL and your bearer token to connect.
     </p>
@@ -137,7 +137,7 @@
 
     <!-- ── Header ─────────────────────────────────────────────────── -->
     <header class="app-header">
-      <span class="app-header__brand">Smart Home</span>
+      <span class="app-header__brand">HomeCmdr</span>
 
       <nav class="app-nav" role="tablist" aria-label="Dashboard sections">
         <button class="nav-tab" role="tab"

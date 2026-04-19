@@ -1,4 +1,4 @@
-# Smart Home Adapter Authoring Guide
+# HomeCmdr Adapter Authoring Guide
 
 This guide is for an agentic AI or engineer creating a new adapter crate in this workspace.
 
@@ -189,7 +189,7 @@ Typical dependencies:
 - `reqwest` if HTTP is needed
 - `serde`
 - `serde_json`
-- `smart-home-core`
+- `homecmdr-core`
 - `tokio`
 - `tracing`
 
@@ -468,7 +468,7 @@ Examples:
 
 ```bash
 cargo fmt --all
-cargo test -p adapter-your-name -p smart-home-adapters
+cargo test -p adapter-your-name -p homecmdr-adapters
 ```
 
 Then, if requested or appropriate:
@@ -485,13 +485,13 @@ Use this as a starting skeleton.
 ```rust
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
-use smart_home_core::bus::EventBus;
-use smart_home_core::command::DeviceCommand;
-use smart_home_core::config::AdapterConfig;
-use smart_home_core::event::Event;
-use smart_home_core::model::DeviceId;
-use smart_home_core::registry::DeviceRegistry;
+use homecmdr_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
+use homecmdr_core::bus::EventBus;
+use homecmdr_core::command::DeviceCommand;
+use homecmdr_core::config::AdapterConfig;
+use homecmdr_core::event::Event;
+use homecmdr_core::model::DeviceId;
+use homecmdr_core::registry::DeviceRegistry;
 use tokio::time::{sleep, Duration};
 
 const ADAPTER_NAME: &str = "example";

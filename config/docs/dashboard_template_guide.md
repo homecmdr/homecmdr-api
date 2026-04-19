@@ -1,6 +1,6 @@
 # Dashboard Template Guide
 
-This project provides a **Smart Home API**. Dashboards are external clients that you build and own.
+This project provides a **HomeCmdr API**. Dashboards are external clients that you build and own.
 
 The reference example lives in `examples/dashboard-template/` and is the canonical starting point for users and AI / MCP agents building dashboards against this API.
 
@@ -33,7 +33,7 @@ examples/dashboard-template/
 │   ├── utils.js            Formatting helpers, URL utilities
 │   ├── api.js              HTTP client — createApiClient()
 │   ├── websocket.js        WS manager — createWebSocketManager()
-│   └── app.js              Alpine component — smartHomeApp()
+│   └── app.js              Alpine component — homeCmdrApp()
 └── README.md
 ```
 

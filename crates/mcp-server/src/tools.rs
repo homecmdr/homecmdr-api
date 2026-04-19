@@ -57,12 +57,12 @@ pub fn list() -> Value {
         },
         {
             "name": "list_devices",
-            "description": "List all devices currently known to the smart home runtime.",
+            "description": "List all devices currently known to the HomeCmdr runtime.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "list_rooms",
-            "description": "List all rooms defined in the smart home runtime.",
+            "description": "List all rooms defined in the HomeCmdr runtime.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
@@ -194,7 +194,7 @@ async-trait = "0.1"
 inventory = "0.3"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-smart-home-core = {{ path = "../core" }}
+homecmdr-core = {{ path = "../core" }}
 tokio = {{ version = "1", features = ["rt", "time"] }}
 tracing = "0.1"
 "#
@@ -204,9 +204,9 @@ tracing = "0.1"
         r#"use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
-use smart_home_core::adapter::{{Adapter, AdapterConfig, AdapterFactory}};
-use smart_home_core::bus::EventBus;
-use smart_home_core::registry::DeviceRegistry;
+use homecmdr_core::adapter::{{Adapter, AdapterConfig, AdapterFactory}};
+use homecmdr_core::bus::EventBus;
+use homecmdr_core::registry::DeviceRegistry;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 

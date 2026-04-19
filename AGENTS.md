@@ -1,4 +1,4 @@
-# Smart Home Agent Notes
+# HomeCmdr Agent Notes
 
 - Trust executable sources over prose when they disagree. Read `Cargo.toml`, `config/default.toml`, `crates/api/src/main.rs`, and the relevant crate before trusting `README.md`.
 - Highest-value repo docs are in `config/docs/`: `agent_workflows.md`, `adapter_authoring_guide.md`, `lua_runtime_guide.md`, `api_reference.md`, and `dashboard_template_guide.md`.
@@ -10,13 +10,13 @@
 - Fast safety check: `cargo check --workspace`
 - Full test suite: `cargo test --workspace`
 - Run the API: `cargo run -p api -- --config config/default.toml`
-- Run the MCP server: `cargo run -p mcp-server -- --token <BEARER_TOKEN>` (the API must already be running; `--api-url` defaults to `http://127.0.0.1:3001`, `--workspace` defaults to `.`; token can also be set via `SMART_HOME_TOKEN` env var)
+- Run the MCP server: `cargo run -p mcp-server -- --token <BEARER_TOKEN>` (the API must already be running; `--api-url` defaults to `http://127.0.0.1:3001`, `--workspace` defaults to `.`; token can also be set via `HOMECMDR_TOKEN` env var)
 - `api` also defaults to `config/default.toml` when `--config` is omitted.
-- `SMART_HOME_CONFIG` env var overrides the `--config` default entirely.
-- `SMART_HOME_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/smart-home`).
-- `SMART_HOME_MASTER_KEY` env var overrides `auth.master_key` in config.
+- `HOMECMDR_CONFIG` env var overrides the `--config` default entirely.
+- `HOMECMDR_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/homecmdr`).
+- `HOMECMDR_MASTER_KEY` env var overrides `auth.master_key` in config.
 - API bind address is configured via `api.bind_address` in `config/default.toml`; it is no longer hard-coded in `main.rs`.
-- Focused tests: `cargo test -p api`, `cargo test -p smart-home-core`, `cargo test -p smart-home-scenes`, `cargo test -p smart-home-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo` / `adapter-elgato-lights` / `adapter-ollama` / `adapter-roku-tv` / `adapter-zigbee2mqtt`.
+- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo` / `adapter-elgato-lights` / `adapter-ollama` / `adapter-roku-tv` / `adapter-zigbee2mqtt`.
 
 ## Workspace Map
 
@@ -51,9 +51,9 @@
 
 ## Persistence And API
 
-- Default persistence is SQLite with `database_url = "sqlite://data/smart-home.db"` and `auto_create = true`.
+- Default persistence is SQLite with `database_url = "sqlite://data/homecmdr.db"` and `auto_create = true`.
 - SQLite schema creation and migrations are handled inside `crates/store-sql/src/sqlite.rs`; there is no separate migration tool or `build.rs`.
-- PostgreSQL is a fully implemented alternative backend (`crates/store-postgres`). Set `persistence.backend = "postgres"` and supply a `database_url` (e.g. `"postgres://user:pass@localhost/smart_home"`) to use it. `PgPoolOptions::new().max_connections(5)` is used; no TimescaleDB or other extensions are required.
+- PostgreSQL is a fully implemented alternative backend (`crates/store-postgres`). Set `persistence.backend = "postgres"` and supply a `database_url` (e.g. `"postgres://user:pass@localhost/homecmdr"`) to use it. `PgPoolOptions::new().max_connections(5)` is used; no TimescaleDB or other extensions are required.
 - Useful live inspection endpoints while developing: `/health`, `/ready`, `/diagnostics`, `/adapters`, `/devices`, `/rooms`, `/capabilities`, and WebSocket `/events`.
 - History and audit endpoints are implemented; this repo is not current-state-only anymore.
 
@@ -62,7 +62,7 @@
 - All routes except `GET /health` and `GET /ready` require a `Bearer` token in the `Authorization` header.
 - Roles: `read`, `write`, `admin`, `automation`. Role satisfaction rules: `read` satisfies Read; `write` satisfies Write; `admin` satisfies Admin only; `automation` satisfies Automation and Admin.
 - Route tiers: **Read** (all GET endpoints + WebSocket), **Write** (mutation endpoints), **Admin** (diagnostics, reload, key management).
-- Master key is configured via `auth.master_key` in `config/default.toml`, overridable with `SMART_HOME_MASTER_KEY` env var. It is stored and compared as a SHA-256 hex digest and always grants the `Admin` role.
+- Master key is configured via `auth.master_key` in `config/default.toml`, overridable with `HOMECMDR_MASTER_KEY` env var. It is stored and compared as a SHA-256 hex digest and always grants the `Admin` role.
 - API keys are stored in the `api_keys` SQLite table (schema V4) as SHA-256 hashes. Managed via `POST /auth/keys`, `GET /auth/keys`, `DELETE /auth/keys/{id}`.
 - `ApiKeyRole` enum and `ApiKeyStore` trait live in `crates/core/src/store.rs`; the SQLite implementation is in `crates/store-sql/src/sqlite.rs`.
 - Auth middleware uses `middleware::from_fn` with closure capture of `AppState` (not `from_fn_with_state`), because `axum::body::Body: !Sync` makes `&Request: !Send`. The `check_auth` helper extracts the bearer token as an owned `String` before any `.await` for the same reason.

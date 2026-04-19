@@ -9,11 +9,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "homecmdr-core",
  "inventory",
  "reqwest",
  "serde",
  "serde_json",
- "smart-home-core",
  "tokio",
  "tracing",
 ]
@@ -25,11 +25,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "homecmdr-core",
  "inventory",
  "reqwest",
  "serde",
  "serde_json",
- "smart-home-core",
  "tokio",
  "wiremock",
 ]
@@ -41,11 +41,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "homecmdr-core",
  "inventory",
  "reqwest",
  "serde",
  "serde_json",
- "smart-home-core",
  "tokio",
  "tracing",
 ]
@@ -57,11 +57,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "homecmdr-core",
  "inventory",
  "reqwest",
  "serde",
  "serde_json",
- "smart-home-core",
  "tokio",
  "tracing",
 ]
@@ -73,11 +73,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "homecmdr-core",
  "inventory",
  "rumqttc",
  "serde",
  "serde_json",
- "smart-home-core",
  "tokio",
  "tracing",
 ]
@@ -183,16 +183,16 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "homecmdr-adapters",
+ "homecmdr-automations",
+ "homecmdr-core",
+ "homecmdr-scenes",
  "notify",
  "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "smart-home-adapters",
- "smart-home-automations",
- "smart-home-core",
- "smart-home-scenes",
  "store-postgres",
  "store-sql",
  "tokio",
@@ -1039,6 +1039,82 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "homecmdr-adapters"
+version = "0.1.0"
+dependencies = [
+ "adapter-elgato-lights",
+ "adapter-ollama",
+ "adapter-open-meteo",
+ "adapter-roku-tv",
+ "adapter-zigbee2mqtt",
+]
+
+[[package]]
+name = "homecmdr-automations"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "cron",
+ "homecmdr-core",
+ "homecmdr-lua-host",
+ "mlua",
+ "serde",
+ "serde_json",
+ "sunrise",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "homecmdr-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "config",
+ "inventory",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "homecmdr-lua-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "homecmdr-core",
+ "mlua",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "homecmdr-scenes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "homecmdr-core",
+ "homecmdr-lua-host",
+ "mlua",
+ "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -2475,82 +2551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smart-home-adapters"
-version = "0.1.0"
-dependencies = [
- "adapter-elgato-lights",
- "adapter-ollama",
- "adapter-open-meteo",
- "adapter-roku-tv",
- "adapter-zigbee2mqtt",
-]
-
-[[package]]
-name = "smart-home-automations"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz",
- "cron",
- "mlua",
- "serde",
- "serde_json",
- "smart-home-core",
- "smart-home-lua-host",
- "sunrise",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "smart-home-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz",
- "config",
- "inventory",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "smart-home-lua-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "mlua",
- "serde_json",
- "smart-home-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "smart-home-scenes"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "mlua",
- "serde",
- "smart-home-core",
- "smart-home-lua-host",
- "tokio",
-]
-
-[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2786,8 +2786,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "homecmdr-core",
  "serde_json",
- "smart-home-core",
  "sqlx",
  "tokio",
 ]
@@ -2799,8 +2799,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "homecmdr-core",
  "serde_json",
- "smart-home-core",
  "sqlx",
  "tokio",
 ]

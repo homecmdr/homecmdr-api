@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use smart_home_core::model::{
+use homecmdr_core::model::{
     AttributeValue, Attributes, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room,
     RoomId,
 };
-use smart_home_core::store::{
+use homecmdr_core::store::{
     ApiKeyRecord, ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
     AutomationRuntimeState, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
     SceneExecutionHistoryEntry,

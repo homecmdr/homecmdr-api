@@ -1,5 +1,5 @@
 /**
- * api.js — Authenticated HTTP client for the Smart Home API
+ * api.js — Authenticated HTTP client for the HomeCmdr API
  *
  * Exposes: createApiClient(baseUrl, token) → client object
  *

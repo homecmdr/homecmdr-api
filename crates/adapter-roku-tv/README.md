@@ -1,6 +1,6 @@
 # adapter-roku-tv
 
-Roku TV adapter for Smart Home.
+Roku TV adapter for HomeCmdr.
 
 ## What It Does
 

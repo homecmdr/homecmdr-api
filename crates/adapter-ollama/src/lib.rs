@@ -6,13 +6,13 @@ use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
-use smart_home_core::bus::EventBus;
-use smart_home_core::config::AdapterConfig;
-use smart_home_core::http::{external_http_client, send_with_retry};
-use smart_home_core::invoke::{InvokeRequest, InvokeResponse};
-use smart_home_core::model::AttributeValue;
-use smart_home_core::registry::DeviceRegistry;
+use homecmdr_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
+use homecmdr_core::bus::EventBus;
+use homecmdr_core::config::AdapterConfig;
+use homecmdr_core::http::{external_http_client, send_with_retry};
+use homecmdr_core::invoke::{InvokeRequest, InvokeResponse};
+use homecmdr_core::model::AttributeValue;
+use homecmdr_core::registry::DeviceRegistry;
 
 const ADAPTER_NAME: &str = "ollama";
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
@@ -256,7 +256,7 @@ impl Adapter for OllamaAdapter {
     }
 
     async fn run(&self, _registry: DeviceRegistry, bus: EventBus) -> Result<()> {
-        bus.publish(smart_home_core::event::Event::AdapterStarted {
+        bus.publish(homecmdr_core::event::Event::AdapterStarted {
             adapter: self.name().to_string(),
         });
 
@@ -891,9 +891,9 @@ fn default_base_url() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smart_home_core::invoke::InvokeRequest;
-    use smart_home_core::model::AttributeValue;
-    use smart_home_core::registry::DeviceRegistry;
+    use homecmdr_core::invoke::InvokeRequest;
+    use homecmdr_core::model::AttributeValue;
+    use homecmdr_core::registry::DeviceRegistry;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1077,7 +1077,7 @@ mod tests {
                     target: target.to_string(),
                     payload,
                 },
-                DeviceRegistry::new(smart_home_core::bus::EventBus::new(4)),
+                DeviceRegistry::new(homecmdr_core::bus::EventBus::new(4)),
             )
             .await
             .expect("invoke succeeds")

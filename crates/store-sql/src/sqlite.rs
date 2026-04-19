@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use smart_home_core::model::{
+use homecmdr_core::model::{
     AttributeValue, Attributes, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room,
     RoomId,
 };
-use smart_home_core::store::{
+use homecmdr_core::store::{
     ApiKeyRecord, ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
     AutomationRuntimeState, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
     SceneExecutionHistoryEntry,
@@ -1509,10 +1509,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::Duration as ChronoDuration;
-    use smart_home_core::capability::{measurement_value, TEMPERATURE_OUTDOOR};
-    use smart_home_core::command::DeviceCommand;
-    use smart_home_core::model::{AttributeValue, DeviceKind};
-    use smart_home_core::store::SceneStepResult;
+    use homecmdr_core::capability::{measurement_value, TEMPERATURE_OUTDOOR};
+    use homecmdr_core::command::DeviceCommand;
+    use homecmdr_core::model::{AttributeValue, DeviceKind};
+    use homecmdr_core::store::SceneStepResult;
 
     use super::*;
 
@@ -1554,7 +1554,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("smart-home-store-{unique}.db"));
+        let path = std::env::temp_dir().join(format!("homecmdr-store-{unique}.db"));
         let url = format!("sqlite://{}", path.display());
 
         SqliteDeviceStore::new_with_history(&url, true, history)
@@ -1852,7 +1852,7 @@ mod tests {
             source: "device".to_string(),
             room_id: Some(RoomId("lab".to_string())),
             device_id: DeviceId("test:one".to_string()),
-            command: smart_home_core::command::DeviceCommand {
+            command: homecmdr_core::command::DeviceCommand {
                 capability: "brightness".to_string(),
                 action: "set".to_string(),
                 value: Some(AttributeValue::Integer(42)),

@@ -1,4 +1,4 @@
-# Smart Home API Reference
+# HomeCmdr API Reference
 
 This document describes the current HTTP and WebSocket API exposed by `crates/api`.
 
@@ -658,7 +658,7 @@ Notes:
 
 ## Device Shape
 
-The API returns the `Device` shape from `smart-home-core`.
+The API returns the `Device` shape from `homecmdr-core`.
 
 Important fields:
 

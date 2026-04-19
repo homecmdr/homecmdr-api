@@ -1,7 +1,7 @@
 /**
  * app.js — Main Alpine.js application component
  *
- * Registers the 'smartHomeApp' Alpine component on the 'alpine:init' event.
+ * Registers the 'homeCmdrApp' Alpine component on the 'alpine:init' event.
  * This file must be loaded BEFORE the Alpine CDN script tag so the listener
  * is in place before Alpine initialises.
  *
@@ -31,7 +31,7 @@ var WEATHER_DEVICE_IDS = [
 
 document.addEventListener('alpine:init', function() {
 
-  Alpine.data('smartHomeApp', function() {
+  Alpine.data('homeCmdrApp', function() {
     return {
 
       // ── Auth / connection ──────────────────────────────────────────

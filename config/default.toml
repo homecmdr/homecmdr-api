@@ -1,10 +1,10 @@
 # Environment variable overrides (take priority over this file):
-#   SMART_HOME_CONFIG   — path to a different config file
-#   SMART_HOME_DATA_DIR — base directory for relative database_url paths
-#                         e.g. SMART_HOME_DATA_DIR=/var/lib/smart-home makes
-#                         "sqlite://data/smart-home.db" resolve to
-#                         /var/lib/smart-home/data/smart-home.db
-#   SMART_HOME_MASTER_KEY — master API key (see [auth] section)
+#   HOMECMDR_CONFIG   — path to a different config file
+#   HOMECMDR_DATA_DIR — base directory for relative database_url paths
+#                       e.g. HOMECMDR_DATA_DIR=/var/lib/homecmdr makes
+#                       "sqlite://data/homecmdr.db" resolve to
+#                       /var/lib/homecmdr/data/homecmdr.db
+#   HOMECMDR_MASTER_KEY — master API key (see [auth] section)
 
 [runtime]
 event_bus_capacity = 1024
@@ -24,7 +24,7 @@ burst_size = 20
 
 [auth]
 # Master key grants the Admin role.  Override at runtime via the
-# SMART_HOME_MASTER_KEY environment variable — never commit a real key.
+# HOMECMDR_MASTER_KEY environment variable — never commit a real key.
 master_key = "change-me-before-use"
 
 [locale]
@@ -38,7 +38,7 @@ level = "info"
 [persistence]
 enabled = true
 backend = "sqlite"
-database_url = "sqlite://data/smart-home.db"
+database_url = "sqlite://data/homecmdr.db"
 auto_create = true
 
 [persistence.history]
@@ -102,6 +102,6 @@ model = "llava"
 enabled = true
 server = "mqtt://127.0.0.1:1883"
 base_topic = "zigbee2mqtt"
-client_id = "smart-home-zigbee2mqtt"
+client_id = "homecmdr-zigbee2mqtt"
 keepalive_secs = 30
 command_timeout_secs = 5

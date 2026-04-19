@@ -12,13 +12,13 @@ use chrono_tz::Tz;
 use cron::Schedule;
 use mlua::{Function, Lua};
 use serde::Serialize;
-use smart_home_core::event::Event;
-use smart_home_core::model::{AttributeValue, Attributes, DeviceId, RoomId};
-use smart_home_core::runtime::Runtime;
-use smart_home_core::store::{
+use homecmdr_core::event::Event;
+use homecmdr_core::model::{AttributeValue, Attributes, DeviceId, RoomId};
+use homecmdr_core::runtime::Runtime;
+use homecmdr_core::store::{
     AutomationExecutionHistoryEntry, AutomationRuntimeState, DeviceStore, SceneStepResult,
 };
-use smart_home_lua_host::{
+use homecmdr_lua_host::{
     attribute_to_lua_value, evaluate_module, parse_execution_mode, ExecutionMode,
     LuaExecutionContext, LuaRuntimeOptions, DEFAULT_MAX_INSTRUCTIONS,
 };
@@ -1994,7 +1994,7 @@ fn automation_event_from_runtime_event(
 
 fn automation_event_from_registry_snapshot(
     automation: &Automation,
-    registry: &smart_home_core::registry::DeviceRegistry,
+    registry: &homecmdr_core::registry::DeviceRegistry,
     skipped: u64,
 ) -> Option<AttributeValue> {
     match &automation.trigger {
@@ -2468,7 +2468,7 @@ fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> {
             let equals = match table.get::<mlua::Value>("equals") {
                 Ok(mlua::Value::Nil) => None,
                 Ok(value) => Some(
-                    smart_home_lua_host::lua_value_to_attribute(value)
+                    homecmdr_lua_host::lua_value_to_attribute(value)
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?,
                 ),
                 Err(error) => {
@@ -2527,7 +2527,7 @@ fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> {
             let equals = match table.get::<mlua::Value>("equals") {
                 Ok(mlua::Value::Nil) => None,
                 Ok(value) => Some(
-                    smart_home_lua_host::lua_value_to_attribute(value)
+                    homecmdr_lua_host::lua_value_to_attribute(value)
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?,
                 ),
                 Err(error) => {
@@ -2758,7 +2758,7 @@ fn parse_condition(value: mlua::Value, path: &Path) -> Result<Condition> {
             let equals = match table.get::<mlua::Value>("equals") {
                 Ok(mlua::Value::Nil) => None,
                 Ok(value) => Some(
-                    smart_home_lua_host::lua_value_to_attribute(value)
+                    homecmdr_lua_host::lua_value_to_attribute(value)
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?,
                 ),
                 Err(error) => {
@@ -2792,7 +2792,7 @@ fn parse_condition(value: mlua::Value, path: &Path) -> Result<Condition> {
             })?.unwrap_or_else(|| "presence".to_string());
             let equals = match table.get::<mlua::Value>("equals") {
                 Ok(mlua::Value::Nil) => AttributeValue::Bool(true),
-                Ok(value) => smart_home_lua_host::lua_value_to_attribute(value)
+                Ok(value) => homecmdr_lua_host::lua_value_to_attribute(value)
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?,
                 Err(error) => {
                     return Err(anyhow::anyhow!(
@@ -3104,16 +3104,16 @@ mod tests {
     use anyhow::Result;
     use chrono::{Datelike, NaiveDate, TimeZone, Timelike};
     use cron::Schedule;
-    use smart_home_core::adapter::Adapter;
-    use smart_home_core::bus::EventBus;
-    use smart_home_core::command::DeviceCommand;
-    use smart_home_core::model::{
+    use homecmdr_core::adapter::Adapter;
+    use homecmdr_core::bus::EventBus;
+    use homecmdr_core::command::DeviceCommand;
+    use homecmdr_core::model::{
         AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
     };
-    use smart_home_core::registry::DeviceRegistry;
-    use smart_home_core::runtime::{Runtime, RuntimeConfig};
-    use smart_home_core::store::AutomationExecutionHistoryEntry;
-    use smart_home_lua_host::DEFAULT_MAX_INSTRUCTIONS;
+    use homecmdr_core::registry::DeviceRegistry;
+    use homecmdr_core::runtime::{Runtime, RuntimeConfig};
+    use homecmdr_core::store::AutomationExecutionHistoryEntry;
+    use homecmdr_lua_host::DEFAULT_MAX_INSTRUCTIONS;
     use tokio::time::{sleep, timeout, Duration};
 
     use super::*;
@@ -3173,7 +3173,7 @@ mod tests {
             _start: Option<DateTime<Utc>>,
             _end: Option<DateTime<Utc>>,
             _limit: usize,
-        ) -> anyhow::Result<Vec<smart_home_core::store::DeviceHistoryEntry>> {
+        ) -> anyhow::Result<Vec<homecmdr_core::store::DeviceHistoryEntry>> {
             Ok(Vec::new())
         }
         async fn load_attribute_history(
@@ -3183,12 +3183,12 @@ mod tests {
             _start: Option<DateTime<Utc>>,
             _end: Option<DateTime<Utc>>,
             _limit: usize,
-        ) -> anyhow::Result<Vec<smart_home_core::store::AttributeHistoryEntry>> {
+        ) -> anyhow::Result<Vec<homecmdr_core::store::AttributeHistoryEntry>> {
             Ok(Vec::new())
         }
         async fn save_command_audit(
             &self,
-            _entry: &smart_home_core::store::CommandAuditEntry,
+            _entry: &homecmdr_core::store::CommandAuditEntry,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -3198,12 +3198,12 @@ mod tests {
             _start: Option<DateTime<Utc>>,
             _end: Option<DateTime<Utc>>,
             _limit: usize,
-        ) -> anyhow::Result<Vec<smart_home_core::store::CommandAuditEntry>> {
+        ) -> anyhow::Result<Vec<homecmdr_core::store::CommandAuditEntry>> {
             Ok(Vec::new())
         }
         async fn save_scene_execution(
             &self,
-            _entry: &smart_home_core::store::SceneExecutionHistoryEntry,
+            _entry: &homecmdr_core::store::SceneExecutionHistoryEntry,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -3213,7 +3213,7 @@ mod tests {
             _start: Option<DateTime<Utc>>,
             _end: Option<DateTime<Utc>>,
             _limit: usize,
-        ) -> anyhow::Result<Vec<smart_home_core::store::SceneExecutionHistoryEntry>> {
+        ) -> anyhow::Result<Vec<homecmdr_core::store::SceneExecutionHistoryEntry>> {
             Ok(Vec::new())
         }
         async fn save_automation_execution(
@@ -3382,7 +3382,7 @@ mod tests {
 
     #[test]
     fn loads_device_trigger_automation_catalog() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "rain.lua",
@@ -3407,7 +3407,7 @@ mod tests {
 
     #[test]
     fn loads_extended_event_trigger_automation_catalog() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "event.lua",
@@ -3441,7 +3441,7 @@ mod tests {
 
     #[test]
     fn loads_wall_clock_and_cron_trigger_catalog() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "clock.lua",
@@ -3484,7 +3484,7 @@ mod tests {
 
     #[test]
     fn loads_sunrise_and_sunset_trigger_catalog() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "sunrise.lua",
@@ -3526,7 +3526,7 @@ mod tests {
 
     #[test]
     fn loads_weather_and_threshold_trigger_catalog() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "weather.lua",
@@ -3551,7 +3551,7 @@ mod tests {
 
     #[test]
     fn rejects_threshold_without_attribute() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "bad.lua",
@@ -3635,7 +3635,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn event_automation_executes_on_matching_state_change() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "rain.lua",
@@ -3708,7 +3708,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn threshold_trigger_only_executes_on_crossing() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "threshold.lua",
@@ -3803,7 +3803,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn debounce_trigger_waits_for_stable_state() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "debounce.lua",
@@ -3905,7 +3905,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn duration_trigger_requires_condition_to_hold() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "duration.lua",
@@ -3977,7 +3977,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn automation_cooldown_skips_repeated_triggers_within_window() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "cooldown.lua",
@@ -4069,7 +4069,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn automation_dedupe_window_skips_identical_trigger_payloads() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "dedupe.lua",
@@ -4148,7 +4148,7 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_schedule_uses_persisted_last_scheduled_time() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "resume.lua",
@@ -4213,7 +4213,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wall_clock_automation_executes_on_schedule() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         let scheduled_for = Utc::now() + ChronoDuration::minutes(1);
         write_automation(
             &dir,
@@ -4288,7 +4288,7 @@ mod tests {
 
     #[tokio::test]
     async fn conditions_block_actions_until_all_filters_pass() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "condition.lua",
@@ -4381,7 +4381,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn adapter_lifecycle_automation_executes_on_started_event() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "adapter.lua",
@@ -4456,7 +4456,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn system_error_automation_executes_on_matching_error() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "error.lua",
@@ -4530,8 +4530,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn automation_can_require_script_module() {
-        let dir = temp_dir("smart-home-automations");
-        let scripts_dir = temp_dir("smart-home-scripts");
+        let dir = temp_dir("homecmdr-automations");
+        let scripts_dir = temp_dir("homecmdr-scripts");
         fs::create_dir_all(scripts_dir.join("lighting")).expect("create script namespace dir");
         fs::write(
             scripts_dir.join("lighting/helpers.lua"),
@@ -4622,7 +4622,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn event_automation_executes_without_blocking_other_matching_automations() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "slow.lua",
@@ -4731,7 +4731,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn saturated_event_runner_skips_new_automation_runs() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "slow.lua",
@@ -4828,7 +4828,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn lag_recovery_executes_matching_device_state_from_registry_snapshot() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "recover.lua",
@@ -4917,7 +4917,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slow_lua_execution_times_out_before_mutating_state() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "slow.lua",
@@ -4983,7 +4983,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn automation_runner_records_execution_history_via_observer() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "rain.lua",
@@ -5070,7 +5070,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn single_mode_drops_concurrent_trigger() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "single.lua",
@@ -5153,7 +5153,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn parallel_mode_allows_concurrent_up_to_max() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "parallel.lua",
@@ -5240,7 +5240,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn parallel_mode_drops_beyond_max() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "parallel_limited.lua",
@@ -5312,7 +5312,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn queued_mode_runs_triggers_sequentially() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "queued.lua",
@@ -5401,7 +5401,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn queued_mode_drops_when_queue_full() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "queued_limited.lua",
@@ -5507,7 +5507,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn restart_mode_cancels_running_and_starts_new() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         // The 50_000-iteration loop ensures the hook fires before ctx:command when cancel is set,
         // while completing quickly when cancel remains false (trigger 2).
         write_automation(
@@ -5617,7 +5617,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sleep_in_automation_completes_without_timeout() {
-        let dir = temp_dir("smart-home-automations");
+        let dir = temp_dir("homecmdr-automations");
         write_automation(
             &dir,
             "sleep.lua",

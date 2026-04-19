@@ -1,6 +1,6 @@
-# Smart Home
+# HomeCmdr
 
-Smart Home is a Rust workspace for a local home automation runtime built around:
+HomeCmdr is a Rust workspace for a local home automation runtime built around:
 
 - adapter-driven device ingestion and control
 - an in-memory device and room registry
@@ -43,7 +43,7 @@ Lua runtime docs:
 ## Workspace Layout
 
 ```text
-smart-home/
+homecmdr/
 ├── config/
 │   ├── default.toml
 │   ├── scenes/
@@ -113,7 +113,7 @@ Two backends are supported, both implementing the same `DeviceStore` and `ApiKey
 
 **SQLite (default)**
 
-- configured via `persistence.backend = "sqlite"` and `database_url = "sqlite://data/smart-home.db"`
+- configured via `persistence.backend = "sqlite"` and `database_url = "sqlite://data/homecmdr.db"`
 - schema is created and migrated automatically inside `crates/store-sql`; no external tool needed
 - startup hydrates the registry from stored device and room rows before adapters begin polling
 

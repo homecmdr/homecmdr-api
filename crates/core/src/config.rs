@@ -214,7 +214,7 @@ impl Default for PersistenceConfig {
         Self {
             enabled: true,
             backend: PersistenceBackend::Sqlite,
-            database_url: Some("sqlite://data/smart-home.db".to_string()),
+            database_url: Some("sqlite://data/homecmdr.db".to_string()),
             auto_create: true,
             history: HistoryConfig::default(),
         }

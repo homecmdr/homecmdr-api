@@ -22,27 +22,27 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use smart_home_adapters as _;
-use smart_home_automations::{
+use homecmdr_adapters as _;
+use homecmdr_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
     TriggerContext,
 };
-use smart_home_core::adapter::{registered_adapter_factories, Adapter};
-use smart_home_core::capability::{
+use homecmdr_core::adapter::{registered_adapter_factories, Adapter};
+use homecmdr_core::capability::{
     CapabilityOwnershipPolicy, CapabilitySchema, ALL_CAPABILITIES, CAPABILITY_OWNERSHIP,
 };
-use smart_home_core::command::DeviceCommand;
-use smart_home_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
-use smart_home_core::event::Event;
+use homecmdr_core::command::DeviceCommand;
+use homecmdr_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
+use homecmdr_core::event::Event;
 use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
-use smart_home_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
-use smart_home_core::runtime::Runtime;
-use smart_home_core::store::{
+use homecmdr_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
+use homecmdr_core::runtime::Runtime;
+use homecmdr_core::store::{
     ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
     CommandAuditEntry, DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
     SceneStepResult,
 };
-use smart_home_scenes::{
+use homecmdr_scenes::{
     SceneCatalog, SceneExecutionResult, SceneRunOutcome, SceneRunner, SceneSummary,
 };
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
@@ -176,7 +176,7 @@ struct AutomationEnabledRequest {
 
 #[derive(Debug, Deserialize)]
 struct ManualAutomationRequest {
-    trigger_payload: Option<smart_home_core::model::AttributeValue>,
+    trigger_payload: Option<homecmdr_core::model::AttributeValue>,
 }
 
 #[derive(Debug, Serialize)]
@@ -744,8 +744,8 @@ async fn main() -> Result<()> {
         .await
         .context("failed to create persistence store")?;
 
-    // Allow SMART_HOME_MASTER_KEY env var to override config value at runtime.
-    let master_key = std::env::var("SMART_HOME_MASTER_KEY")
+    // Allow HOMECMDR_MASTER_KEY env var to override config value at runtime.
+    let master_key = std::env::var("HOMECMDR_MASTER_KEY")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| config.auth.master_key.clone());
@@ -1037,14 +1037,14 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
     Ok((adapters, summaries))
 }
 
-/// Rewrites a relative `sqlite://` path using `SMART_HOME_DATA_DIR` when set.
+/// Rewrites a relative `sqlite://` path using `HOMECMDR_DATA_DIR` when set.
 ///
 /// If the path component of the URL is already absolute (starts with `/`) or the
 /// env var is not set, the URL is returned unchanged.  When the env var is set
 /// the parent directory tree is created so sqlx can open the database file
 /// without requiring it to pre-exist.
 fn resolve_database_url(url: &str, auto_create: bool) -> Result<String> {
-    let data_dir = std::env::var("SMART_HOME_DATA_DIR")
+    let data_dir = std::env::var("HOMECMDR_DATA_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty());
 
@@ -1380,7 +1380,7 @@ fn reload_scenes_internal(
                     duration_ms,
                     errors: errors
                         .iter()
-                        .map(|error| smart_home_core::event::ReloadError {
+                        .map(|error| homecmdr_core::event::ReloadError {
                             file: error.file.clone(),
                             message: error.message.clone(),
                         })
@@ -1483,7 +1483,7 @@ fn reload_automations_internal(
                     duration_ms,
                     errors: errors
                         .iter()
-                        .map(|error| smart_home_core::event::ReloadError {
+                        .map(|error| homecmdr_core::event::ReloadError {
                             file: error.file.clone(),
                             message: error.message.clone(),
                         })
@@ -1528,7 +1528,7 @@ fn reload_scripts_internal(
                 duration_ms,
                 errors: errors
                     .iter()
-                    .map(|error| smart_home_core::event::ReloadError {
+                    .map(|error| homecmdr_core::event::ReloadError {
                         file: error.file.clone(),
                         message: error.message.clone(),
                     })
@@ -1892,7 +1892,7 @@ fn adapter_name_from_system_error(message: &str) -> Option<&str> {
 async fn reconcile_device_store(
     rooms: Vec<Room>,
     groups: Vec<DeviceGroup>,
-    devices: Vec<smart_home_core::model::Device>,
+    devices: Vec<homecmdr_core::model::Device>,
     store: Arc<dyn DeviceStore>,
 ) -> Result<()> {
     let persisted_room_ids = store
@@ -2596,9 +2596,9 @@ async fn execute_automation_manually(
     Json(request): Json<ManualAutomationRequest>,
 ) -> Result<Json<AutomationExecuteResponse>, ApiError> {
     let trigger_payload = request.trigger_payload.unwrap_or_else(|| {
-        smart_home_core::model::AttributeValue::Object(HashMap::from([(
+        homecmdr_core::model::AttributeValue::Object(HashMap::from([(
             "type".to_string(),
-            smart_home_core::model::AttributeValue::Text("manual".to_string()),
+            homecmdr_core::model::AttributeValue::Text("manual".to_string()),
         )]))
     });
 
@@ -2812,7 +2812,7 @@ async fn delete_room(
 async fn list_room_devices(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<smart_home_core::model::Device>>, ApiError> {
+) -> Result<Json<Vec<homecmdr_core::model::Device>>, ApiError> {
     let room_id = RoomId(id.clone());
     if state.runtime.registry().get_room(&room_id).is_none() {
         return Err(ApiError::not_found(format!("room '{id}' not found")));
@@ -2931,7 +2931,7 @@ async fn set_group_members(
 async fn list_group_devices(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<smart_home_core::model::Device>>, ApiError> {
+) -> Result<Json<Vec<homecmdr_core::model::Device>>, ApiError> {
     let group_id = GroupId(id.clone());
     if state.runtime.registry().get_group(&group_id).is_none() {
         return Err(ApiError::not_found(format!("group '{id}' not found")));
@@ -2945,7 +2945,7 @@ async fn list_group_devices(
 async fn list_devices(
     State(state): State<AppState>,
     RawQuery(raw_query): RawQuery,
-) -> Json<Vec<smart_home_core::model::Device>> {
+) -> Json<Vec<homecmdr_core::model::Device>> {
     let ids = requested_device_ids(raw_query.as_deref());
     if ids.is_empty() {
         return Json(state.runtime.registry().list());
@@ -2972,7 +2972,7 @@ fn requested_device_ids(raw_query: Option<&str>) -> Vec<String> {
 async fn get_device(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<smart_home_core::model::Device>, ApiError> {
+) -> Result<Json<homecmdr_core::model::Device>, ApiError> {
     state
         .runtime
         .registry()
@@ -3030,7 +3030,7 @@ async fn assign_device_room(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<AssignRoomRequest>,
-) -> Result<Json<smart_home_core::model::Device>, ApiError> {
+) -> Result<Json<homecmdr_core::model::Device>, ApiError> {
     let device_id = DeviceId(id.clone());
 
     if state.runtime.registry().get(&device_id).is_none() {
@@ -3429,7 +3429,7 @@ fn capability_ownership_response(policy: CapabilityOwnershipPolicy) -> Capabilit
 
 async fn automation_response(
     state: &AppState,
-    summary: smart_home_automations::AutomationSummary,
+    summary: homecmdr_automations::AutomationSummary,
 ) -> Result<AutomationResponse, ApiError> {
     let automation_id = summary.id.clone();
     let latest_run = if state.history.enabled {
@@ -3681,7 +3681,7 @@ fn event_to_frame(event: Event) -> serde_json::Value {
 
 fn config_path_from_args() -> Result<String> {
     // Environment variable takes priority over the command-line flag.
-    if let Ok(path) = std::env::var("SMART_HOME_CONFIG") {
+    if let Ok(path) = std::env::var("HOMECMDR_CONFIG") {
         if !path.trim().is_empty() {
             return Ok(path);
         }
@@ -3793,15 +3793,15 @@ mod tests {
     use futures_util::StreamExt;
     use reqwest::StatusCode;
     use serde_json::Value;
-    use smart_home_core::capability::{measurement_value, TEMPERATURE_OUTDOOR, WIND_SPEED};
-    use smart_home_core::command::DeviceCommand;
-    use smart_home_core::config::{Config, HistoryConfig, PersistenceBackend};
-    use smart_home_core::model::{
+    use homecmdr_core::capability::{measurement_value, TEMPERATURE_OUTDOOR, WIND_SPEED};
+    use homecmdr_core::command::DeviceCommand;
+    use homecmdr_core::config::{Config, HistoryConfig, PersistenceBackend};
+    use homecmdr_core::model::{
         AttributeValue, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room, RoomId,
     };
-    use smart_home_core::runtime::RuntimeConfig;
-    use smart_home_core::store::AutomationRuntimeState;
-    use smart_home_scenes::{SceneCatalog, SceneRunner};
+    use homecmdr_core::runtime::RuntimeConfig;
+    use homecmdr_core::store::AutomationRuntimeState;
+    use homecmdr_scenes::{SceneCatalog, SceneRunner};
     use store_sql::{SqliteDeviceStore, SqliteHistoryConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -3811,7 +3811,7 @@ mod tests {
 
     use super::*;
 
-    const TEST_MASTER_KEY: &str = "smart-home-test-key-for-tests-only";
+    const TEST_MASTER_KEY: &str = "homecmdr-test-key-for-tests-only";
 
     fn test_client() -> reqwest::Client {
         reqwest::Client::builder()
@@ -4233,8 +4233,8 @@ mod tests {
 
         async fn run(
             &self,
-            _registry: smart_home_core::registry::DeviceRegistry,
-            _bus: smart_home_core::bus::EventBus,
+            _registry: homecmdr_core::registry::DeviceRegistry,
+            _bus: homecmdr_core::bus::EventBus,
         ) -> Result<()> {
             std::future::pending::<()>().await;
             Ok(())
@@ -4244,7 +4244,7 @@ mod tests {
             &self,
             device_id: &DeviceId,
             command: DeviceCommand,
-            registry: smart_home_core::registry::DeviceRegistry,
+            registry: homecmdr_core::registry::DeviceRegistry,
         ) -> Result<bool> {
             if device_id.0 != "test:device" {
                 return Ok(false);
@@ -4361,7 +4361,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("smart-home-api-{unique}.db"));
+        let path = std::env::temp_dir().join(format!("homecmdr-api-{unique}.db"));
         format!("sqlite://{}", path.display())
     }
 
@@ -4370,28 +4370,28 @@ mod tests {
             runtime: RuntimeConfig {
                 event_bus_capacity: 16,
             },
-            api: smart_home_core::config::ApiConfig {
+            api: homecmdr_core::config::ApiConfig {
                 bind_address: "127.0.0.1:3001".to_string(),
-                cors: smart_home_core::config::ApiCorsConfig::default(),
-                rate_limit: smart_home_core::config::RateLimitConfig::default(),
+                cors: homecmdr_core::config::ApiCorsConfig::default(),
+                rate_limit: homecmdr_core::config::RateLimitConfig::default(),
             },
-            locale: smart_home_core::config::LocaleConfig::default(),
-            logging: smart_home_core::config::LoggingConfig {
+            locale: homecmdr_core::config::LocaleConfig::default(),
+            logging: homecmdr_core::config::LoggingConfig {
                 level: "info".to_string(),
             },
-            persistence: smart_home_core::config::PersistenceConfig {
+            persistence: homecmdr_core::config::PersistenceConfig {
                 enabled: false,
                 backend: PersistenceBackend::Sqlite,
                 database_url: Some(temp_sqlite_url()),
                 auto_create: true,
                 history: HistoryConfig::default(),
             },
-            scenes: smart_home_core::config::ScenesConfig::default(),
-            automations: smart_home_core::config::AutomationsConfig::default(),
-            scripts: smart_home_core::config::ScriptsConfig::default(),
-            telemetry: smart_home_core::config::TelemetryConfig::default(),
+            scenes: homecmdr_core::config::ScenesConfig::default(),
+            automations: homecmdr_core::config::AutomationsConfig::default(),
+            scripts: homecmdr_core::config::ScriptsConfig::default(),
+            telemetry: homecmdr_core::config::TelemetryConfig::default(),
             adapters: adapters.into_iter().collect(),
-            auth: smart_home_core::config::AuthConfig {
+            auth: homecmdr_core::config::AuthConfig {
                 master_key: TEST_MASTER_KEY.to_string(),
             },
         }
@@ -4698,7 +4698,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("smart-home-api-scenes-{unique}"));
+        let path = std::env::temp_dir().join(format!("homecmdr-api-scenes-{unique}"));
         fs::create_dir_all(&path).expect("create temp scene dir");
 
         for (name, source) in files {
@@ -6661,7 +6661,7 @@ mod tests {
                 .expect("updated device exists")
                 .attributes
                 .get("brightness"),
-            Some(&smart_home_core::model::AttributeValue::Integer(42))
+            Some(&homecmdr_core::model::AttributeValue::Integer(42))
         );
 
         let _ = shutdown.send(());
@@ -6818,7 +6818,7 @@ mod tests {
     #[tokio::test]
     async fn websocket_emits_scripts_reload_lifecycle_events() {
         let scripts_dir = std::env::temp_dir().join(format!(
-            "smart-home-api-scripts-{}",
+            "homecmdr-api-scripts-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time")
@@ -6920,8 +6920,11 @@ mod tests {
         .await;
 
         let config =
-            Config::load_from_file("/home/andy/projects/rust_home/smart-home/config/default.toml")
-                .expect("default config loads successfully");
+            Config::load_from_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../config/default.toml"
+            ))
+            .expect("default config loads successfully");
         let mut adapter_config = config
             .adapters
             .get("open_meteo")

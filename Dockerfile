@@ -41,20 +41,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for the service.
-RUN useradd --system --no-create-home --shell /sbin/nologin smart-home
+RUN useradd --system --no-create-home --shell /sbin/nologin homecmdr
 
-COPY --from=builder /build/target/release/api /usr/local/bin/smart-home
+COPY --from=builder /build/target/release/api /usr/local/bin/homecmdr
 
 # /config holds the TOML config file and Lua assets (scenes, automations, scripts).
 # /data   holds the SQLite database.
 # Both are declared as volumes so they can be bind-mounted from the host.
 VOLUME ["/config", "/data"]
 
-ENV SMART_HOME_CONFIG=/config/default.toml
-ENV SMART_HOME_DATA_DIR=/data
+ENV HOMECMDR_CONFIG=/config/default.toml
+ENV HOMECMDR_DATA_DIR=/data
 
-USER smart-home
+USER homecmdr
 
 EXPOSE 3001
 
-ENTRYPOINT ["smart-home"]
+ENTRYPOINT ["homecmdr"]

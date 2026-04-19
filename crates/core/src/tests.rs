@@ -126,7 +126,7 @@ fn write_temp_config(contents: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after unix epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("smart-home-config-{unique}.toml"));
+    let path = std::env::temp_dir().join(format!("homecmdr-config-{unique}.toml"));
 
     fs::write(&path, contents).expect("write temp config file");
     path
@@ -1438,8 +1438,11 @@ async fn runtime_shuts_down_cleanly_on_shutdown_signal() {
 #[test]
 fn config_loads_default_toml() {
     let config =
-        Config::load_from_file("/home/andy/projects/rust_home/smart-home/config/default.toml")
-            .expect("default config loads successfully");
+        Config::load_from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../config/default.toml"
+        ))
+        .expect("default config loads successfully");
 
     assert_eq!(config.runtime.event_bus_capacity, 1024);
     assert_eq!(config.logging.level, "info");
@@ -1450,7 +1453,7 @@ fn config_loads_default_toml() {
     );
     assert_eq!(
         config.persistence.database_url.as_deref(),
-        Some("sqlite://data/smart-home.db")
+        Some("sqlite://data/homecmdr.db")
     );
     assert!(config.persistence.auto_create);
     assert!(config.persistence.history.enabled);

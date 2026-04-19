@@ -1,6 +1,6 @@
-# Smart Home Dashboard — Reference Example
+# HomeCmdr Dashboard — Reference Example
 
-This directory contains a fully functional reference dashboard for the Smart Home API.
+This directory contains a fully functional reference dashboard for the HomeCmdr API.
 
 It is an **external client** — intentionally separate from the API binary. The project ships the API; you own the dashboard.
 
@@ -17,7 +17,7 @@ examples/dashboard-template/
 │   ├── utils.js            Formatting helpers and URL utilities
 │   ├── api.js              Authenticated HTTP client (createApiClient)
 │   ├── websocket.js        WebSocket manager with exponential-backoff reconnect
-│   └── app.js              Alpine.js component registration (smartHomeApp)
+│   └── app.js              Alpine.js component registration (homeCmdrApp)
 └── README.md               This file
 ```
 
@@ -25,7 +25,7 @@ No build step. No npm. No bundler. Open the folder, serve it, done.
 
 ## Prerequisites
 
-- The Smart Home API running (`cargo run -p api`)
+- The HomeCmdr API running (`cargo run -p api`)
 - Any static file server (Python, Node, Caddy, nginx, etc.)
 
 ## Running the Dashboard

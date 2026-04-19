@@ -1,4 +1,4 @@
-# Smart Home TODO
+# HomeCmdr TODO
 
 Generated from a docs and code review of the current repository state.
 

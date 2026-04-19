@@ -9,25 +9,25 @@ use rumqttc::{
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
-use smart_home_core::bus::EventBus;
-use smart_home_core::capability::{
+use homecmdr_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
+use homecmdr_core::bus::EventBus;
+use homecmdr_core::capability::{
     accumulation_value, measurement_value, BATTERY, BRIGHTNESS, COLOR_MODE, COLOR_TEMPERATURE,
     COLOR_XY, CONTACT, COVER_POSITION, COVER_TILT, CURRENT, ENERGY_MONTH, ENERGY_TODAY,
     ENERGY_TOTAL, ENERGY_YESTERDAY, HUMIDITY, LOCK, MOTION, OCCUPANCY, POWER, POWER_CONSUMPTION,
     SMOKE, STATE, TEMPERATURE, VOLTAGE, WATER_LEAK,
 };
-use smart_home_core::command::DeviceCommand;
-use smart_home_core::config::AdapterConfig;
-use smart_home_core::event::Event;
-use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
-use smart_home_core::registry::DeviceRegistry;
+use homecmdr_core::command::DeviceCommand;
+use homecmdr_core::config::AdapterConfig;
+use homecmdr_core::event::Event;
+use homecmdr_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
+use homecmdr_core::registry::DeviceRegistry;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 
 const ADAPTER_NAME: &str = "zigbee2mqtt";
 const DEFAULT_BASE_TOPIC: &str = "zigbee2mqtt";
-const DEFAULT_CLIENT_ID: &str = "smart-home-zigbee2mqtt";
+const DEFAULT_CLIENT_ID: &str = "homecmdr-zigbee2mqtt";
 const DEFAULT_KEEPALIVE_SECS: u64 = 30;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 5;
 
@@ -1635,8 +1635,8 @@ impl SupportedDeviceKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smart_home_core::bus::EventBus;
-    use smart_home_core::model::RoomId;
+    use homecmdr_core::bus::EventBus;
+    use homecmdr_core::model::RoomId;
     use tokio::sync::Mutex as TokioMutex;
 
     #[derive(Default)]
@@ -2149,7 +2149,7 @@ mod tests {
         let adapter = build_test_adapter(broker).await;
         let registry = DeviceRegistry::new(EventBus::new(16));
         registry
-            .upsert_room(smart_home_core::model::Room {
+            .upsert_room(homecmdr_core::model::Room {
                 id: RoomId("living_room".to_string()),
                 name: "Living Room".to_string(),
             })

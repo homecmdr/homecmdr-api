@@ -1,6 +1,6 @@
 # adapter-open-meteo
 
-Open-Meteo weather adapter for Smart Home.
+Open-Meteo weather adapter for HomeCmdr.
 
 ## What It Does
 

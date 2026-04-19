@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide covers three ways to run the smart-home server:
+This guide covers three ways to run the homecmdr server:
 
 1. [Docker (recommended for home servers)](#docker)
 2. [Bare metal / systemd](#bare-metal--systemd)
@@ -23,8 +23,8 @@ All deployments need:
 
 ```bash
 # Clone or copy the repository
-git clone https://github.com/anomalyco/smart-home smart-home
-cd smart-home
+git clone https://github.com/anomalyco/homecmdr homecmdr
+cd homecmdr
 
 # Copy and edit the config
 cp config/default.toml config/local.toml
@@ -35,7 +35,7 @@ docker compose up -d
 ```
 
 The API listens on `http://localhost:3001` by default.  
-Logs: `docker compose logs -f smart-home`  
+Logs: `docker compose logs -f homecmdr`  
 Stop: `docker compose down`
 
 ### What the compose file does
@@ -44,18 +44,18 @@ Stop: `docker compose down`
 |---|---|
 | Restart policy | `unless-stopped` — survives reboots |
 | Config volume | `./config` bind-mounted read-only at `/config` |
-| Data volume | named Docker volume `smart-home-data` at `/data` |
-| Env vars | `SMART_HOME_CONFIG`, `SMART_HOME_DATA_DIR` |
+| Data volume | named Docker volume `homecmdr-data` at `/data` |
+| Env vars | `HOMECMDR_CONFIG`, `HOMECMDR_DATA_DIR` |
 
 ### Overriding the master key without editing the config file
 
 Create a `.env` file (never commit it):
 
 ```
-SMART_HOME_MASTER_KEY=my-real-secret-key
+HOMECMDR_MASTER_KEY=my-real-secret-key
 ```
 
-Then uncomment the `SMART_HOME_MASTER_KEY` line in `docker-compose.yml`.
+Then uncomment the `HOMECMDR_MASTER_KEY` line in `docker-compose.yml`.
 
 ### Updating to a new image
 
@@ -76,47 +76,47 @@ The SQLite database in the named volume is preserved across updates.
 
 ```bash
 cargo build --release -p api
-sudo cp target/release/api /usr/local/bin/smart-home
+sudo cp target/release/api /usr/local/bin/homecmdr
 ```
 
 ### 2. Create the system user and directories
 
 ```bash
-sudo useradd --system --no-create-home --shell /sbin/nologin smart-home
-sudo mkdir -p /etc/smart-home /var/lib/smart-home
-sudo chown smart-home:smart-home /var/lib/smart-home
+sudo useradd --system --no-create-home --shell /sbin/nologin homecmdr
+sudo mkdir -p /etc/homecmdr /var/lib/homecmdr
+sudo chown homecmdr:homecmdr /var/lib/homecmdr
 ```
 
 ### 3. Install the config
 
 ```bash
-sudo cp config/default.toml /etc/smart-home/default.toml
-sudo $EDITOR /etc/smart-home/default.toml   # set auth.master_key, adapters, etc.
-sudo chmod 640 /etc/smart-home/default.toml
-sudo chown root:smart-home /etc/smart-home/default.toml
+sudo cp config/default.toml /etc/homecmdr/default.toml
+sudo $EDITOR /etc/homecmdr/default.toml   # set auth.master_key, adapters, etc.
+sudo chmod 640 /etc/homecmdr/default.toml
+sudo chown root:homecmdr /etc/homecmdr/default.toml
 ```
 
 Copy Lua asset directories if you use scenes, automations, or scripts:
 
 ```bash
-sudo cp -r config/scenes      /etc/smart-home/scenes
-sudo cp -r config/automations /etc/smart-home/automations
-sudo cp -r config/scripts     /etc/smart-home/scripts
-sudo chown -R smart-home:smart-home /etc/smart-home/scenes \
-    /etc/smart-home/automations /etc/smart-home/scripts
+sudo cp -r config/scenes      /etc/homecmdr/scenes
+sudo cp -r config/automations /etc/homecmdr/automations
+sudo cp -r config/scripts     /etc/homecmdr/scripts
+sudo chown -R homecmdr:homecmdr /etc/homecmdr/scenes \
+    /etc/homecmdr/automations /etc/homecmdr/scripts
 ```
 
-Update the directory paths in `/etc/smart-home/default.toml`:
+Update the directory paths in `/etc/homecmdr/default.toml`:
 
 ```toml
 [scenes]
-directory = "/etc/smart-home/scenes"
+directory = "/etc/homecmdr/scenes"
 
 [automations]
-directory = "/etc/smart-home/automations"
+directory = "/etc/homecmdr/automations"
 
 [scripts]
-directory = "/etc/smart-home/scripts"
+directory = "/etc/homecmdr/scripts"
 ```
 
 ### 4. Store the master key securely (optional)
@@ -124,11 +124,11 @@ directory = "/etc/smart-home/scripts"
 Instead of putting the key directly in the config, use an `EnvironmentFile`:
 
 ```bash
-sudo tee /etc/smart-home/secrets.env > /dev/null <<'EOF'
-SMART_HOME_MASTER_KEY=your-real-key-here
+sudo tee /etc/homecmdr/secrets.env > /dev/null <<'EOF'
+HOMECMDR_MASTER_KEY=your-real-key-here
 EOF
-sudo chmod 600 /etc/smart-home/secrets.env
-sudo chown root:smart-home /etc/smart-home/secrets.env
+sudo chmod 600 /etc/homecmdr/secrets.env
+sudo chown root:homecmdr /etc/homecmdr/secrets.env
 ```
 
 Uncomment the `EnvironmentFile` line in the unit file (step 5).
@@ -136,24 +136,24 @@ Uncomment the `EnvironmentFile` line in the unit file (step 5).
 ### 5. Install and start the systemd unit
 
 ```bash
-sudo cp deploy/smart-home.service /etc/systemd/system/smart-home.service
+sudo cp deploy/homecmdr.service /etc/systemd/system/homecmdr.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now smart-home
+sudo systemctl enable --now homecmdr
 ```
 
 Check status and logs:
 
 ```bash
-sudo systemctl status smart-home
-sudo journalctl -u smart-home -f
+sudo systemctl status homecmdr
+sudo journalctl -u homecmdr -f
 ```
 
 ### Updating the binary
 
 ```bash
 cargo build --release -p api
-sudo cp target/release/api /usr/local/bin/smart-home
-sudo systemctl restart smart-home
+sudo cp target/release/api /usr/local/bin/homecmdr
+sudo systemctl restart homecmdr
 ```
 
 ---
@@ -175,22 +175,22 @@ Edit `config/dev.toml`:
 bind_address = "127.0.0.1:3002"   # different port
 
 [persistence]
-database_url = "sqlite://data/dev-smart-home.db"   # different DB file
+database_url = "sqlite://data/dev-homecmdr.db"   # different DB file
 
 [adapters.zigbee2mqtt]
-client_id = "smart-home-dev"   # different MQTT client ID (avoids session conflicts)
+client_id = "homecmdr-dev"   # different MQTT client ID (avoids session conflicts)
 ```
 
 ### Run the dev instance
 
 ```bash
-SMART_HOME_CONFIG=config/dev.toml cargo run -p api
+HOMECMDR_CONFIG=config/dev.toml cargo run -p api
 ```
 
 Or set the env var once in your shell:
 
 ```bash
-export SMART_HOME_CONFIG=config/dev.toml
+export HOMECMDR_CONFIG=config/dev.toml
 cargo run -p api
 ```
 

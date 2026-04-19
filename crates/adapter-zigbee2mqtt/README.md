@@ -21,7 +21,7 @@ Supported commands:
 enabled = true
 server = "mqtt://127.0.0.1:1883"
 base_topic = "zigbee2mqtt"
-client_id = "smart-home-zigbee2mqtt"
+client_id = "homecmdr-zigbee2mqtt"
 keepalive_secs = 30
 command_timeout_secs = 5
 ```

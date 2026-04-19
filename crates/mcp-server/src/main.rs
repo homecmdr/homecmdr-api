@@ -13,19 +13,19 @@ use api::ApiClient;
 #[derive(Parser)]
 #[command(
     name = "mcp-server",
-    about = "Smart home MCP server — JSON-RPC 2.0 over stdio"
+    about = "HomeCmdr MCP server — JSON-RPC 2.0 over stdio"
 )]
 struct Args {
-    /// Base URL of the smart home API.
+    /// Base URL of the HomeCmdr API.
     #[arg(long, default_value = "http://127.0.0.1:3001")]
     api_url: String,
 
     /// Bearer token for API authentication.
-    #[arg(long, env = "SMART_HOME_TOKEN")]
+    #[arg(long, env = "HOMECMDR_TOKEN")]
     token: String,
 
     /// Workspace root directory (used for scaffold_adapter and cargo tools).
-    #[arg(long, env = "SMART_HOME_WORKSPACE", default_value = ".")]
+    #[arg(long, env = "HOMECMDR_WORKSPACE", default_value = ".")]
     workspace: String,
 }
 
@@ -97,7 +97,7 @@ async fn dispatch(
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
             "serverInfo": {
-                "name": "smart-home-mcp",
+                "name": "homecmdr-mcp",
                 "version": "0.1.0"
             }
         })),

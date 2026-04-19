@@ -1,10 +1,10 @@
 # adapter-elgato-lights
 
-Elgato Light adapter for Smart Home.
+Elgato Light adapter for HomeCmdr.
 
 ## What It Does
 
-This adapter polls the Elgato Light HTTP API and exposes one logical Smart Home light device per Elgato light index.
+This adapter polls the Elgato Light HTTP API and exposes one logical HomeCmdr light device per Elgato light index.
 
 Example device IDs:
 

@@ -3,18 +3,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
-use smart_home_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
-use smart_home_core::bus::EventBus;
-use smart_home_core::capability::{
+use homecmdr_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
+use homecmdr_core::bus::EventBus;
+use homecmdr_core::capability::{
     accumulation_value, measurement_value, CLOUD_COVERAGE, HUMIDITY, PRESSURE,
     TEMPERATURE_APPARENT, TEMPERATURE_OUTDOOR, UV_INDEX, WEATHER_CONDITION, WIND_DIRECTION,
     WIND_GUST, WIND_SPEED,
 };
-use smart_home_core::config::AdapterConfig;
-use smart_home_core::event::Event;
-use smart_home_core::http::{external_http_client, send_with_retry};
-use smart_home_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
-use smart_home_core::registry::DeviceRegistry;
+use homecmdr_core::config::AdapterConfig;
+use homecmdr_core::event::Event;
+use homecmdr_core::http::{external_http_client, send_with_retry};
+use homecmdr_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
+use homecmdr_core::registry::DeviceRegistry;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 

@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Smart Home API
+  title: HomeCmdr API
   version: 0.1.0
   description: |
     OpenAPI description for the HTTP and WebSocket API implemented by `crates/api`.
@@ -12,7 +12,7 @@ info:
     - The default bind address in `config/default.toml` is `127.0.0.1:3001`.
     - `GET /events` upgrades to a WebSocket connection. Bruno may import it as a normal GET request; the event frame schemas are included in `components.schemas.EventFrame` for reference.
     - All routes except `GET /health` and `GET /ready` require `Authorization: Bearer <token>`.
-      The token may be the master key (from `auth.master_key` in config or `SMART_HOME_MASTER_KEY`
+      The token may be the master key (from `auth.master_key` in config or `HOMECMDR_MASTER_KEY`
       env var, which always grants `admin`) or an API key created via `POST /auth/keys`.
 servers:
   - url: http://127.0.0.1:3001
@@ -1617,5 +1617,5 @@ components:
       scheme: bearer
       description: |
         All routes except `GET /health` and `GET /ready` require `Authorization: Bearer <token>`.
-        Accepted values: the master key (from `auth.master_key` in config or `SMART_HOME_MASTER_KEY`
+        Accepted values: the master key (from `auth.master_key` in config or `HOMECMDR_MASTER_KEY`
         env var, always grants `admin`) or an API key created via `POST /auth/keys`.

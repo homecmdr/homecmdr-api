@@ -1,33 +1,33 @@
 [Unit]
-Description=Smart Home automation server
-Documentation=https://github.com/anomalyco/smart-home
+Description=HomeCmdr automation server
+Documentation=https://github.com/homecmdr/homecmdr-api
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=smart-home
-Group=smart-home
+User=homecmdr
+Group=homecmdr
 
-ExecStart=/usr/local/bin/smart-home
+ExecStart=/usr/local/bin/homecmdr
 Restart=on-failure
 RestartSec=5s
 
 # Configuration
-Environment=SMART_HOME_CONFIG=/etc/smart-home/default.toml
-Environment=SMART_HOME_DATA_DIR=/var/lib/smart-home
+Environment=HOMECMDR_CONFIG=/etc/homecmdr/default.toml
+Environment=HOMECMDR_DATA_DIR=/var/lib/homecmdr
 
 # Override the master key without touching the config file:
-# EnvironmentFile=/etc/smart-home/secrets.env
-# (put SMART_HOME_MASTER_KEY=your-key-here in that file, mode 0600)
+# EnvironmentFile=/etc/homecmdr/secrets.env
+# (put HOMECMDR_MASTER_KEY=your-key-here in that file, mode 0600)
 
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/smart-home
-ReadOnlyPaths=/etc/smart-home
+ReadWritePaths=/var/lib/homecmdr
+ReadOnlyPaths=/etc/homecmdr
 
 # Allow binding to port 3001 (>1024 — no special capability needed).
 # If you move the bind address to a privileged port (<1024) add:
