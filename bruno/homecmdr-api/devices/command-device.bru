@@ -6,6 +6,8 @@ meta {
 
 post {
   url: {{baseUrl}}/devices/:id/command
+  body: json
+  auth: bearer
 }
 
 params:path {
@@ -16,11 +18,20 @@ headers {
   content-type: application/json
 }
 
-body {
+auth:bearer {
+  token: 7s4db6oDjpJiFoUoF1TCuxRpzdlQIn8G
+}
+
+body:json {
   {
     "capability": "power",
     "action": "toggle"
   }
+}
+
+vars:pre-request {
+  baseUrl: 127.0.0.1:3001
+  deviceId: roku_tv:tv
 }
 
 settings {
