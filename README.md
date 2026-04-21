@@ -20,6 +20,7 @@ Start here depending on your goal:
 - build or extend a dashboard: https://github.com/homecmdr/homecmdr-dash
 - write Lua scenes and automations: `config/docs/lua_runtime_guide.md`
 - build a new adapter: `config/docs/adapter_authoring_guide.md`
+- build a new WASM plugin: `config/docs/plugin_authoring_guide.md`
 - operate as an agent in this repo: `config/docs/agent_workflows.md`
 
 Adapter-specific docs:
@@ -37,20 +38,24 @@ Lua runtime docs:
 homecmdr/
 ├── config/
 │   ├── default.toml
+│   ├── plugins/          ← drop .wasm + .plugin.toml here
 │   ├── scenes/
 │   ├── automations/
 │   ├── scripts/
 │   └── docs/
 ├── crates/
-│   ├── adapters/
+│   ├── adapters/         ← empty shim (backwards compat only)
 │   ├── adapter-open-meteo/
 │   ├── api/
 │   ├── automations/
 │   ├── core/
 │   ├── lua-host/
+│   ├── plugin-host/      ← WASM runtime (wasmtime component model)
 │   ├── scenes/
 │   ├── store-sql/
 │   └── store-postgres/
+├── plugins/
+│   └── open-meteo/       ← WASM guest crate (outside main workspace)
 └── README.md
 ```
 
@@ -63,26 +68,25 @@ homecmdr/
 - `crates/store-sql` is the default SQLite persistence backend. Stores current device and room state, full device/attribute history, command audit log, and scene/automation execution history.
 - `crates/store-postgres` is an alternative PostgreSQL backend implementing the same traits. Enable it with `persistence.backend = "postgres"` and a `database_url` in `config/default.toml`.
 
-### Adapters
+### Adapters (WASM Plugins)
 
-Adapters are the integration boundary.
+Adapters are WASM plugins, not compile-time Rust crates. The plugin host (`crates/plugin-host`) uses wasmtime with the component model to load `.wasm` binaries at runtime from `config/plugins/`.
 
-Each adapter crate owns:
+Each plugin:
 
-- its config struct
-- config validation
-- external protocol/client behavior
-- canonical state mapping
-- command translation
-- factory registration
-- tests
+- is a Rust crate targeting `wasm32-wasip2`, compiled to a `.wasm` binary
+- implements the WIT interface at `crates/plugin-host/wit/homecmdr-plugin.wit`
+- ships with a `.plugin.toml` manifest declaring its name and poll interval
+- receives HTTP access via the host-provided `host-http` import (backed by `ureq`)
+- is configured via the same `[adapters.<name>]` section in `config/default.toml`
 
-The system uses a compile-time factory registry:
+The `WasmAdapter` and `WasmAdapterFactory` types in `crates/plugin-host` implement the same `Adapter`/`AdapterFactory` traits as native adapters, so the rest of the runtime is unaware of WASM vs native.
 
-- `crates/core/src/adapter.rs` defines `Adapter`, `AdapterFactory`, and `RegisteredAdapterFactory`
-- `inventory` is used for distributed factory registration
-- `crates/api` discovers factories dynamically at startup
-- `crates/adapters` exists only to link adapter crates into the final binary
+To install a plugin, drop its `.wasm` and `.plugin.toml` into `config/plugins/`. The directory is scanned at startup when `[plugins] enabled = true` is set in `config/default.toml`.
+
+See `config/docs/plugin_authoring_guide.md` for step-by-step instructions on building a new plugin.
+
+The bundled `crates/adapter-open-meteo` native crate is kept for unit tests and as a reference implementation. At runtime it is shadowed by `config/plugins/open_meteo.wasm`.
 
 ### Devices And Rooms
 
@@ -122,22 +126,17 @@ The server handles SIGTERM and ctrl-c and drains in-flight requests with a 30-se
 
 ## Current Adapters
 
-### Open-Meteo *(bundled)*
+### Open-Meteo *(WASM plugin)*
 
-- crate: `crates/adapter-open-meteo`
+- wasm: `config/plugins/open_meteo.wasm`
+- source: `plugins/open-meteo/`
+- native reference: `crates/adapter-open-meteo` (tests only)
 - type: poll-only sensor adapter
 - publishes weather sensors
 
 ### Official adapters
 
-The remaining official adapters (Elgato Key Light, Ollama, Roku TV, Zigbee2MQTT) live in the
-[homecmdr/adapters](https://github.com/homecmdr/adapters) registry. Install them with:
-
-```bash
-homecmdr pull adapter-elgato-lights
-```
-
-See [homecmdr/homecmdr-cli](https://github.com/homecmdr/homecmdr-cli) for the CLI.
+Additional official adapters (Elgato Key Light, Ollama, Roku TV, Zigbee2MQTT) can be installed by dropping their `.wasm` binary and `.plugin.toml` manifest into `config/plugins/`.
 
 ## Configuration
 

@@ -10,5 +10,6 @@ members = [
     "crates/store-postgres",
     "crates/mcp-server",
     "crates/plugin-host",
+    "crates/plugin-sdk",
 ]
 resolver = "2"

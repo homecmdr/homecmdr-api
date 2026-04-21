@@ -1,7 +1,7 @@
 # HomeCmdr Agent Notes
 
 - Trust executable sources over prose when they disagree. Read `Cargo.toml`, `config/default.toml`, `crates/api/src/main.rs`, and the relevant crate before trusting `README.md`.
-- Highest-value repo docs are in `config/docs/`: `agent_workflows.md`, `adapter_authoring_guide.md`, `lua_runtime_guide.md`, and `api_reference.md`.
+- Highest-value repo docs are in `config/docs/`: `agent_workflows.md`, `adapter_authoring_guide.md`, `lua_runtime_guide.md`, `api_reference.md`, and `plugin_authoring_guide.md`.
 - The API does not serve a dashboard. Dashboards are external clients. The reference dashboard is at https://github.com/homecmdr/homecmdr-dash (Alpine.js + vanilla CSS, no build step). Use it as the canonical starting point when building or extending a dashboard.
 
 ## Commands
@@ -16,14 +16,16 @@
 - `HOMECMDR_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/homecmdr`).
 - `HOMECMDR_MASTER_KEY` env var overrides `auth.master_key` in config.
 - API bind address is configured via `api.bind_address` in `config/default.toml`; it is no longer hard-coded in `main.rs`.
-- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, or `cargo test -p adapter-open-meteo`.
+- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, `cargo test -p adapter-open-meteo`, or `cargo test -p homecmdr-plugin-host`.
 
 ## Workspace Map
 
 - `crates/core`: runtime contracts, config model, registry, command/capability model, event bus.
 - `crates/api`: only binary; starts runtime, loads Lua assets, exposes HTTP + WebSocket API, and wires persistence/history.
-- `crates/adapters`: link crate that pulls adapter crates into the final binary. Adapter discovery is compile-time via `inventory`.
-- `crates/adapter-open-meteo`: the one bundled adapter. Additional official adapters live at https://github.com/homecmdr/adapters and are installed via `homecmdr pull <adapter-name>`.
+- `crates/adapters`: empty shim kept for backwards compatibility; no longer links adapter crates. Do not add new deps here.
+- `crates/adapter-open-meteo`: native Rust implementation retained for reference and unit tests. It is **not** registered at runtime anymore — the WASM build in `plugins/open-meteo/` is used instead.
+- `crates/plugin-host`: WASM runtime (wasmtime 44, component model). Exposes `WasmAdapter`/`WasmAdapterFactory` that implement the same `Adapter`/`AdapterFactory` traits as native adapters, so `Runtime` and the API layer are unaware of WASM vs native. HTTP inside WASM is provided by `ureq` (pure-sync, no Tokio dependency).
+- `plugins/open-meteo/`: the Open Meteo WASM guest crate. Lives **outside** the main workspace (has its own `[workspace]` in `Cargo.toml`). Build target is `wasm32-wasip2`. Compiled binary is committed to `config/plugins/open_meteo.wasm`.
 - `crates/scenes`, `crates/automations`, `crates/lua-host`: Lua asset loading/execution. `mlua` is vendored Lua 5.4, so no system Lua dependency should be needed.
 - `crates/store-sql`: SQLite store plus in-code schema initialization/migrations and history storage.
 - `crates/store-postgres`: PostgreSQL store implementing the same `DeviceStore` + `ApiKeyStore` traits. Wired at startup when `persistence.backend = "postgres"` is set in config.
@@ -31,9 +33,11 @@
 
 ## Adapter Rules
 
-- Adapters from the official registry are installed with `homecmdr pull <adapter-name>` (see https://github.com/homecmdr/homecmdr-cli). After pulling, link the crate in three places: root `Cargo.toml`, `crates/adapters/Cargo.toml`, and `crates/adapters/src/lib.rs`.
-- New in-workspace adapters must also be linked in those same three places.
-- Register factories with `inventory::submit!`; `crates/api` discovers factories through `registered_adapter_factories()`.
+- Adapters are WASM plugins, not compile-time Rust crates. The plugin system lives in `crates/plugin-host`.
+- Official plugins are installed by dropping a `.wasm` binary and a `.plugin.toml` manifest into `config/plugins/`. The directory is scanned at startup when `[plugins] enabled = true` in `config/default.toml`.
+- To build a new plugin: create a Rust crate **outside** the main workspace (add an empty `[workspace]` table to its `Cargo.toml`), target `wasm32-wasip2`, and implement the WIT interface at `crates/plugin-host/wit/homecmdr-plugin.wit`. See `config/docs/plugin_authoring_guide.md` for the full workflow.
+- The `.plugin.toml` manifest must declare `[plugin] name = "<adapter_name>"` and `[runtime] poll_interval_secs = <n>`. The name must match the key used in `config/default.toml` under `[adapters]`.
+- WASM plugins shadow native adapters with the same name (info-logged). WASM takes precedence.
 - Do not add adapter-specific config structs to `crates/core/src/config.rs`; adapter config is loaded as generic JSON and parsed inside the adapter crate.
 - Do not add adapter-specific startup wiring to `crates/api/src/main.rs`.
 - Device IDs must stay namespaced as `"{adapter_name}:{vendor_id}"`.
