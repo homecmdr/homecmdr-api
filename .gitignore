@@ -1,5 +1,8 @@
 /target/
 
+# WASM guest crate build output (separate workspace, not covered by /target/)
+plugins/*/target/
+
 # Local SQLite databases
 *.db
 *.db-shm

@@ -82,6 +82,14 @@ pub enum Event {
         duration_ms: u64,
         errors: Vec<ReloadError>,
     },
+    PluginCatalogReloaded {
+        loaded_count: usize,
+        duration_ms: u64,
+    },
+    PluginCatalogReloadFailed {
+        duration_ms: u64,
+        errors: Vec<ReloadError>,
+    },
     SystemError {
         message: String,
     },

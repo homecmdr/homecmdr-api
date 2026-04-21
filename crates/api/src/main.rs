@@ -22,12 +22,12 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use homecmdr_adapters as _;
+use homecmdr_plugin_host::{create_engine, PluginManager, PluginManifest, WasmAdapterFactory};
 use homecmdr_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
     TriggerContext,
 };
-use homecmdr_core::adapter::{registered_adapter_factories, Adapter};
+use homecmdr_core::adapter::{Adapter, AdapterFactory};
 use homecmdr_core::capability::{
     CapabilityOwnershipPolicy, CapabilitySchema, ALL_CAPABILITIES, CAPABILITY_OWNERSHIP,
 };
@@ -241,6 +241,9 @@ struct AppState {
     scripts_enabled: bool,
     scripts_directory: String,
     backstop_timeout: Duration,
+    plugins_enabled: bool,
+    plugins_directory: String,
+    plugin_catalog: Arc<RwLock<Vec<PluginManifest>>>,
 }
 
 const _: fn() = || {
@@ -320,6 +323,27 @@ struct ReloadWatchItem {
     target: &'static str,
     enabled: bool,
     directory: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginSummary {
+    name: String,
+    version: String,
+    description: String,
+    api_version: String,
+    poll_interval_secs: u64,
+}
+
+impl From<&PluginManifest> for PluginSummary {
+    fn from(m: &PluginManifest) -> Self {
+        Self {
+            name: m.plugin.name.clone(),
+            version: m.plugin.version.clone(),
+            description: m.plugin.description.clone(),
+            api_version: m.plugin.api_version.clone(),
+            poll_interval_secs: m.runtime.poll_interval_secs,
+        }
+    }
 }
 
 /// A single Lua file entry returned by `GET /files`.
@@ -830,6 +854,19 @@ async fn main() -> Result<()> {
     );
     let automation_control = Arc::new(automation_runner.controller());
     let (automation_runner_tx, automation_runner_rx) = watch::channel(automation_runner.clone());
+
+    // Scan the plugin directory once at startup to populate the catalog shown by GET /plugins.
+    let initial_plugin_manifests = if config.plugins.enabled {
+        let plugin_dir = std::path::Path::new(&config.plugins.directory);
+        if plugin_dir.exists() {
+            PluginManager::scan_manifests(plugin_dir)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     let app_state = AppState {
         runtime: runtime.clone(),
         scenes: Arc::new(RwLock::new(scenes)),
@@ -853,6 +890,9 @@ async fn main() -> Result<()> {
         scripts_enabled: config.scripts.enabled,
         scripts_directory: config.scripts.directory.clone(),
         backstop_timeout,
+        plugins_enabled: config.plugins.enabled,
+        plugins_directory: config.plugins.directory.clone(),
+        plugin_catalog: Arc::new(RwLock::new(initial_plugin_manifests)),
     };
     let app = app(app_state.clone(), &config);
     let reload_controller = ReloadController {
@@ -1005,30 +1045,52 @@ async fn main() -> Result<()> {
 }
 
 fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
-    let mut factories = std::collections::HashMap::new();
+    // ── 1. WASM (runtime) factories ──────────────────────────────────────────
+    let mut wasm_factories: std::collections::HashMap<&'static str, WasmAdapterFactory> =
+        std::collections::HashMap::new();
 
-    for factory in registered_adapter_factories() {
-        if factories.insert(factory.name(), factory).is_some() {
-            anyhow::bail!(
-                "duplicate adapter factory registration for '{}'",
-                factory.name()
+    if config.plugins.enabled {
+        let engine = create_engine()
+            .context("failed to initialise WASM engine")?;
+        let plugin_dir = std::path::Path::new(&config.plugins.directory);
+
+        if plugin_dir.exists() {
+            let scanned = PluginManager::scan(plugin_dir, &engine)
+                .with_context(|| {
+                    format!(
+                        "failed to scan plugin directory '{}'",
+                        plugin_dir.display()
+                    )
+                })?;
+
+            for factory in scanned {
+                let name = factory.name();
+                if wasm_factories.insert(name, factory).is_some() {
+                    anyhow::bail!("duplicate WASM plugin registration for '{}'", name);
+                }
+            }
+        } else {
+            tracing::info!(
+                directory = %plugin_dir.display(),
+                "plugin directory does not exist; skipping WASM plugin scan"
             );
         }
     }
 
-    let mut adapters = Vec::new();
+    // ── 2. Instantiate adapters listed in config ─────────────────────────────
+    let mut adapters: Vec<Box<dyn Adapter>> = Vec::new();
     let mut summaries = Vec::new();
 
     for (name, adapter_config) in &config.adapters {
-        let factory = factories
-            .get(name.as_str())
-            .copied()
-            .with_context(|| format!("no adapter factory registered for '{name}'"))?;
+        let adapter_opt = if let Some(factory) = wasm_factories.get(name.as_str()) {
+            factory
+                .build(adapter_config.clone())
+                .with_context(|| format!("failed to build WASM adapter '{name}'"))?
+        } else {
+            anyhow::bail!("no adapter factory registered for '{name}'");
+        };
 
-        if let Some(adapter) = factory
-            .build(adapter_config.clone())
-            .with_context(|| format!("failed to build adapter '{name}'"))?
-        {
+        if let Some(adapter) = adapter_opt {
             summaries.push(name.clone());
             adapters.push(adapter);
         }
@@ -1263,6 +1325,9 @@ fn make_state(
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default(),
         backstop_timeout: Duration::from_secs(3600),
+        plugins_enabled: false,
+        plugins_directory: String::new(),
+        plugin_catalog: Arc::new(RwLock::new(Vec::new())),
     }
 }
 
@@ -1850,6 +1915,8 @@ async fn run_persistence_worker(
                 | Event::ScriptsReloadStarted
                 | Event::ScriptsReloaded { .. }
                 | Event::ScriptsReloadFailed { .. }
+                | Event::PluginCatalogReloaded { .. }
+                | Event::PluginCatalogReloadFailed { .. }
                 | Event::SystemError { .. },
             ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -2156,6 +2223,8 @@ fn app(state: AppState, config: &Config) -> Router {
         )
         .route("/audit/commands", get(get_command_audit))
         .route("/events", get(events))
+        .route("/plugins", get(list_plugins))
+        .route("/plugins/{name}", get(get_plugin))
         .route_layer({
             let s = state.clone();
             middleware::from_fn(move |req: Request, next: Next| {
@@ -2219,6 +2288,7 @@ fn app(state: AppState, config: &Config) -> Router {
         .route("/scenes/reload", post(reload_scenes))
         .route("/automations/reload", post(reload_automations))
         .route("/scripts/reload", post(reload_scripts))
+        .route("/plugins/reload", post(reload_plugins))
         .route("/auth/keys", post(create_api_key).get(list_api_keys))
         .route("/auth/keys/{id}", delete(delete_api_key))
         .route_layer({
@@ -2451,6 +2521,78 @@ async fn reload_scripts(State(state): State<AppState>) -> Result<Json<ReloadResp
         .await
         .map_err(|error| internal_api_error(anyhow::anyhow!(error.to_string())))?;
     Ok(Json(reload_response_from_result("scripts", result)))
+}
+
+// ── Plugin catalog routes ───────────────────────────────────────────────────
+
+async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginSummary>> {
+    let catalog = read_lock(&state.plugin_catalog);
+    Json(catalog.iter().map(PluginSummary::from).collect())
+}
+
+async fn get_plugin(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<PluginSummary>, ApiError> {
+    let catalog = read_lock(&state.plugin_catalog);
+    catalog
+        .iter()
+        .find(|m| m.plugin.name == name)
+        .map(PluginSummary::from)
+        .map(Json)
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("plugin '{name}' not found"),
+        })
+}
+
+async fn reload_plugins(
+    State(state): State<AppState>,
+) -> Result<Json<ReloadResponse>, ApiError> {
+    if !state.plugins_enabled {
+        return Ok(Json(ReloadResponse {
+            status: "error",
+            target: "plugins",
+            loaded_count: 0,
+            errors: vec![ReloadErrorDetail {
+                file: state.plugins_directory.clone(),
+                message: "plugin loading is not enabled".to_string(),
+            }],
+            duration_ms: 0,
+        }));
+    }
+
+    let started = std::time::Instant::now();
+    let plugin_dir = std::path::PathBuf::from(&state.plugins_directory);
+    let runtime = state.runtime.clone();
+
+    let manifests = tokio::task::spawn_blocking(move || {
+        if plugin_dir.exists() {
+            PluginManager::scan_manifests(&plugin_dir)
+        } else {
+            Vec::new()
+        }
+    })
+    .await
+    .map_err(|e| internal_api_error(anyhow::anyhow!(e.to_string())))?;
+
+    let loaded_count = manifests.len();
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    *write_lock(&state.plugin_catalog) = manifests;
+
+    runtime.bus().publish(Event::PluginCatalogReloaded {
+        loaded_count,
+        duration_ms,
+    });
+
+    Ok(Json(ReloadResponse {
+        status: "ok",
+        target: "plugins",
+        loaded_count,
+        errors: Vec::new(),
+        duration_ms: duration_ms as u128,
+    }))
 }
 
 async fn create_api_key(
@@ -3673,6 +3815,30 @@ fn event_to_frame(event: Event) -> serde_json::Value {
                 "errors": errors
             })
         }
+        Event::PluginCatalogReloaded {
+            loaded_count,
+            duration_ms,
+        } => {
+            json!({
+                "type": "plugin.catalog_reloaded",
+                "target": "plugins",
+                "loaded_count": loaded_count,
+                "duration_ms": duration_ms,
+                "errors": []
+            })
+        }
+        Event::PluginCatalogReloadFailed {
+            duration_ms,
+            errors,
+        } => {
+            json!({
+                "type": "plugin.catalog_reload_failed",
+                "target": "plugins",
+                "loaded_count": 0,
+                "duration_ms": duration_ms,
+                "errors": errors
+            })
+        }
         Event::SystemError { message } => {
             json!({ "type": "system.error", "message": message })
         }
@@ -4394,6 +4560,7 @@ mod tests {
             auth: homecmdr_core::config::AuthConfig {
                 master_key: TEST_MASTER_KEY.to_string(),
             },
+            plugins: homecmdr_core::config::PluginsConfig::default(),
         }
     }
 
@@ -5417,36 +5584,39 @@ mod tests {
                 store: None,
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                history: history_settings(false),
-                scenes_enabled: false,
-                automations_enabled: true,
-                scenes_directory: String::new(),
-                automations_directory: automation_dir.to_string_lossy().to_string(),
-                scenes_watch: false,
-                automations_watch: false,
-                scripts_watch: false,
-                scripts_enabled: false,
-                scripts_directory: String::new(),
-                backstop_timeout: Duration::from_secs(3600),
-            },
-            &config,
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("read test listener address");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("test server exits cleanly");
-        });
+                 history: history_settings(false),
+                 scenes_enabled: false,
+                 automations_enabled: true,
+                 scenes_directory: String::new(),
+                 automations_directory: automation_dir.to_string_lossy().to_string(),
+                 scenes_watch: false,
+                 automations_watch: false,
+                 scripts_watch: false,
+                 scripts_enabled: false,
+                 scripts_directory: String::new(),
+                 backstop_timeout: Duration::from_secs(3600),
+                 plugins_enabled: false,
+                 plugins_directory: String::new(),
+                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+             },
+             &config,
+         );
+         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+             .await
+             .expect("bind test listener");
+         let addr = listener.local_addr().expect("read test listener address");
+         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+         let handle = tokio::spawn(async move {
+             axum::serve(listener, app)
+                 .with_graceful_shutdown(async {
+                     let _ = shutdown_rx.await;
+                 })
+                 .await
+                 .expect("test server exits cleanly");
+         });
 
-        let response = test_client()
-            .get(format!("http://{addr}/automations"))
+         let response = test_client()
+             .get(format!("http://{addr}/automations"))
             .send()
             .await
             .expect("automations request succeeds");
@@ -5563,24 +5733,27 @@ mod tests {
                 automations: Arc::new(RwLock::new(automations)),
                 automation_control: Arc::new(RwLock::new(automation_control)),
                 automation_runner_tx: runner_tx,
-                automation_observer: Some(observer),
-                trigger_context: TriggerContext::default(),
-                health: test_health(&["open_meteo"]),
-                store: None,
-                auth_key_store: None,
-                master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                history: history_settings(false),
-                scenes_enabled: false,
-                automations_enabled: true,
-                scenes_directory: String::new(),
-                automations_directory: automation_dir.to_string_lossy().to_string(),
-                scenes_watch: false,
-                automations_watch: false,
-                scripts_watch: false,
-                scripts_enabled: false,
-                scripts_directory: String::new(),
-                backstop_timeout: Duration::from_secs(3600),
-            },
+                 automation_observer: Some(observer),
+                 trigger_context: TriggerContext::default(),
+                 health: test_health(&["open_meteo"]),
+                 store: None,
+                 auth_key_store: None,
+                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
+                 history: history_settings(false),
+                 scenes_enabled: false,
+                 automations_enabled: true,
+                 scenes_directory: String::new(),
+                 automations_directory: automation_dir.to_string_lossy().to_string(),
+                 scenes_watch: false,
+                 automations_watch: false,
+                 scripts_watch: false,
+                 scripts_enabled: false,
+                 scripts_directory: String::new(),
+                 backstop_timeout: Duration::from_secs(3600),
+                 plugins_enabled: false,
+                 plugins_directory: String::new(),
+                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+             },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -5850,18 +6023,21 @@ mod tests {
                 store: None,
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                history: history_settings(false),
-                scenes_enabled: false,
-                automations_enabled: false,
-                scenes_directory: String::new(),
-                automations_directory: String::new(),
-                scenes_watch: false,
-                automations_watch: false,
-                scripts_watch: false,
-                scripts_enabled: false,
-                scripts_directory: String::new(),
-                backstop_timeout: Duration::from_secs(3600),
-            },
+                 history: history_settings(false),
+                 scenes_enabled: false,
+                 automations_enabled: false,
+                 scenes_directory: String::new(),
+                 automations_directory: String::new(),
+                 scenes_watch: false,
+                 automations_watch: false,
+                 scripts_watch: false,
+                 scripts_enabled: false,
+                 scripts_directory: String::new(),
+                 backstop_timeout: Duration::from_secs(3600),
+                 plugins_enabled: false,
+                 plugins_directory: String::new(),
+                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+             },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6367,18 +6543,21 @@ mod tests {
                 store: Some(store.clone()),
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                history: history_settings(true),
-                scenes_enabled: true,
-                automations_enabled: false,
-                scenes_directory: scene_dir.to_string_lossy().to_string(),
-                automations_directory: String::new(),
-                scenes_watch: false,
-                automations_watch: false,
-                scripts_watch: false,
-                scripts_enabled: false,
-                scripts_directory: String::new(),
-                backstop_timeout: Duration::from_secs(3600),
-            },
+                 history: history_settings(true),
+                 scenes_enabled: true,
+                 automations_enabled: false,
+                 scenes_directory: scene_dir.to_string_lossy().to_string(),
+                 automations_directory: String::new(),
+                 scenes_watch: false,
+                 automations_watch: false,
+                 scripts_watch: false,
+                 scripts_enabled: false,
+                 scripts_directory: String::new(),
+                 backstop_timeout: Duration::from_secs(3600),
+                 plugins_enabled: false,
+                 plugins_directory: String::new(),
+                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+             },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6909,6 +7088,17 @@ mod tests {
 
     #[tokio::test]
     async fn end_to_end_runtime_http_and_websocket_flow() {
+        // Locate the WASM binary (built by `cargo build --release` in plugins/open-meteo/).
+        let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/plugins");
+        if !plugins_dir.join("open_meteo.wasm").exists() {
+            eprintln!(
+                "SKIP end_to_end_runtime_http_and_websocket_flow: \
+                 config/plugins/open_meteo.wasm not found."
+            );
+            return;
+        }
+
         let server = MockServer::start(vec![MockResponse {
             status_line: "HTTP/1.1 200 OK",
             body: "{\"current\":{\"temperature_2m\":18.25,\"apparent_temperature\":16.0,\
@@ -6919,29 +7109,26 @@ mod tests {
         }])
         .await;
 
-        let config =
-            Config::load_from_file(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../config/default.toml"
-            ))
-            .expect("default config loads successfully");
-        let mut adapter_config = config
-            .adapters
-            .get("open_meteo")
-            .expect("open_meteo config exists")
-            .as_object()
-            .expect("open_meteo config is an object")
-            .clone();
-        adapter_config.insert("base_url".to_string(), Value::String(server.base_url()));
-        adapter_config.insert("poll_interval_secs".to_string(), Value::from(60));
-        adapter_config.insert("test_poll_interval_ms".to_string(), Value::from(25));
-        let config = test_config(serde_json::Map::from_iter([(
+        // Build a config that enables the WASM plugin for open_meteo.
+        // poll_interval_secs = 1 so the adapter polls immediately in the test.
+        let mut config = test_config(serde_json::Map::from_iter([(
             "open_meteo".to_string(),
-            Value::Object(adapter_config),
+            serde_json::json!({
+                "enabled": true,
+                "latitude": 51.5,
+                "longitude": -0.1,
+                "poll_interval_secs": 1,
+                "base_url": server.base_url(),
+            }),
         )]));
+        config.plugins = homecmdr_core::config::PluginsConfig {
+            enabled: true,
+            directory: plugins_dir.to_string_lossy().into_owned(),
+        };
+
         let (mut adapters, _) =
-            build_adapters(&config).expect("factory-based adapter build succeeds");
-        let adapter = adapters.pop().expect("open_meteo adapter built");
+            build_adapters(&config).expect("WASM plugin adapter build succeeds");
+        let adapter = adapters.pop().expect("open_meteo WASM adapter built");
         let runtime = Arc::new(Runtime::new(vec![adapter], config.runtime));
         let runtime_task = {
             let runtime = runtime.clone();
@@ -7274,16 +7461,36 @@ mod tests {
     }
 
     #[test]
-    fn build_adapters_uses_registered_factories() {
-        let config = test_config(serde_json::Map::from_iter([(
+    fn build_adapters_loads_wasm_plugins() {
+        // Locate the compiled WASM binary relative to this crate's manifest directory.
+        // config/plugins/ is two levels up from crates/api/.
+        let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/plugins");
+
+        if !plugins_dir.join("open_meteo.wasm").exists() {
+            eprintln!(
+                "SKIP build_adapters_loads_wasm_plugins: \
+                 config/plugins/open_meteo.wasm not found — \
+                 build the WASM guest first."
+            );
+            return;
+        }
+
+        let mut config = test_config(serde_json::Map::from_iter([(
             "open_meteo".to_string(),
             serde_json::json!({
                 "enabled": true,
                 "latitude": 51.5,
                 "longitude": -0.1,
-                "poll_interval_secs": 90
+                "poll_interval_secs": 90,
+                // Use a non-existent URL so init succeeds but we never actually poll.
+                "base_url": "http://127.0.0.1:1"
             }),
         )]));
+        config.plugins = homecmdr_core::config::PluginsConfig {
+            enabled: true,
+            directory: plugins_dir.to_string_lossy().into_owned(),
+        };
 
         let (adapters, summaries) = build_adapters(&config).expect("adapter build succeeds");
 

@@ -29,6 +29,8 @@ pub struct Config {
     pub adapters: AdaptersConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub plugins: PluginsConfig,
 }
 
 pub type AdapterConfig = serde_json::Value;
@@ -270,6 +272,26 @@ impl Default for AuthConfig {
     }
 }
 
+/// Configuration for the WASM plugin loader.
+#[derive(Debug, Deserialize)]
+pub struct PluginsConfig {
+    /// Whether WASM plugin loading is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory to scan for `*.plugin.toml` manifests.
+    #[serde(default = "default_plugins_directory")]
+    pub directory: String,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: default_plugins_directory(),
+        }
+    }
+}
+
 impl Config {
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -389,6 +411,10 @@ impl Config {
             bail!("auth.master_key must not be empty");
         }
 
+        if self.plugins.enabled && self.plugins.directory.trim().is_empty() {
+            bail!("plugins.directory is required when plugins are enabled");
+        }
+
         Ok(())
     }
 }
@@ -427,4 +453,8 @@ fn default_automation_default_max_concurrent() -> usize {
 
 fn default_automation_backstop_timeout_secs() -> u64 {
     3600
+}
+
+fn default_plugins_directory() -> String {
+    "config/plugins".to_string()
 }

@@ -12,9 +12,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 notify = "8"
-homecmdr-adapters = { path = "../adapters" }
 homecmdr-automations = { path = "../automations" }
 homecmdr-core = { path = "../core" }
+homecmdr-plugin-host = { path = "../plugin-host" }
 homecmdr-scenes = { path = "../scenes" }
 store-sql = { path = "../store-sql" }
 store-postgres = { path = "../store-postgres" }

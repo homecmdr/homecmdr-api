@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
-use homecmdr_core::adapter::{Adapter, AdapterFactory, RegisteredAdapterFactory};
+use homecmdr_core::adapter::{Adapter, AdapterFactory};
 use homecmdr_core::bus::EventBus;
 use homecmdr_core::capability::{
     accumulation_value, measurement_value, CLOUD_COVERAGE, HUMIDITY, PRESSURE,
@@ -34,14 +34,6 @@ pub struct OpenMeteoConfig {
 }
 
 pub struct OpenMeteoFactory;
-
-static OPEN_METEO_FACTORY: OpenMeteoFactory = OpenMeteoFactory;
-
-inventory::submit! {
-    RegisteredAdapterFactory {
-        factory: &OPEN_METEO_FACTORY,
-    }
-}
 
 pub struct OpenMeteoAdapter {
     client: Client,
@@ -679,7 +671,7 @@ mod tests {
 
     #[test]
     fn factory_returns_none_when_disabled() {
-        let adapter = OPEN_METEO_FACTORY
+        let adapter = OpenMeteoFactory
             .build(serde_json::json!({
                 "enabled": false,
                 "latitude": 51.5,
@@ -693,7 +685,7 @@ mod tests {
 
     #[test]
     fn factory_rejects_invalid_poll_interval() {
-        let error = OPEN_METEO_FACTORY
+        let error = OpenMeteoFactory
             .build(serde_json::json!({
                 "enabled": true,
                 "latitude": 51.5,

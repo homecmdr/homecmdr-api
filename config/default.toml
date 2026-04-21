@@ -82,8 +82,19 @@ adapter_names = []
 #   homecmdr pull adapter-elgato-lights
 # then add your [adapters.<name>] block here.
 
+# open_meteo is now served by the WASM plugin (config/plugins/open_meteo.wasm).
+# The native compiled-in adapter is deprecated; remove this block once the WASM
+# plugin is confirmed working in your environment.
 [adapters.open_meteo]
 enabled = true
 latitude = 51.5
 longitude = -0.1
 poll_interval_secs = 90
+
+# WASM plugins — drop a <name>.wasm + <name>.plugin.toml pair into the
+# plugins directory and set enabled = true to load them at startup.
+# Each plugin's [adapters.<name>] config block is forwarded to the plugin's
+# init() function as JSON.
+[plugins]
+enabled   = true
+directory = "config/plugins"

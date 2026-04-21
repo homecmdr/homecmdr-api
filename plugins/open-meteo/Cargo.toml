@@ -1,0 +1,24 @@
+[workspace]
+# This crate is intentionally excluded from the main workspace to avoid
+# cross-compilation issues.
+
+[package]
+name = "adapter-open-meteo-wasm"
+version = "0.1.0"
+edition = "2021"
+# Build with:
+#   cargo build --target wasm32-wasip2 --release
+# then copy the resulting .wasm into config/plugins/.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"     # minimise WASM binary size
+lto = true
+codegen-units = 1

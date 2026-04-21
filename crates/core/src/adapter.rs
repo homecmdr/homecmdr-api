@@ -56,15 +56,3 @@ pub trait AdapterFactory: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn build(&self, config: AdapterConfig) -> anyhow::Result<Option<Box<dyn Adapter>>>;
 }
-
-pub struct RegisteredAdapterFactory {
-    pub factory: &'static dyn AdapterFactory,
-}
-
-inventory::collect!(RegisteredAdapterFactory);
-
-pub fn registered_adapter_factories() -> impl Iterator<Item = &'static dyn AdapterFactory> {
-    inventory::iter::<RegisteredAdapterFactory>
-        .into_iter()
-        .map(|registration| registration.factory)
-}

@@ -2,7 +2,6 @@
 members = [
     "crates/core",
     "crates/lua-host",
-    "crates/adapters",
     "crates/api",
     "crates/automations",
     "crates/scenes",
@@ -10,5 +9,6 @@ members = [
     "crates/store-sql",
     "crates/store-postgres",
     "crates/mcp-server",
+    "crates/plugin-host",
 ]
 resolver = "2"
