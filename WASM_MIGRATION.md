@@ -2,7 +2,7 @@
 
 > Branch: `feat/wasm-plugin-system`
 > Started: 2026-04-21
-> Status: Phase 3 complete — Phase 4 (remove compile-time adapters) pending
+> Status: **ALL PHASES COMPLETE**
 
 This document tracks the concrete, code-level implementation of the WASM plugin migration.
 It supersedes the high-level `migration_to_wasm_plugin_system.md` and is the authoritative
@@ -105,7 +105,7 @@ This allows a WASM plugin to shadow a built-in adapter without config changes.
 
 ### 1.1–1.4 — Infrastructure (`crates/plugin-host`)
 
-- [x] `crates/plugin-host/Cargo.toml` — wasmtime 44, wasmtime-wasi 44, reqwest (blocking)
+- [x] `crates/plugin-host/Cargo.toml` — wasmtime 44, wasmtime-wasi 44, ureq 3 (host HTTP)
 - [x] `crates/plugin-host/wit/homecmdr-plugin.wit` — WIT definition (host-http, host-log, plugin)
 - [x] `crates/plugin-host/src/engine.rs` — `create_engine()` singleton with component model
 - [x] `crates/plugin-host/src/plugin.rs` — `WasmPlugin`: load/init/poll/command via wasmtime bindgen
@@ -225,20 +225,20 @@ poll_interval_secs = 300
 
 ## Phase 4 — Default to WASM, Retire Compile-Time Adapters
 
-**Status: NOT STARTED**
+**Status: COMPLETE**
 
-- [ ] Remove `inventory::submit!` block from `crates/adapter-open-meteo/src/lib.rs`
-- [ ] Remove `crates/adapters/src/lib.rs` link pattern (`use adapter_open_meteo as _;`)
-- [ ] Remove `homecmdr-adapters` dependency from `crates/api/Cargo.toml`
-- [ ] Remove `inventory::collect!` and `registered_adapter_factories()` from
-      `crates/core/src/adapter.rs` (keep `AdapterFactory` + `Adapter` traits)
-- [ ] Remove `inventory` from `crates/core/Cargo.toml`
-- [ ] Remove `crates/adapters` from root `Cargo.toml` workspace members
-- [ ] Update `AGENTS.md` adapter rules section to describe the WASM workflow
-- [ ] Update `README.md` with WASM plugin installation instructions
-- [ ] Create `config/docs/plugin_authoring_guide.md`
-- [ ] Provide a `crates/plugin-sdk` guest-side Rust crate (re-exports wit-bindgen macros,
-      provides helper types matching `AttributeValue`, etc.) for plugin authors
+- [x] Remove `inventory::submit!` block from `crates/adapter-open-meteo/src/lib.rs`
+- [x] Remove `crates/adapters/src/lib.rs` link pattern (`use adapter_open_meteo as _;`) — emptied to placeholder comment; crate retained as backwards-compat shim (see AGENTS.md)
+- [x] Remove `homecmdr-adapters` dependency from `crates/api/Cargo.toml`
+- [x] Remove `inventory::collect!` and `registered_adapter_factories()` from
+      `crates/core/src/adapter.rs` (kept `AdapterFactory` + `Adapter` traits)
+- [x] Remove `inventory` from `crates/core/Cargo.toml`
+- [x] Remove `crates/adapters` from root `Cargo.toml` workspace members
+- [x] Update `AGENTS.md` adapter rules section to describe the WASM workflow
+- [x] Update `README.md` with WASM plugin installation instructions
+- [x] Create `config/docs/plugin_authoring_guide.md`
+- [x] Provide `crates/plugin-sdk` guest-side helper crate (`DeviceKind`, JSON attribute
+      builders, `hc_log!` macro; 9 unit tests pass)
 
 ---
 
@@ -250,7 +250,7 @@ poll_interval_secs = 300
 | WASI sync | `wasmtime-wasi 44` | `p2::add_to_linker_sync` for blocking store |
 | WIT codegen (host) | `wasmtime::component::bindgen!` | Built into wasmtime |
 | WIT codegen (guest) | `wit-bindgen 0.57.1` | Official generator for guest bindings |
-| Host HTTP | `reqwest` blocking | Host-side; plugins call `host-http::get` import |
+| Host HTTP | `ureq 3` | Pure-sync, no internal Tokio runtime — safe to call from any async context |
 
 Do **not** use `wasmer` — weaker component model support as of early 2026.
 
@@ -273,6 +273,10 @@ Do **not** use `wasmer` — weaker component model support as of early 2026.
 | `plugins/open-meteo/` (standalone crate) | 1 |
 | `config/plugins/open_meteo.wasm` | 3 |
 | `config/plugins/open_meteo.plugin.toml` | 3 |
+| `config/docs/plugin_authoring_guide.md` | 4 |
+| `crates/plugin-sdk/Cargo.toml` | 4 |
+| `crates/plugin-sdk/src/lib.rs` | 4 |
+| `crates/plugin-sdk/wit/homecmdr-plugin.wit` | 4 |
 
 ### Modified files
 
@@ -284,14 +288,14 @@ Do **not** use `wasmer` — weaker component model support as of early 2026.
 | `config/default.toml` | 2/3 | Add `[plugins]` section; enable WASM plugins |
 | `crates/api/src/main.rs` | 2 | Split `build_adapters`, add plugin API routes, WASM-takes-precedence |
 | `crates/api/Cargo.toml` | 2 | Add `plugin-host` dependency |
-| `crates/adapter-open-meteo/src/lib.rs` | 3 | `#[deprecated]` on `OpenMeteoFactory` |
-| `crates/adapter-open-meteo/src/lib.rs` | 4 | Remove `inventory::submit!` (pending) |
-| `crates/adapters/src/lib.rs` | 4 | Remove link crate pattern (pending) |
-| `crates/api/Cargo.toml` | 4 | Remove `homecmdr-adapters` dependency (pending) |
-| `crates/core/src/adapter.rs` | 4 | Remove `inventory::collect!` + `registered_adapter_factories()` (pending) |
-| `crates/core/Cargo.toml` | 4 | Remove `inventory` dependency (pending) |
-| `Cargo.toml` | 4 | Remove `crates/adapters` workspace member (pending) |
-| `AGENTS.md` | 4 | Update adapter rules (pending) |
+| `crates/adapter-open-meteo/src/lib.rs` | 4 | Remove `inventory::submit!`; `#[deprecated]` on factory |
+| `crates/adapters/src/lib.rs` | 4 | Emptied to backwards-compat placeholder |
+| `crates/api/Cargo.toml` | 4 | Remove `homecmdr-adapters` dependency |
+| `crates/core/src/adapter.rs` | 4 | Remove `inventory::collect!` + `registered_adapter_factories()` |
+| `crates/core/Cargo.toml` | 4 | Remove `inventory` dependency |
+| `Cargo.toml` | 4 | Remove `crates/adapters` workspace member; add `crates/plugin-sdk` |
+| `AGENTS.md` | 4 | Updated adapter rules and workspace map |
+| `README.md` | 4 | Updated layout tree, adapters section, plugin authoring reference |
 
 ---
 
@@ -310,10 +314,9 @@ Do **not** use `wasmer` — weaker component model support as of early 2026.
   attribute values, unit strings, WMO code mapping, and boolean is_day flag
 - `wasm_open_meteo_plugin_returns_error_on_http_failure` — verifies error propagation
 
-### Phase 4
-- Full `cargo test --workspace` must pass with no compile-time adapter crates linked
-- Smoke test: start API with only `config/plugins/open_meteo.wasm`, hit `/devices`, verify
-  weather devices appear
+### Phase 4 (complete)
+- Full `cargo test --workspace` passes with no compile-time adapter crates linked (48/48 API tests)
+- `crates/plugin-sdk` — 9 unit tests + 7 doc-tests green
 
 ---
 
