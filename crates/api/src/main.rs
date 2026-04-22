@@ -951,13 +951,20 @@ async fn main() -> Result<()> {
         let mut runner_rx = automation_runner_rx;
         tokio::spawn(async move {
             health.automations_ok();
-            let mut active_task = {
+            // Fuse the JoinHandle so select! doesn't panic with "JoinHandle
+            // polled after completion" when both branches are ready simultaneously.
+            // AbortHandle is kept separately since Fuse<JoinHandle> doesn't
+            // expose abort().
+            use futures_util::future::FutureExt as _;
+            let initial_handle = {
                 let runtime = runtime.clone();
                 let initial = runner_rx.borrow().clone();
                 tokio::spawn(async move {
                     initial.run(runtime).await;
                 })
             };
+            let mut abort_handle = initial_handle.abort_handle();
+            let mut active_task = initial_handle.fuse();
 
             loop {
                 tokio::select! {
@@ -969,19 +976,21 @@ async fn main() -> Result<()> {
                         if changed.is_err() {
                             break;
                         }
-                        active_task.abort();
-                        let _ = active_task.await;
+                        abort_handle.abort();
+                        let _ = (&mut active_task).await;
 
                         let runtime = runtime.clone();
                         let runner = runner_rx.borrow().clone();
-                        active_task = tokio::spawn(async move {
+                        let new_handle = tokio::spawn(async move {
                             runner.run(runtime).await;
                         });
+                        abort_handle = new_handle.abort_handle();
+                        active_task = new_handle.fuse();
                     }
                 }
             }
 
-            active_task.abort();
+            abort_handle.abort();
             let _ = active_task.await;
         })
     };
