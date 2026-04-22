@@ -8,9 +8,8 @@ name: Release
 #   git tag v1.2.3 && git push origin v1.2.3
 #
 # Supported targets:
-#   x86_64-unknown-linux-gnu      — built natively on ubuntu-latest
-#   aarch64-unknown-linux-gnu     — built natively on ubuntu-24.04-arm
-#   armv7-unknown-linux-gnueabihf — cross-compiled via cross + Docker
+#   x86_64-unknown-linux-gnu   — built natively on ubuntu-latest
+#   aarch64-unknown-linux-gnu  — built natively on ubuntu-24.04-arm (Pi 4/5, Apple Silicon VMs)
 
 on:
   push:
@@ -31,15 +30,9 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-            use_cross: false
 
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-            use_cross: false
-
-          - target: armv7-unknown-linux-gnueabihf
-            runner: ubuntu-latest
-            use_cross: true
 
     steps:
       - uses: actions/checkout@v4
@@ -59,27 +52,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      # cross is a Docker-based cross-compilation tool.
-      # taiki-e/install-action downloads the pre-built binary — much faster
-      # than building it from source with `cargo install`.
-      - name: Install cross
-        if: matrix.use_cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Build (native)
-        if: "!matrix.use_cross"
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p api
-
-      # LIBSQLITE3_SYS_BUNDLED=1 compiles SQLite from source so the binary
-      # has no system libsqlite3 dependency.  Required for cross builds where
-      # the cross Docker image may not carry a target-arch libsqlite3-dev.
-      - name: Build (cross)
-        if: matrix.use_cross
-        env:
-          LIBSQLITE3_SYS_BUNDLED: "1"
-        run: cross build --release --target ${{ matrix.target }} -p api
 
       - name: Prepare binary
         run: |
