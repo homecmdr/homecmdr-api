@@ -59,15 +59,22 @@ impl Runtime {
             return Ok(false);
         };
 
-        let Some(adapter) = self
+        if let Some(adapter) = self
             .adapters
             .iter()
             .find(|adapter| adapter.name() == adapter_name)
-        else {
-            return Ok(false);
-        };
+        {
+            return adapter.command(id, command, self.registry.clone()).await;
+        }
 
-        adapter.command(id, command, self.registry.clone()).await
+        // No in-process adapter owns this device.  Publish a
+        // DeviceCommandDispatched event so that IPC adapter processes
+        // (which subscribe to the /events WebSocket) can handle it.
+        self.bus.publish(Event::DeviceCommandDispatched {
+            id: id.clone(),
+            command,
+        });
+        Ok(true)
     }
 
     pub async fn invoke(&self, request: InvokeRequest) -> anyhow::Result<Option<InvokeResponse>> {
