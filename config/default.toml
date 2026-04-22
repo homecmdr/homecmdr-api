@@ -77,10 +77,10 @@ device_ids = []
 capabilities = []
 adapter_names = []
 
-# Official adapters (elgato-lights, ollama, roku-tv, zigbee2mqtt) are available
-# from https://github.com/homecmdr/adapters — install with:
-#   homecmdr pull adapter-elgato-lights
-# then add your [adapters.<name>] block here.
+# Official plugins (elgato-lights, ollama, roku-tv, zigbee2mqtt) are available
+# from https://github.com/homecmdr/plugins — install with:
+#   homecmdr plugin add elgato-lights
+# Config values are prompted automatically during install.
 
 # open_meteo is now served by the WASM plugin (config/plugins/open_meteo.wasm).
 # The native compiled-in adapter is deprecated; remove this block once the WASM

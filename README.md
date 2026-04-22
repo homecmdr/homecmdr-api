@@ -26,7 +26,7 @@ Start here depending on your goal:
 Adapter-specific docs:
 
 - `crates/adapter-open-meteo/README.md` (bundled)
-- official adapter registry: https://github.com/homecmdr/adapters
+- official plugin registry: https://github.com/homecmdr/plugins
 
 Lua runtime docs:
 
@@ -163,8 +163,8 @@ Current default config includes:
 
 - `open_meteo` (bundled)
 
-Official adapters are installed via `homecmdr pull` and their config blocks added manually.
-See https://github.com/homecmdr/adapters for available adapters.
+Official plugins are installed via `homecmdr plugin add` and their config blocks added automatically.
+See https://github.com/homecmdr/plugins for available plugins.
 
 The default asset layout is:
 
