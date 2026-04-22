@@ -1,11 +1,13 @@
 pub mod adapter;
 pub mod engine;
+pub mod ipc_host;
 pub mod manager;
 pub mod manifest;
 mod plugin;
 
 pub use adapter::{WasmAdapter, WasmAdapterFactory};
 pub use engine::create_engine;
+pub use ipc_host::{IpcAdapterEntry, IpcAdapterHost};
 pub use manager::PluginManager;
 pub use manifest::PluginManifest;
 

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Attributes, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
+use crate::command::DeviceCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadError {
@@ -54,6 +55,13 @@ pub enum Event {
     },
     AdapterStarted {
         adapter: String,
+    },
+    /// A command has been dispatched to a device whose adapter is not managed
+    /// in-process (i.e. an IPC adapter).  IPC adapters subscribe to the
+    /// WebSocket `/events` stream and handle this event themselves.
+    DeviceCommandDispatched {
+        id: DeviceId,
+        command: DeviceCommand,
     },
     SceneCatalogReloadStarted,
     SceneCatalogReloaded {

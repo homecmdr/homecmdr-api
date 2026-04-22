@@ -104,6 +104,16 @@ impl PluginManager {
                 }
             };
 
+            // IPC adapters are managed by IpcAdapterHost, not the WASM engine.
+            if manifest.is_ipc() {
+                tracing::info!(
+                    plugin = manifest.plugin.name.as_str(),
+                    version = manifest.plugin.version.as_str(),
+                    "discovered IPC adapter (skipping WASM load)"
+                );
+                continue;
+            }
+
             let wasm_path = PluginManifest::wasm_path_for(&path);
             if !wasm_path.exists() {
                 tracing::warn!(
