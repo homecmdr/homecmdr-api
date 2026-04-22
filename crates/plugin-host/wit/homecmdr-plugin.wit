@@ -26,6 +26,16 @@ interface types {
 interface host-http {
     /// Perform a plain GET request and return the response body as UTF-8.
     get: func(url: string) -> result<string, string>;
+
+    /// Perform a POST request with `body` as the request body.
+    /// `content-type` is passed verbatim as the Content-Type header
+    /// (e.g. "application/json").
+    post: func(url: string, content-type: string, body: string) -> result<string, string>;
+
+    /// Perform a PUT request with `body` as the request body.
+    /// `content-type` is passed verbatim as the Content-Type header
+    /// (e.g. "application/json").
+    put: func(url: string, content-type: string, body: string) -> result<string, string>;
 }
 
 /// Structured logging routed through the host's tracing subscriber.

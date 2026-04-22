@@ -60,6 +60,38 @@ impl bindings::homecmdr::plugin::host_http::Host for PluginHost {
             .read_to_string()
             .map_err(|e| e.to_string())
     }
+
+    fn post(
+        &mut self,
+        url: String,
+        content_type: String,
+        body: String,
+    ) -> Result<String, String> {
+        self.http
+            .post(&url)
+            .content_type(&content_type)
+            .send(&body)
+            .map_err(|e: ureq::Error| e.to_string())?
+            .body_mut()
+            .read_to_string()
+            .map_err(|e: ureq::Error| e.to_string())
+    }
+
+    fn put(
+        &mut self,
+        url: String,
+        content_type: String,
+        body: String,
+    ) -> Result<String, String> {
+        self.http
+            .put(&url)
+            .content_type(&content_type)
+            .send(&body)
+            .map_err(|e: ureq::Error| e.to_string())?
+            .body_mut()
+            .read_to_string()
+            .map_err(|e: ureq::Error| e.to_string())
+    }
 }
 
 impl bindings::homecmdr::plugin::host_log::Host for PluginHost {
