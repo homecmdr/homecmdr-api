@@ -13,7 +13,7 @@ This guide covers three ways to run the homecmdr server:
 All deployments need:
 
 - A `config/default.toml` (or a copy of it) with your adapter settings and a **strong** `auth.master_key`.
-- Network access to whatever adapters you are using (MQTT broker for zigbee2mqtt, local IPs for Elgato lights, etc.).
+- Network access to whatever adapters you are using (Zigbee2MQTT HTTP frontend for zigbee2mqtt, local IPs for Elgato lights, etc.).
 
 ---
 
@@ -178,7 +178,7 @@ bind_address = "127.0.0.1:3002"   # different port
 database_url = "sqlite://data/dev-homecmdr.db"   # different DB file
 
 [adapters.zigbee2mqtt]
-client_id = "homecmdr-dev"   # different MQTT client ID (avoids session conflicts)
+base_url = "http://127.0.0.1:8080"   # zigbee2mqtt HTTP frontend URL
 ```
 
 ### Run the dev instance
