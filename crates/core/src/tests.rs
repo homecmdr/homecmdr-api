@@ -1437,12 +1437,11 @@ async fn runtime_shuts_down_cleanly_on_shutdown_signal() {
 
 #[test]
 fn config_loads_default_toml() {
-    let config =
-        Config::load_from_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../config/default.toml"
-        ))
-        .expect("default config loads successfully");
+    let config = Config::load_from_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../config/default.toml"
+    ))
+    .expect("default config loads successfully");
 
     assert_eq!(config.runtime.event_bus_capacity, 1024);
     assert_eq!(config.logging.level, "info");

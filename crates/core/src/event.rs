@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Attributes, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use crate::command::DeviceCommand;
+use crate::model::{Attributes, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadError {

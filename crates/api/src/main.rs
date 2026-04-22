@@ -17,12 +17,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use notify::{EventKind as NotifyEventKind, RecursiveMode, Watcher};
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sha2::{Digest, Sha256};
-use homecmdr_plugin_host::{create_engine, IpcAdapterEntry, IpcAdapterHost, PluginManager, PluginManifest, WasmAdapterFactory};
 use homecmdr_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
     TriggerContext,
@@ -34,7 +28,6 @@ use homecmdr_core::capability::{
 use homecmdr_core::command::DeviceCommand;
 use homecmdr_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use homecmdr_core::event::Event;
-use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
 use homecmdr_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use homecmdr_core::runtime::Runtime;
 use homecmdr_core::store::{
@@ -42,9 +35,19 @@ use homecmdr_core::store::{
     CommandAuditEntry, DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
     SceneStepResult,
 };
+use homecmdr_plugin_host::{
+    create_engine, IpcAdapterEntry, IpcAdapterHost, PluginManager, PluginManifest,
+    WasmAdapterFactory,
+};
 use homecmdr_scenes::{
     SceneCatalog, SceneExecutionResult, SceneRunOutcome, SceneRunner, SceneSummary,
 };
+use notify::{EventKind as NotifyEventKind, RecursiveMode, Watcher};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -85,8 +88,7 @@ impl SharedRateLimit {
         let mut bucket = self.0.lock().expect("rate limiter mutex not poisoned");
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-        bucket.tokens =
-            (bucket.tokens + elapsed * bucket.refill_rate).min(bucket.max_tokens);
+        bucket.tokens = (bucket.tokens + elapsed * bucket.refill_rate).min(bucket.max_tokens);
         bucket.last_refill = now;
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
@@ -847,8 +849,7 @@ async fn main() -> Result<()> {
             }
         });
     let trigger_context = trigger_context_from_config(&config);
-    let backstop_timeout =
-        Duration::from_secs(config.automations.runner.backstop_timeout_secs);
+    let backstop_timeout = Duration::from_secs(config.automations.runner.backstop_timeout_secs);
     let automation_runner = build_automation_runner(
         (*automations).clone(),
         automation_observer.clone(),
@@ -1008,12 +1009,7 @@ async fn main() -> Result<()> {
     // 0.0.0.0 or 127.0.0.1.
     let ipc_host = if config.plugins.enabled && !app_state.ipc_adapter_names.is_empty() {
         let plugin_dir = std::path::Path::new(&config.plugins.directory);
-        let port = config
-            .api
-            .bind_address
-            .rsplit(':')
-            .next()
-            .unwrap_or("3000");
+        let port = config.api.bind_address.rsplit(':').next().unwrap_or("3000");
         let api_url = format!("http://127.0.0.1:{port}");
 
         let entries: Vec<IpcAdapterEntry> = PluginManager::scan_manifests(plugin_dir)
@@ -1021,9 +1017,8 @@ async fn main() -> Result<()> {
             .filter(|m| m.is_ipc() && config.adapters.contains_key(&m.plugin.name))
             .filter_map(|manifest| {
                 // Find the manifest file path so we can derive the binary path.
-                let manifest_path = plugin_dir.join(
-                    format!("{}.plugin.toml", manifest.plugin.name)
-                );
+                let manifest_path =
+                    plugin_dir.join(format!("{}.plugin.toml", manifest.plugin.name));
                 let binary_path = PluginManifest::binary_path_for(&manifest_path, &manifest);
                 if !binary_path.exists() {
                     tracing::warn!(
@@ -1122,8 +1117,7 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
     let mut ipc_adapter_names: HashSet<String> = HashSet::new();
 
     if config.plugins.enabled {
-        let engine = create_engine()
-            .context("failed to initialise WASM engine")?;
+        let engine = create_engine().context("failed to initialise WASM engine")?;
         let plugin_dir = std::path::Path::new(&config.plugins.directory);
 
         if plugin_dir.exists() {
@@ -1135,13 +1129,9 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
                 }
             }
 
-            let scanned = PluginManager::scan(plugin_dir, &engine)
-                .with_context(|| {
-                    format!(
-                        "failed to scan plugin directory '{}'",
-                        plugin_dir.display()
-                    )
-                })?;
+            let scanned = PluginManager::scan(plugin_dir, &engine).with_context(|| {
+                format!("failed to scan plugin directory '{}'", plugin_dir.display())
+            })?;
 
             for factory in scanned {
                 let name = factory.name();
@@ -1257,9 +1247,7 @@ async fn create_device_store(
                     },
                 )
                 .await
-                .with_context(|| {
-                    format!("failed to initialize SQLite store '{database_url}'")
-                })?,
+                .with_context(|| format!("failed to initialize SQLite store '{database_url}'"))?,
             );
             Ok((
                 Some(store.clone() as Arc<dyn DeviceStore>),
@@ -1278,9 +1266,11 @@ async fn create_device_store(
             };
             let history_config = PostgresHistoryConfig {
                 enabled: config.persistence.history.enabled,
-                retention: config.persistence.history.retention_days.map(|days| {
-                    Duration::from_secs(days.saturating_mul(24 * 60 * 60))
-                }),
+                retention: config
+                    .persistence
+                    .history
+                    .retention_days
+                    .map(|days| Duration::from_secs(days.saturating_mul(24 * 60 * 60))),
                 selection,
             };
             let store: Arc<PostgresDeviceStore> = Arc::new(
@@ -2323,13 +2313,12 @@ fn app(state: AppState, config: &Config) -> Router {
         });
 
     // Write — bearer token with at least `write` role.
-    let rate_limiter: Option<SharedRateLimit> =
-        config.api.rate_limit.enabled.then(|| {
-            SharedRateLimit::new(
-                config.api.rate_limit.requests_per_second,
-                config.api.rate_limit.burst_size,
-            )
-        });
+    let rate_limiter: Option<SharedRateLimit> = config.api.rate_limit.enabled.then(|| {
+        SharedRateLimit::new(
+            config.api.rate_limit.requests_per_second,
+            config.api.rate_limit.burst_size,
+        )
+    });
     let write_routes = Router::new()
         .route("/rooms", post(create_room))
         .route("/rooms/{id}", delete(delete_room))
@@ -2636,9 +2625,7 @@ async fn get_plugin(
         })
 }
 
-async fn reload_plugins(
-    State(state): State<AppState>,
-) -> Result<Json<ReloadResponse>, ApiError> {
+async fn reload_plugins(State(state): State<AppState>) -> Result<Json<ReloadResponse>, ApiError> {
     if !state.plugins_enabled {
         return Ok(Json(ReloadResponse {
             status: "error",
@@ -4213,8 +4200,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use futures_util::StreamExt;
-    use reqwest::StatusCode;
-    use serde_json::Value;
     use homecmdr_core::capability::{measurement_value, TEMPERATURE_OUTDOOR, WIND_SPEED};
     use homecmdr_core::command::DeviceCommand;
     use homecmdr_core::config::{Config, HistoryConfig, PersistenceBackend};
@@ -4224,6 +4209,8 @@ mod tests {
     use homecmdr_core::runtime::RuntimeConfig;
     use homecmdr_core::store::AutomationRuntimeState;
     use homecmdr_scenes::{SceneCatalog, SceneRunner};
+    use reqwest::StatusCode;
+    use serde_json::Value;
     use store_sql::{SqliteDeviceStore, SqliteHistoryConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -5840,40 +5827,40 @@ mod tests {
                 store: None,
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(false),
-                 scenes_enabled: false,
-                 automations_enabled: true,
-                 scenes_directory: String::new(),
-                 automations_directory: automation_dir.to_string_lossy().to_string(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-                 ipc_adapter_names: Arc::new(HashSet::new()),
-             },
-             &config,
-         );
-         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-             .await
-             .expect("bind test listener");
-         let addr = listener.local_addr().expect("read test listener address");
-         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-         let handle = tokio::spawn(async move {
-             axum::serve(listener, app)
-                 .with_graceful_shutdown(async {
-                     let _ = shutdown_rx.await;
-                 })
-                 .await
-                 .expect("test server exits cleanly");
-         });
+                history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: true,
+                scenes_directory: String::new(),
+                automations_directory: automation_dir.to_string_lossy().to_string(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
+            &config,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
 
-         let response = test_client()
-             .get(format!("http://{addr}/automations"))
+        let response = test_client()
+            .get(format!("http://{addr}/automations"))
             .send()
             .await
             .expect("automations request succeeds");
@@ -5990,28 +5977,28 @@ mod tests {
                 automations: Arc::new(RwLock::new(automations)),
                 automation_control: Arc::new(RwLock::new(automation_control)),
                 automation_runner_tx: runner_tx,
-                 automation_observer: Some(observer),
-                 trigger_context: TriggerContext::default(),
-                 health: test_health(&["open_meteo"]),
-                 store: None,
-                 auth_key_store: None,
-                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(false),
-                 scenes_enabled: false,
-                 automations_enabled: true,
-                 scenes_directory: String::new(),
-                 automations_directory: automation_dir.to_string_lossy().to_string(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-                 ipc_adapter_names: Arc::new(HashSet::new()),
-             },
+                automation_observer: Some(observer),
+                trigger_context: TriggerContext::default(),
+                health: test_health(&["open_meteo"]),
+                store: None,
+                auth_key_store: None,
+                master_key_hash: sha256_hex(TEST_MASTER_KEY),
+                history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: true,
+                scenes_directory: String::new(),
+                automations_directory: automation_dir.to_string_lossy().to_string(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6281,22 +6268,22 @@ mod tests {
                 store: None,
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(false),
-                 scenes_enabled: false,
-                 automations_enabled: false,
-                 scenes_directory: String::new(),
-                 automations_directory: String::new(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-                 ipc_adapter_names: Arc::new(HashSet::new()),
-             },
+                history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: false,
+                scenes_directory: String::new(),
+                automations_directory: String::new(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6802,22 +6789,22 @@ mod tests {
                 store: Some(store.clone()),
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(true),
-                 scenes_enabled: true,
-                 automations_enabled: false,
-                 scenes_directory: scene_dir.to_string_lossy().to_string(),
-                 automations_directory: String::new(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-                 ipc_adapter_names: Arc::new(HashSet::new()),
-             },
+                history: history_settings(true),
+                scenes_enabled: true,
+                automations_enabled: false,
+                scenes_directory: scene_dir.to_string_lossy().to_string(),
+                automations_directory: String::new(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -7349,8 +7336,8 @@ mod tests {
     #[tokio::test]
     async fn end_to_end_runtime_http_and_websocket_flow() {
         // Locate the WASM binary (built by `cargo build --release` in plugins/open-meteo/).
-        let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/plugins");
+        let plugins_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/plugins");
         if !plugins_dir.join("open_meteo.wasm").exists() {
             eprintln!(
                 "SKIP end_to_end_runtime_http_and_websocket_flow: \
@@ -7724,8 +7711,8 @@ mod tests {
     fn build_adapters_loads_wasm_plugins() {
         // Locate the compiled WASM binary relative to this crate's manifest directory.
         // config/plugins/ is two levels up from crates/api/.
-        let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/plugins");
+        let plugins_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/plugins");
 
         if !plugins_dir.join("open_meteo.wasm").exists() {
             eprintln!(
@@ -7752,7 +7739,8 @@ mod tests {
             directory: plugins_dir.to_string_lossy().into_owned(),
         };
 
-        let (adapters, summaries, _ipc_names) = build_adapters(&config).expect("adapter build succeeds");
+        let (adapters, summaries, _ipc_names) =
+            build_adapters(&config).expect("adapter build succeeds");
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].name(), "open_meteo");

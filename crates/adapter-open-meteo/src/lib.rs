@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use reqwest::Client;
-use serde::Deserialize;
 use homecmdr_core::adapter::{Adapter, AdapterFactory};
 use homecmdr_core::bus::EventBus;
 use homecmdr_core::capability::{
@@ -15,6 +13,8 @@ use homecmdr_core::event::Event;
 use homecmdr_core::http::{external_http_client, send_with_retry};
 use homecmdr_core::model::{AttributeValue, Attributes, Device, DeviceId, DeviceKind, Metadata};
 use homecmdr_core::registry::DeviceRegistry;
+use reqwest::Client;
+use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 

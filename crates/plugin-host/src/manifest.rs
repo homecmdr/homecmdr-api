@@ -61,10 +61,12 @@ fn default_poll_interval_secs() -> u64 {
 impl PluginManifest {
     /// Load a manifest from a `.plugin.toml` path.
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("failed to read plugin manifest '{}': {e}", path.display()))?;
-        toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("failed to parse plugin manifest '{}': {e}", path.display()))
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("failed to read plugin manifest '{}': {e}", path.display())
+        })?;
+        toml::from_str(&content).map_err(|e| {
+            anyhow::anyhow!("failed to parse plugin manifest '{}': {e}", path.display())
+        })
     }
 
     /// Derive the expected `.wasm` path from a manifest path.

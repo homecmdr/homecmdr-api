@@ -238,20 +238,19 @@ impl PostgresDeviceStore {
             .await
             .context("failed to create schema_metadata table")?;
 
-        let schema_version: i64 =
-            sqlx::query("SELECT value FROM schema_metadata WHERE key = $1")
-                .bind(SCHEMA_VERSION_KEY)
-                .fetch_optional(&self.pool)
-                .await
-                .context("failed to read schema version")?
-                .map(|row| row.get::<String, _>("value"))
-                .map(|value| {
-                    value
-                        .parse::<i64>()
-                        .with_context(|| format!("invalid schema version value '{value}'"))
-                })
-                .transpose()?
-                .unwrap_or(0);
+        let schema_version: i64 = sqlx::query("SELECT value FROM schema_metadata WHERE key = $1")
+            .bind(SCHEMA_VERSION_KEY)
+            .fetch_optional(&self.pool)
+            .await
+            .context("failed to read schema version")?
+            .map(|row| row.get::<String, _>("value"))
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .with_context(|| format!("invalid schema version value '{value}'"))
+            })
+            .transpose()?
+            .unwrap_or(0);
 
         if schema_version < 1 {
             self.migrate_to_v1().await?;
@@ -1068,9 +1067,7 @@ impl DeviceStore for PostgresDeviceStore {
         .bind(automation_id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| {
-            format!("failed to load automation runtime state for '{automation_id}'")
-        })?
+        .with_context(|| format!("failed to load automation runtime state for '{automation_id}'"))?
         .map(automation_runtime_state_from_row)
         .transpose()
     }
@@ -1199,9 +1196,8 @@ fn device_from_row(row: sqlx::postgres::PgRow) -> Result<Device> {
     let room_id = row.get::<Option<String>, _>("room_id").map(RoomId);
     let kind = device_kind_from_str(&row.get::<String, _>("kind"))
         .with_context(|| format!("invalid device kind for '{id}'"))?;
-    let attributes: Attributes =
-        serde_json::from_str(&row.get::<String, _>("attributes_json"))
-            .with_context(|| format!("invalid attributes JSON for '{id}'"))?;
+    let attributes: Attributes = serde_json::from_str(&row.get::<String, _>("attributes_json"))
+        .with_context(|| format!("invalid attributes JSON for '{id}'"))?;
     let metadata: Metadata = serde_json::from_str(&row.get::<String, _>("metadata_json"))
         .with_context(|| format!("invalid metadata JSON for '{id}'"))?;
     let updated_at: DateTime<Utc> = row.get("updated_at");
@@ -1274,7 +1270,9 @@ fn scene_history_from_row(row: sqlx::postgres::PgRow) -> Result<SceneExecutionHi
     })
 }
 
-fn automation_history_from_row(row: sqlx::postgres::PgRow) -> Result<AutomationExecutionHistoryEntry> {
+fn automation_history_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<AutomationExecutionHistoryEntry> {
     let executed_at: DateTime<Utc> = row.get("executed_at");
     let trigger_payload = serde_json::from_str(&row.get::<String, _>("trigger_payload_json"))
         .context("invalid automation trigger payload JSON")?;
