@@ -1,11 +1,13 @@
 pub mod adapter;
 pub mod engine;
+pub mod ipc_host;
 pub mod manager;
 pub mod manifest;
 mod plugin;
 
 pub use adapter::{WasmAdapter, WasmAdapterFactory};
 pub use engine::create_engine;
+pub use ipc_host::{IpcAdapterEntry, IpcAdapterHost};
 pub use manager::PluginManager;
 pub use manifest::PluginManifest;
 
@@ -92,8 +94,7 @@ mod tests {
     fn wasm_path() -> Option<std::path::PathBuf> {
         // CARGO_MANIFEST_DIR is `crates/plugin-host`; workspace root is `../..`.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = std::path::Path::new(manifest_dir)
-            .join("../../config/plugins/open_meteo.wasm");
+        let path = std::path::Path::new(manifest_dir).join("../../config/plugins/open_meteo.wasm");
         if path.exists() {
             Some(path)
         } else {
@@ -138,7 +139,12 @@ mod tests {
         let updates = plugin.plugin_poll().expect("plugin_poll");
 
         // The plugin should return exactly 12 device updates.
-        assert_eq!(updates.len(), 12, "expected 12 device updates, got {}", updates.len());
+        assert_eq!(
+            updates.len(),
+            12,
+            "expected 12 device updates, got {}",
+            updates.len()
+        );
 
         // Helper: find an update by vendor_id.
         let find = |id: &str| -> &DeviceUpdate {
@@ -150,7 +156,11 @@ mod tests {
 
         // All updates should be sensors.
         for u in &updates {
-            assert_eq!(u.kind, "sensor", "expected kind='sensor' for '{}'", u.vendor_id);
+            assert_eq!(
+                u.kind, "sensor",
+                "expected kind='sensor' for '{}'",
+                u.vendor_id
+            );
         }
 
         // Spot-check a few vendor IDs and attribute keys.
@@ -163,8 +173,7 @@ mod tests {
             "temperature_outdoor value mismatch"
         );
         assert_eq!(
-            attrs["temperature_outdoor"]["unit"],
-            "celsius",
+            attrs["temperature_outdoor"]["unit"], "celsius",
             "temperature_outdoor unit mismatch"
         );
 
@@ -184,8 +193,7 @@ mod tests {
         let attrs: serde_json::Value =
             serde_json::from_str(&condition.attributes_json).expect("parse condition attrs");
         assert_eq!(
-            attrs["weather_condition"],
-            "Partly cloudy",
+            attrs["weather_condition"], "Partly cloudy",
             "WMO code 2 should map to 'Partly cloudy'"
         );
 

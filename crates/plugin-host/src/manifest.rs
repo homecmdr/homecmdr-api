@@ -20,6 +20,14 @@ pub struct PluginMeta {
     /// WIT API version this plugin was compiled against.
     #[serde(default = "default_api_version")]
     pub api_version: String,
+    /// "wasm" (default) or "ipc".  IPC plugins are standalone native binaries
+    /// managed as child processes; they are not loaded into the WASM engine.
+    #[serde(default = "default_adapter_type")]
+    pub adapter_type: String,
+    /// Binary filename for IPC adapters.  Defaults to `"{name}-adapter"`.
+    /// The file is expected in the same directory as the `.plugin.toml`.
+    #[serde(default)]
+    pub binary: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -42,6 +50,10 @@ fn default_api_version() -> String {
     "0.1.0".to_string()
 }
 
+fn default_adapter_type() -> String {
+    "wasm".to_string()
+}
+
 fn default_poll_interval_secs() -> u64 {
     300
 }
@@ -49,10 +61,12 @@ fn default_poll_interval_secs() -> u64 {
 impl PluginManifest {
     /// Load a manifest from a `.plugin.toml` path.
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("failed to read plugin manifest '{}': {e}", path.display()))?;
-        toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("failed to parse plugin manifest '{}': {e}", path.display()))
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("failed to read plugin manifest '{}': {e}", path.display())
+        })?;
+        toml::from_str(&content).map_err(|e| {
+            anyhow::anyhow!("failed to parse plugin manifest '{}': {e}", path.display())
+        })
     }
 
     /// Derive the expected `.wasm` path from a manifest path.
@@ -69,5 +83,28 @@ impl PluginManifest {
             .parent()
             .unwrap_or(Path::new("."))
             .join(format!("{stem}.wasm"))
+    }
+
+    /// Returns true when this manifest describes an IPC adapter (a standalone
+    /// native binary) rather than a WASM plugin.
+    pub fn is_ipc(&self) -> bool {
+        self.plugin.adapter_type == "ipc"
+    }
+
+    /// Derive the expected binary path for an IPC adapter from a manifest path.
+    ///
+    /// The binary filename is taken from `[plugin] binary` when set, otherwise
+    /// it defaults to `"{name}-adapter"`.
+    pub fn binary_path_for(manifest_path: &Path, manifest: &PluginManifest) -> std::path::PathBuf {
+        let binary_name = manifest
+            .plugin
+            .binary
+            .as_deref()
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| format!("{}-adapter", manifest.plugin.name));
+        manifest_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(binary_name)
     }
 }

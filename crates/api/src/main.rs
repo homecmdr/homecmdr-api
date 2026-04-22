@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -17,12 +17,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use notify::{EventKind as NotifyEventKind, RecursiveMode, Watcher};
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sha2::{Digest, Sha256};
-use homecmdr_plugin_host::{create_engine, PluginManager, PluginManifest, WasmAdapterFactory};
 use homecmdr_automations::{
     AutomationCatalog, AutomationController, AutomationExecutionObserver, AutomationRunner,
     TriggerContext,
@@ -34,7 +28,6 @@ use homecmdr_core::capability::{
 use homecmdr_core::command::DeviceCommand;
 use homecmdr_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
 use homecmdr_core::event::Event;
-use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
 use homecmdr_core::model::{DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use homecmdr_core::runtime::Runtime;
 use homecmdr_core::store::{
@@ -42,9 +35,19 @@ use homecmdr_core::store::{
     CommandAuditEntry, DeviceHistoryEntry, DeviceStore, SceneExecutionHistoryEntry,
     SceneStepResult,
 };
+use homecmdr_plugin_host::{
+    create_engine, IpcAdapterEntry, IpcAdapterHost, PluginManager, PluginManifest,
+    WasmAdapterFactory,
+};
 use homecmdr_scenes::{
     SceneCatalog, SceneExecutionResult, SceneRunOutcome, SceneRunner, SceneSummary,
 };
+use notify::{EventKind as NotifyEventKind, RecursiveMode, Watcher};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use store_postgres::{PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig};
 use store_sql::{HistorySelection, SqliteDeviceStore, SqliteHistoryConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -85,8 +88,7 @@ impl SharedRateLimit {
         let mut bucket = self.0.lock().expect("rate limiter mutex not poisoned");
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-        bucket.tokens =
-            (bucket.tokens + elapsed * bucket.refill_rate).min(bucket.max_tokens);
+        bucket.tokens = (bucket.tokens + elapsed * bucket.refill_rate).min(bucket.max_tokens);
         bucket.last_refill = now;
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
@@ -244,6 +246,10 @@ struct AppState {
     plugins_enabled: bool,
     plugins_directory: String,
     plugin_catalog: Arc<RwLock<Vec<PluginManifest>>>,
+    /// Names of adapters whose devices are managed by an external IPC process.
+    /// Commands to these devices are dispatched via the event bus rather than
+    /// calling an in-process adapter factory.
+    ipc_adapter_names: Arc<HashSet<String>>,
 }
 
 const _: fn() = || {
@@ -361,7 +367,7 @@ struct PutFileRequest {
     content: String,
 }
 
-type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<String>);
+type BuiltAdapters = (Vec<Box<dyn Adapter>>, Vec<String>, HashSet<String>);
 
 #[derive(Clone)]
 struct HealthState {
@@ -775,7 +781,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| config.auth.master_key.clone());
     let master_key_hash = sha256_hex(&master_key);
 
-    let (adapters, adapter_summaries) =
+    let (adapters, adapter_summaries, ipc_adapter_names) =
         build_adapters(&config).context("failed to build adapters")?;
     let health = HealthState::new(
         &adapter_summaries,
@@ -843,8 +849,7 @@ async fn main() -> Result<()> {
             }
         });
     let trigger_context = trigger_context_from_config(&config);
-    let backstop_timeout =
-        Duration::from_secs(config.automations.runner.backstop_timeout_secs);
+    let backstop_timeout = Duration::from_secs(config.automations.runner.backstop_timeout_secs);
     let automation_runner = build_automation_runner(
         (*automations).clone(),
         automation_observer.clone(),
@@ -893,6 +898,7 @@ async fn main() -> Result<()> {
         plugins_enabled: config.plugins.enabled,
         plugins_directory: config.plugins.directory.clone(),
         plugin_catalog: Arc::new(RwLock::new(initial_plugin_manifests)),
+        ipc_adapter_names: Arc::new(ipc_adapter_names),
     };
     let app = app(app_state.clone(), &config);
     let reload_controller = ReloadController {
@@ -997,6 +1003,53 @@ async fn main() -> Result<()> {
 
     let watcher_task = spawn_reload_watchers_if_enabled(&config, reload_controller.clone());
 
+    // ── Spawn IPC adapter child processes ────────────────────────────────────
+    // Derive a loopback API URL from the configured bind address so child
+    // processes can reach the API regardless of whether the bind address is
+    // 0.0.0.0 or 127.0.0.1.
+    let ipc_host = if config.plugins.enabled && !app_state.ipc_adapter_names.is_empty() {
+        let plugin_dir = std::path::Path::new(&config.plugins.directory);
+        let port = config.api.bind_address.rsplit(':').next().unwrap_or("3000");
+        let api_url = format!("http://127.0.0.1:{port}");
+
+        let entries: Vec<IpcAdapterEntry> = PluginManager::scan_manifests(plugin_dir)
+            .into_iter()
+            .filter(|m| m.is_ipc() && config.adapters.contains_key(&m.plugin.name))
+            .filter_map(|manifest| {
+                // Find the manifest file path so we can derive the binary path.
+                let manifest_path =
+                    plugin_dir.join(format!("{}.plugin.toml", manifest.plugin.name));
+                let binary_path = PluginManifest::binary_path_for(&manifest_path, &manifest);
+                if !binary_path.exists() {
+                    tracing::warn!(
+                        adapter = %manifest.plugin.name,
+                        "IPC adapter binary not found at '{}'; skipping",
+                        binary_path.display()
+                    );
+                    return None;
+                }
+                let config_json = config
+                    .adapters
+                    .get(&manifest.plugin.name)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                Some(IpcAdapterEntry {
+                    name: manifest.plugin.name.clone(),
+                    binary_path,
+                    config_json,
+                    api_url: api_url.clone(),
+                    api_token: master_key.clone(),
+                })
+            })
+            .collect();
+
+        let mut host = IpcAdapterHost::new(entries);
+        host.spawn_all();
+        Some(host)
+    } else {
+        None
+    };
+
     health.mark_startup_complete();
 
     // Spawn the HTTP server so we can race it against a drain timeout after the
@@ -1033,6 +1086,10 @@ async fn main() -> Result<()> {
     automation_task.abort();
     let _ = automation_task.await;
 
+    if let Some(host) = ipc_host {
+        host.shutdown();
+    }
+
     if let Some(task) = watcher_task {
         task.abort();
         let _ = task.await;
@@ -1057,20 +1114,24 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
     // ── 1. WASM (runtime) factories ──────────────────────────────────────────
     let mut wasm_factories: std::collections::HashMap<&'static str, WasmAdapterFactory> =
         std::collections::HashMap::new();
+    let mut ipc_adapter_names: HashSet<String> = HashSet::new();
 
     if config.plugins.enabled {
-        let engine = create_engine()
-            .context("failed to initialise WASM engine")?;
+        let engine = create_engine().context("failed to initialise WASM engine")?;
         let plugin_dir = std::path::Path::new(&config.plugins.directory);
 
         if plugin_dir.exists() {
-            let scanned = PluginManager::scan(plugin_dir, &engine)
-                .with_context(|| {
-                    format!(
-                        "failed to scan plugin directory '{}'",
-                        plugin_dir.display()
-                    )
-                })?;
+            // Collect all manifests once, partition into WASM vs IPC.
+            let all_manifests = PluginManager::scan_manifests(plugin_dir);
+            for manifest in all_manifests {
+                if manifest.is_ipc() {
+                    ipc_adapter_names.insert(manifest.plugin.name.clone());
+                }
+            }
+
+            let scanned = PluginManager::scan(plugin_dir, &engine).with_context(|| {
+                format!("failed to scan plugin directory '{}'", plugin_dir.display())
+            })?;
 
             for factory in scanned {
                 let name = factory.name();
@@ -1091,21 +1152,27 @@ fn build_adapters(config: &Config) -> Result<BuiltAdapters> {
     let mut summaries = Vec::new();
 
     for (name, adapter_config) in &config.adapters {
-        let adapter_opt = if let Some(factory) = wasm_factories.get(name.as_str()) {
-            factory
+        if let Some(factory) = wasm_factories.get(name.as_str()) {
+            let adapter_opt = factory
                 .build(adapter_config.clone())
-                .with_context(|| format!("failed to build WASM adapter '{name}'"))?
+                .with_context(|| format!("failed to build WASM adapter '{name}'"))?;
+            if let Some(adapter) = adapter_opt {
+                summaries.push(name.clone());
+                adapters.push(adapter);
+            }
+        } else if ipc_adapter_names.contains(name) {
+            tracing::info!(
+                adapter = %name,
+                "IPC adapter '{}' registered — managed as external process",
+                name
+            );
+            summaries.push(name.clone());
         } else {
             anyhow::bail!("no adapter factory registered for '{name}'");
-        };
-
-        if let Some(adapter) = adapter_opt {
-            summaries.push(name.clone());
-            adapters.push(adapter);
         }
     }
 
-    Ok((adapters, summaries))
+    Ok((adapters, summaries, ipc_adapter_names))
 }
 
 /// Rewrites a relative `sqlite://` path using `HOMECMDR_DATA_DIR` when set.
@@ -1180,9 +1247,7 @@ async fn create_device_store(
                     },
                 )
                 .await
-                .with_context(|| {
-                    format!("failed to initialize SQLite store '{database_url}'")
-                })?,
+                .with_context(|| format!("failed to initialize SQLite store '{database_url}'"))?,
             );
             Ok((
                 Some(store.clone() as Arc<dyn DeviceStore>),
@@ -1201,9 +1266,11 @@ async fn create_device_store(
             };
             let history_config = PostgresHistoryConfig {
                 enabled: config.persistence.history.enabled,
-                retention: config.persistence.history.retention_days.map(|days| {
-                    Duration::from_secs(days.saturating_mul(24 * 60 * 60))
-                }),
+                retention: config
+                    .persistence
+                    .history
+                    .retention_days
+                    .map(|days| Duration::from_secs(days.saturating_mul(24 * 60 * 60))),
                 selection,
             };
             let store: Arc<PostgresDeviceStore> = Arc::new(
@@ -1337,6 +1404,7 @@ fn make_state(
         plugins_enabled: false,
         plugins_directory: String::new(),
         plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+        ipc_adapter_names: Arc::new(HashSet::new()),
     }
 }
 
@@ -1954,6 +2022,8 @@ async fn run_persistence_worker(
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            // These events require no persistence action.
+            Ok(Event::DeviceCommandDispatched { .. }) => {}
         }
     }
 }
@@ -2243,13 +2313,12 @@ fn app(state: AppState, config: &Config) -> Router {
         });
 
     // Write — bearer token with at least `write` role.
-    let rate_limiter: Option<SharedRateLimit> =
-        config.api.rate_limit.enabled.then(|| {
-            SharedRateLimit::new(
-                config.api.rate_limit.requests_per_second,
-                config.api.rate_limit.burst_size,
-            )
-        });
+    let rate_limiter: Option<SharedRateLimit> = config.api.rate_limit.enabled.then(|| {
+        SharedRateLimit::new(
+            config.api.rate_limit.requests_per_second,
+            config.api.rate_limit.burst_size,
+        )
+    });
     let write_routes = Router::new()
         .route("/rooms", post(create_room))
         .route("/rooms/{id}", delete(delete_room))
@@ -2267,6 +2336,7 @@ fn app(state: AppState, config: &Config) -> Router {
             post(execute_automation_manually),
         )
         .route("/automations/{id}/validate", post(validate_automation))
+        .route("/ingest/devices", post(ingest_devices))
         .route_layer(middleware::from_fn(move |req: Request, next: Next| {
             let rate_limiter = rate_limiter.clone();
             async move {
@@ -2555,9 +2625,7 @@ async fn get_plugin(
         })
 }
 
-async fn reload_plugins(
-    State(state): State<AppState>,
-) -> Result<Json<ReloadResponse>, ApiError> {
+async fn reload_plugins(State(state): State<AppState>) -> Result<Json<ReloadResponse>, ApiError> {
     if !state.plugins_enabled {
         return Ok(Json(ReloadResponse {
             status: "error",
@@ -3244,9 +3312,44 @@ async fn command_device(
             );
             Ok(Json(json!({ "status": "ok" })))
         }
-        Ok(false) => Err(ApiError::not_implemented(format!(
-            "device commands are not implemented for '{id}'"
-        ))),
+        Ok(false) => {
+            // If this device belongs to an IPC adapter, dispatch the command
+            // via the event bus.  The adapter process subscribes to the
+            // WebSocket `/events` stream and handles it.
+            let adapter_name = device_id.0.split_once(':').map(|(n, _)| n.to_string());
+            let is_ipc = adapter_name
+                .as_deref()
+                .map(|n| state.ipc_adapter_names.contains(n))
+                .unwrap_or(false);
+
+            if is_ipc {
+                state.runtime.bus().publish(Event::DeviceCommandDispatched {
+                    id: device_id.clone(),
+                    command: command.clone(),
+                });
+                persist_command_audit(
+                    &state,
+                    CommandAuditEntry {
+                        recorded_at: Utc::now(),
+                        source: "device".to_string(),
+                        room_id: state
+                            .runtime
+                            .registry()
+                            .get(&device_id)
+                            .and_then(|device| device.room_id),
+                        device_id: device_id.clone(),
+                        command,
+                        status: "dispatched".to_string(),
+                        message: None,
+                    },
+                );
+                Ok(Json(json!({ "status": "dispatched" })))
+            } else {
+                Err(ApiError::not_implemented(format!(
+                    "device commands are not implemented for '{id}'"
+                )))
+            }
+        }
         Err(error) => {
             persist_command_audit(
                 &state,
@@ -3267,6 +3370,134 @@ async fn command_device(
             Err(ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))
         }
     }
+}
+
+// ── IPC ingest ───────────────────────────────────────────────────────────────
+
+/// Request body for `POST /ingest/devices`.
+///
+/// IPC adapters call this endpoint to push device state into the registry.
+/// Each entry in `devices` must supply a `vendor_id` (without the adapter
+/// prefix — the API adds it) plus the standard Device fields.
+#[derive(Debug, Deserialize)]
+struct IngestDevicesRequest {
+    /// Must match the adapter name declared in `[adapters]` config.
+    adapter: String,
+    devices: Vec<IngestDeviceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IngestDeviceEntry {
+    /// Vendor-assigned device identifier.  Must NOT include the adapter prefix.
+    vendor_id: String,
+    kind: String,
+    /// JSON object whose keys are attribute names and values are `AttributeValue`
+    /// (integer, float, bool, string, or null).
+    #[serde(default)]
+    attributes: serde_json::Value,
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+async fn ingest_devices(
+    State(state): State<AppState>,
+    Json(req): Json<IngestDevicesRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use homecmdr_core::model::{AttributeValue, Device, DeviceKind, Metadata};
+
+    let adapter = req.adapter.trim().to_string();
+    if adapter.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "adapter name must not be empty".to_string(),
+        ));
+    }
+
+    // Only IPC adapters may push state via this endpoint.
+    if !state.ipc_adapter_names.contains(&adapter) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            format!("adapter '{adapter}' is not a registered IPC adapter"),
+        ));
+    }
+
+    fn json_to_attr(v: serde_json::Value) -> AttributeValue {
+        match v {
+            serde_json::Value::Bool(b) => AttributeValue::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    AttributeValue::Integer(i)
+                } else {
+                    AttributeValue::Float(n.as_f64().unwrap_or(0.0))
+                }
+            }
+            serde_json::Value::String(s) => AttributeValue::Text(s),
+            serde_json::Value::Array(arr) => {
+                AttributeValue::Array(arr.into_iter().map(json_to_attr).collect())
+            }
+            serde_json::Value::Object(obj) => {
+                AttributeValue::Object(obj.into_iter().map(|(k, v)| (k, json_to_attr(v))).collect())
+            }
+            serde_json::Value::Null => AttributeValue::Null,
+        }
+    }
+
+    let mut upserted = 0usize;
+    let now = Utc::now();
+
+    for entry in req.devices {
+        let device_id = DeviceId(format!("{}:{}", adapter, entry.vendor_id));
+
+        let kind = match entry.kind.as_str() {
+            "light" => DeviceKind::Light,
+            "switch" => DeviceKind::Switch,
+            "sensor" => DeviceKind::Sensor,
+            _ => DeviceKind::Sensor,
+        };
+
+        let attributes: homecmdr_core::model::Attributes = match entry.attributes {
+            serde_json::Value::Object(map) => {
+                map.into_iter().map(|(k, v)| (k, json_to_attr(v))).collect()
+            }
+            _ => Default::default(),
+        };
+
+        let vendor_specific: std::collections::HashMap<String, serde_json::Value> =
+            match entry.metadata {
+                serde_json::Value::Object(map) => map.into_iter().collect(),
+                _ => Default::default(),
+            };
+
+        // Preserve existing room_id if the device is already registered.
+        let room_id = state
+            .runtime
+            .registry()
+            .get(&device_id)
+            .and_then(|d| d.room_id);
+
+        let device = Device {
+            id: device_id,
+            room_id,
+            kind,
+            attributes,
+            metadata: Metadata {
+                source: adapter.clone(),
+                accuracy: None,
+                vendor_specific,
+            },
+            updated_at: now,
+            last_seen: now,
+        };
+
+        match state.runtime.registry().upsert(device).await {
+            Ok(()) => upserted += 1,
+            Err(e) => {
+                tracing::warn!(adapter = %adapter, "ingest_devices: upsert failed: {e}");
+            }
+        }
+    }
+
+    Ok(Json(json!({ "upserted": upserted })))
 }
 
 async fn command_room_devices(
@@ -3851,6 +4082,9 @@ fn event_to_frame(event: Event) -> serde_json::Value {
         Event::SystemError { message } => {
             json!({ "type": "system.error", "message": message })
         }
+        Event::DeviceCommandDispatched { id, command } => {
+            json!({ "type": "device.command_dispatched", "id": id.0, "command": command })
+        }
     }
 }
 
@@ -3966,8 +4200,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use futures_util::StreamExt;
-    use reqwest::StatusCode;
-    use serde_json::Value;
     use homecmdr_core::capability::{measurement_value, TEMPERATURE_OUTDOOR, WIND_SPEED};
     use homecmdr_core::command::DeviceCommand;
     use homecmdr_core::config::{Config, HistoryConfig, PersistenceBackend};
@@ -3977,6 +4209,8 @@ mod tests {
     use homecmdr_core::runtime::RuntimeConfig;
     use homecmdr_core::store::AutomationRuntimeState;
     use homecmdr_scenes::{SceneCatalog, SceneRunner};
+    use reqwest::StatusCode;
+    use serde_json::Value;
     use store_sql::{SqliteDeviceStore, SqliteHistoryConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -5593,39 +5827,40 @@ mod tests {
                 store: None,
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(false),
-                 scenes_enabled: false,
-                 automations_enabled: true,
-                 scenes_directory: String::new(),
-                 automations_directory: automation_dir.to_string_lossy().to_string(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-             },
-             &config,
-         );
-         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-             .await
-             .expect("bind test listener");
-         let addr = listener.local_addr().expect("read test listener address");
-         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-         let handle = tokio::spawn(async move {
-             axum::serve(listener, app)
-                 .with_graceful_shutdown(async {
-                     let _ = shutdown_rx.await;
-                 })
-                 .await
-                 .expect("test server exits cleanly");
-         });
+                history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: true,
+                scenes_directory: String::new(),
+                automations_directory: automation_dir.to_string_lossy().to_string(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
+            &config,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test server exits cleanly");
+        });
 
-         let response = test_client()
-             .get(format!("http://{addr}/automations"))
+        let response = test_client()
+            .get(format!("http://{addr}/automations"))
             .send()
             .await
             .expect("automations request succeeds");
@@ -5742,27 +5977,28 @@ mod tests {
                 automations: Arc::new(RwLock::new(automations)),
                 automation_control: Arc::new(RwLock::new(automation_control)),
                 automation_runner_tx: runner_tx,
-                 automation_observer: Some(observer),
-                 trigger_context: TriggerContext::default(),
-                 health: test_health(&["open_meteo"]),
-                 store: None,
-                 auth_key_store: None,
-                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(false),
-                 scenes_enabled: false,
-                 automations_enabled: true,
-                 scenes_directory: String::new(),
-                 automations_directory: automation_dir.to_string_lossy().to_string(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-             },
+                automation_observer: Some(observer),
+                trigger_context: TriggerContext::default(),
+                health: test_health(&["open_meteo"]),
+                store: None,
+                auth_key_store: None,
+                master_key_hash: sha256_hex(TEST_MASTER_KEY),
+                history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: true,
+                scenes_directory: String::new(),
+                automations_directory: automation_dir.to_string_lossy().to_string(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6032,21 +6268,22 @@ mod tests {
                 store: None,
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(false),
-                 scenes_enabled: false,
-                 automations_enabled: false,
-                 scenes_directory: String::new(),
-                 automations_directory: String::new(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-             },
+                history: history_settings(false),
+                scenes_enabled: false,
+                automations_enabled: false,
+                scenes_directory: String::new(),
+                automations_directory: String::new(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6552,21 +6789,22 @@ mod tests {
                 store: Some(store.clone()),
                 auth_key_store: None,
                 master_key_hash: sha256_hex(TEST_MASTER_KEY),
-                 history: history_settings(true),
-                 scenes_enabled: true,
-                 automations_enabled: false,
-                 scenes_directory: scene_dir.to_string_lossy().to_string(),
-                 automations_directory: String::new(),
-                 scenes_watch: false,
-                 automations_watch: false,
-                 scripts_watch: false,
-                 scripts_enabled: false,
-                 scripts_directory: String::new(),
-                 backstop_timeout: Duration::from_secs(3600),
-                 plugins_enabled: false,
-                 plugins_directory: String::new(),
-                 plugin_catalog: Arc::new(RwLock::new(Vec::new())),
-             },
+                history: history_settings(true),
+                scenes_enabled: true,
+                automations_enabled: false,
+                scenes_directory: scene_dir.to_string_lossy().to_string(),
+                automations_directory: String::new(),
+                scenes_watch: false,
+                automations_watch: false,
+                scripts_watch: false,
+                scripts_enabled: false,
+                scripts_directory: String::new(),
+                backstop_timeout: Duration::from_secs(3600),
+                plugins_enabled: false,
+                plugins_directory: String::new(),
+                plugin_catalog: Arc::new(RwLock::new(Vec::new())),
+                ipc_adapter_names: Arc::new(HashSet::new()),
+            },
             &config,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -7098,8 +7336,8 @@ mod tests {
     #[tokio::test]
     async fn end_to_end_runtime_http_and_websocket_flow() {
         // Locate the WASM binary (built by `cargo build --release` in plugins/open-meteo/).
-        let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/plugins");
+        let plugins_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/plugins");
         if !plugins_dir.join("open_meteo.wasm").exists() {
             eprintln!(
                 "SKIP end_to_end_runtime_http_and_websocket_flow: \
@@ -7135,7 +7373,7 @@ mod tests {
             directory: plugins_dir.to_string_lossy().into_owned(),
         };
 
-        let (mut adapters, _) =
+        let (mut adapters, _, _) =
             build_adapters(&config).expect("WASM plugin adapter build succeeds");
         let adapter = adapters.pop().expect("open_meteo WASM adapter built");
         let runtime = Arc::new(Runtime::new(vec![adapter], config.runtime));
@@ -7473,8 +7711,8 @@ mod tests {
     fn build_adapters_loads_wasm_plugins() {
         // Locate the compiled WASM binary relative to this crate's manifest directory.
         // config/plugins/ is two levels up from crates/api/.
-        let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/plugins");
+        let plugins_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/plugins");
 
         if !plugins_dir.join("open_meteo.wasm").exists() {
             eprintln!(
@@ -7501,7 +7739,8 @@ mod tests {
             directory: plugins_dir.to_string_lossy().into_owned(),
         };
 
-        let (adapters, summaries) = build_adapters(&config).expect("adapter build succeeds");
+        let (adapters, summaries, _ipc_names) =
+            build_adapters(&config).expect("adapter build succeeds");
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].name(), "open_meteo");

@@ -48,18 +48,18 @@ impl Adapter for WasmAdapter {
 
         loop {
             let plugin = Arc::clone(&self.plugin);
-            let result =
-                tokio::task::spawn_blocking(move || plugin.lock().unwrap().plugin_poll())
-                    .await
-                    .context("WASM poll task panicked")?;
+            let result = tokio::task::spawn_blocking(move || plugin.lock().unwrap().plugin_poll())
+                .await
+                .context("WASM poll task panicked")?;
 
             match result {
                 Ok(updates) => {
                     for update in updates {
-                        if let Err(e) =
-                            apply_device_update(&self.name, &update, &registry).await
-                        {
-                            tracing::warn!(adapter = self.name.as_str(), "device upsert failed: {e}");
+                        if let Err(e) = apply_device_update(&self.name, &update, &registry).await {
+                            tracing::warn!(
+                                adapter = self.name.as_str(),
+                                "device upsert failed: {e}"
+                            );
                         }
                     }
                 }
@@ -114,8 +114,8 @@ async fn apply_device_update(
 ) -> Result<()> {
     let device_id = DeviceId(format!("{adapter_name}:{}", update.vendor_id));
 
-    let attributes: Attributes = serde_json::from_str(&update.attributes_json)
-        .with_context(|| {
+    let attributes: Attributes =
+        serde_json::from_str(&update.attributes_json).with_context(|| {
             format!(
                 "failed to parse attributes JSON for device '{}'",
                 device_id.0
@@ -125,9 +125,7 @@ async fn apply_device_update(
     let kind = parse_device_kind(&update.kind);
 
     // Preserve room_id if the device already exists in the registry.
-    let room_id = registry
-        .get(&device_id)
-        .and_then(|d| d.room_id.clone());
+    let room_id = registry.get(&device_id).and_then(|d| d.room_id.clone());
 
     let now = Utc::now();
     let device = Device {
@@ -203,10 +201,7 @@ impl AdapterFactory for WasmAdapterFactory {
             serde_json::to_string(&config).context("failed to serialise adapter config")?;
 
         let mut plugin = WasmPlugin::load(&self.engine, &self.wasm_path).with_context(|| {
-            format!(
-                "failed to load WASM plugin '{}'",
-                self.wasm_path.display()
-            )
+            format!("failed to load WASM plugin '{}'", self.wasm_path.display())
         })?;
         plugin.plugin_init(&config_json)?;
 

@@ -61,12 +61,7 @@ impl bindings::homecmdr::plugin::host_http::Host for PluginHost {
             .map_err(|e| e.to_string())
     }
 
-    fn post(
-        &mut self,
-        url: String,
-        content_type: String,
-        body: String,
-    ) -> Result<String, String> {
+    fn post(&mut self, url: String, content_type: String, body: String) -> Result<String, String> {
         self.http
             .post(&url)
             .content_type(&content_type)
@@ -77,12 +72,7 @@ impl bindings::homecmdr::plugin::host_http::Host for PluginHost {
             .map_err(|e: ureq::Error| e.to_string())
     }
 
-    fn put(
-        &mut self,
-        url: String,
-        content_type: String,
-        body: String,
-    ) -> Result<String, String> {
+    fn put(&mut self, url: String, content_type: String, body: String) -> Result<String, String> {
         self.http
             .put(&url)
             .content_type(&content_type)
