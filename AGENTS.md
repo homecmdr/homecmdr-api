@@ -23,9 +23,8 @@
 - `crates/core`: runtime contracts, config model, registry, command/capability model, event bus.
 - `crates/api`: only binary; starts runtime, loads Lua assets, exposes HTTP + WebSocket API, and wires persistence/history.
 - `crates/adapters`: empty shim kept for backwards compatibility; no longer links adapter crates. Do not add new deps here.
-- `crates/adapter-open-meteo`: native Rust implementation retained for reference and unit tests. It is **not** registered at runtime anymore — the WASM build in `plugins/open-meteo/` is used instead.
+- `crates/adapter-open-meteo`: native Rust implementation retained for reference and unit tests. It is **not** registered at runtime — install the WASM plugin via `homecmdr plugin add plugin-open-meteo` instead.
 - `crates/plugin-host`: WASM runtime (wasmtime 44, component model). Exposes `WasmAdapter`/`WasmAdapterFactory` that implement the same `Adapter`/`AdapterFactory` traits as native adapters, so `Runtime` and the API layer are unaware of WASM vs native. HTTP inside WASM is provided by `ureq` (pure-sync, no Tokio dependency).
-- `plugins/open-meteo/`: the Open Meteo WASM guest crate. Lives **outside** the main workspace (has its own `[workspace]` in `Cargo.toml`). Build target is `wasm32-wasip2`. Compiled binary is committed to `config/plugins/open_meteo.wasm`.
 - `crates/scenes`, `crates/automations`, `crates/lua-host`: Lua asset loading/execution. `mlua` is vendored Lua 5.4, so no system Lua dependency should be needed.
 - `crates/store-sql`: SQLite store plus in-code schema initialization/migrations and history storage.
 - `crates/store-postgres`: PostgreSQL store implementing the same `DeviceStore` + `ApiKeyStore` traits. Wired at startup when `persistence.backend = "postgres"` is set in config.
