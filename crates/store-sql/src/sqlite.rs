@@ -8,6 +8,7 @@ use homecmdr_core::model::{
     AttributeValue, Attributes, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room,
     RoomId,
 };
+use homecmdr_core::history_filter::{self as hf, HistorySelection};
 use homecmdr_core::store::{
     ApiKeyRecord, ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
     AutomationRuntimeState, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
@@ -176,13 +177,6 @@ pub struct SqliteHistoryConfig {
     pub enabled: bool,
     pub retention: Option<Duration>,
     pub selection: HistorySelection,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct HistorySelection {
-    pub device_ids: Vec<String>,
-    pub capabilities: Vec<String>,
-    pub adapter_names: Vec<String>,
 }
 
 impl Default for SqliteHistoryConfig {
@@ -539,100 +533,23 @@ impl SqliteDeviceStore {
     }
 
     fn should_record_device(&self, device: &Device) -> bool {
-        self.selection_allows_device(&device.id.0, &device.metadata.source)
+        hf::should_record_device(&self.history.selection, device)
     }
 
     fn should_record_attribute(&self, device: &Device, attribute: &str) -> bool {
-        self.selection_allows_device(&device.id.0, &device.metadata.source)
-            && self.selection_allows_capability(attribute)
+        hf::should_record_attribute(&self.history.selection, device, attribute)
     }
 
     fn should_record_command_audit(&self, entry: &CommandAuditEntry) -> bool {
-        self.selection_allows_device(&entry.device_id.0, device_adapter_name(&entry.device_id.0))
-            && self.selection_allows_capability(&entry.command.capability)
+        hf::should_record_command_audit(&self.history.selection, entry)
     }
 
     fn should_record_scene_execution(&self, entry: &SceneExecutionHistoryEntry) -> bool {
-        if self.history.selection.adapter_names.is_empty()
-            && self.history.selection.capabilities.is_empty()
-        {
-            return true;
-        }
-
-        entry.results.iter().any(|result| {
-            self.selection_allows_device(&result.target, device_adapter_name(&result.target))
-        })
+        hf::should_record_scene_execution(&self.history.selection, entry)
     }
 
     fn should_record_automation_execution(&self, entry: &AutomationExecutionHistoryEntry) -> bool {
-        if !self.selection_allows_trigger_payload(&entry.trigger_payload) {
-            return false;
-        }
-
-        if self.history.selection.capabilities.is_empty()
-            && self.history.selection.adapter_names.is_empty()
-        {
-            return true;
-        }
-
-        entry.results.iter().any(|result| {
-            self.selection_allows_device(&result.target, device_adapter_name(&result.target))
-        }) || entry.results.is_empty()
-    }
-
-    fn selection_allows_device(&self, device_id: &str, adapter_name: &str) -> bool {
-        let device_match = self.history.selection.device_ids.is_empty()
-            || self
-                .history
-                .selection
-                .device_ids
-                .iter()
-                .any(|candidate| candidate == device_id);
-        let adapter_match = self.history.selection.adapter_names.is_empty()
-            || self
-                .history
-                .selection
-                .adapter_names
-                .iter()
-                .any(|candidate| candidate == adapter_name);
-
-        device_match && adapter_match
-    }
-
-    fn selection_allows_capability(&self, capability: &str) -> bool {
-        self.history.selection.capabilities.is_empty()
-            || self
-                .history
-                .selection
-                .capabilities
-                .iter()
-                .any(|candidate| candidate == capability)
-    }
-
-    fn selection_allows_trigger_payload(&self, payload: &AttributeValue) -> bool {
-        let AttributeValue::Object(fields) = payload else {
-            return self.history.selection.device_ids.is_empty()
-                && self.history.selection.adapter_names.is_empty();
-        };
-
-        let device_id = fields.get("device_id").and_then(attribute_text);
-        let attribute = fields.get("attribute").and_then(attribute_text);
-
-        let device_match = match device_id {
-            Some(device_id) => {
-                self.selection_allows_device(device_id, device_adapter_name(device_id))
-            }
-            None => {
-                self.history.selection.device_ids.is_empty()
-                    && self.history.selection.adapter_names.is_empty()
-            }
-        };
-        let capability_match = match attribute {
-            Some(attribute) => self.selection_allows_capability(attribute),
-            None => self.history.selection.capabilities.is_empty(),
-        };
-
-        device_match && capability_match
+        hf::should_record_automation_execution(&self.history.selection, entry)
     }
 }
 
@@ -1487,20 +1404,6 @@ fn api_key_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ApiKeyRecord> {
         created_at,
         last_used_at,
     })
-}
-
-fn attribute_text(value: &AttributeValue) -> Option<&str> {
-    match value {
-        AttributeValue::Text(value) => Some(value.as_str()),
-        _ => None,
-    }
-}
-
-fn device_adapter_name(device_id: &str) -> &str {
-    device_id
-        .split_once(':')
-        .map(|(adapter, _)| adapter)
-        .unwrap_or(device_id)
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ pub mod capability;
 pub mod command;
 pub mod config;
 pub mod event;
+pub mod history_filter;
 pub mod http;
 pub mod invoke;
 pub mod model;

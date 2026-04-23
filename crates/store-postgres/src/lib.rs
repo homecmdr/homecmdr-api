@@ -1,5 +1,4 @@
 mod postgres;
 
-pub use postgres::{
-    HistorySelection as PgHistorySelection, PostgresDeviceStore, PostgresHistoryConfig,
-};
+pub use homecmdr_core::history_filter::HistorySelection as PgHistorySelection;
+pub use postgres::{PostgresDeviceStore, PostgresHistoryConfig};

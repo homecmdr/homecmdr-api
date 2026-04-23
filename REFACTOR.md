@@ -11,7 +11,7 @@ See code review findings for full rationale.
 |---|---|---|---|---|
 | 1 | `crates/api/src/main.rs` | 7,947 | Critical | ✅ Complete |
 | 2 | `crates/automations/src/lib.rs` | 5,694 | Critical | ✅ Complete |
-| 3 | `crates/store-sql` + `store-postgres` history filter dedup | ~400 dup | High | ⬜ Pending |
+| 3 | `crates/store-sql` + `store-postgres` history filter dedup | ~400 dup | High | ✅ Complete |
 | 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ⬜ Pending |
 | 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ⬜ Pending |
 | 6 | `crates/core/src/registry.rs` — move validators | 706 | Moderate | ⬜ Pending |
@@ -117,17 +117,22 @@ crates/automations/src/
 Extract `HistorySelection` + `should_record_*` / `selection_allows_*` (~200 lines duplicated
 between `sqlite.rs` and `postgres.rs`) into a shared location.
 
-Options:
-- Add `crates/core/src/history_filter.rs` (depends on whether core is the right layer)
-- New lightweight `crates/store-core` crate that both stores depend on
+### Resolution
 
-Also consider splitting each store file:
-```
-src/schema.rs     # DDL consts, migrate_to_v*()
-src/store.rs      # impl DeviceStore + impl ApiKeyStore
-src/decoders.rs   # row-to-struct decoder functions
-src/filters.rs    # HistorySelection, should_record_*, selection_allows_*
-```
+Extracted to `crates/core/src/history_filter.rs`. Both store crates now import
+`HistorySelection` and the filter free-functions from `homecmdr_core::history_filter`.
+`HistorySelection` is re-exported from each store crate's `lib.rs` for backward compatibility.
+
+### Checklist
+
+- [x] Create `crates/core/src/history_filter.rs` — `HistorySelection`, `should_record_*`, `selection_allows_*`, helpers
+- [x] Add `pub mod history_filter` to `crates/core/src/lib.rs`
+- [x] Remove `HistorySelection` and duplicated methods from `store-sql/src/sqlite.rs`
+- [x] Remove `HistorySelection` and duplicated methods from `store-postgres/src/postgres.rs`
+- [x] Update `store-sql/src/lib.rs` to re-export `HistorySelection` from `homecmdr_core`
+- [x] Update `store-postgres/src/lib.rs` to re-export `HistorySelection` from `homecmdr_core`
+- [x] `cargo check --workspace` passes
+- [x] `cargo test -p store-sql` passes (16/16)
 
 ---
 
