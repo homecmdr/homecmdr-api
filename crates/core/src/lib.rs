@@ -11,6 +11,7 @@ pub mod model;
 pub mod registry;
 pub mod runtime;
 pub mod store;
+pub mod validation;
 
 #[cfg(test)]
 mod tests;

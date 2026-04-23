@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::{action_requires_value, capability_definition};
 use crate::model::AttributeValue;
-use crate::registry::validate_capability_attribute_value;
+use crate::validation::validate_capability_attribute_value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceCommand {

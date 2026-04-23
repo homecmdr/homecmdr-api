@@ -14,7 +14,7 @@ See code review findings for full rationale.
 | 3 | `crates/store-sql` + `store-postgres` history filter dedup | ~400 dup | High | ✅ Complete |
 | 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ✅ Complete |
 | 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ✅ Complete |
-| 6 | `crates/core/src/registry.rs` — move validators | 706 | Moderate | ⬜ Pending |
+| 6 | `crates/core/src/registry.rs` — move validators | 706 | Moderate | ✅ Complete |
 | 7 | `crates/core/src/config.rs` — config submodule | 460 | Low/Watch | ⬜ Pending |
 
 ---
@@ -188,8 +188,29 @@ crates/scenes/src/
 
 ## Task 6: `crates/core/src/registry.rs` — validator extraction
 
-Move the ~250 lines of pure `validate_*` functions into `crates/core/src/capability.rs`
-or a new `crates/core/src/validation.rs`. `registry.rs` calls into that module.
+Move the ~250 lines of pure `validate_*` functions into `crates/core/src/validation.rs`.
+`registry.rs` and `command.rs` call into that module.
+
+### Resolution
+
+Created `crates/core/src/validation.rs` with:
+- `pub fn validate_device`
+- `pub fn validate_capability_attribute_value`
+- All schema-specific private validators (`validate_percentage`, `validate_rgb_color`, etc.)
+
+Updated `command.rs` to import `validate_capability_attribute_value` from `crate::validation`
+instead of `crate::registry`. Registry-specific helpers (`validate_room_assignment`,
+`validate_group`, `validate_group_membership`, `dedupe_member_ids`, `read_guard`, `write_guard`)
+remain in `registry.rs`.
+
+### Checklist
+
+- [x] Create `crates/core/src/validation.rs` — all pure attribute/capability validators
+- [x] Add `pub mod validation` to `crates/core/src/lib.rs`
+- [x] Remove moved functions from `registry.rs`; add `use crate::validation::validate_device`
+- [x] Update `command.rs` to import from `crate::validation`
+- [x] `cargo check --workspace` passes
+- [x] `cargo test -p homecmdr-core` passes (52/52)
 
 ---
 
