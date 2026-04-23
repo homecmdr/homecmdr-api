@@ -5,7 +5,6 @@ members = [
     "crates/api",
     "crates/automations",
     "crates/scenes",
-    "crates/adapter-open-meteo",
     "crates/store-sql",
     "crates/store-postgres",
     "crates/plugin-host",

@@ -16,14 +16,13 @@
 - `HOMECMDR_DATA_DIR` env var prefixes relative `database_url` paths (e.g. set to `/var/lib/homecmdr`).
 - `HOMECMDR_MASTER_KEY` env var overrides `auth.master_key` in config.
 - API bind address is configured via `api.bind_address` in `config/default.toml`; it is no longer hard-coded in `main.rs`.
-- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, `cargo test -p adapter-open-meteo`, or `cargo test -p homecmdr-plugin-host`.
+- Focused tests: `cargo test -p api`, `cargo test -p homecmdr-core`, `cargo test -p homecmdr-scenes`, `cargo test -p homecmdr-automations`, `cargo test -p store-sql`, or `cargo test -p homecmdr-plugin-host`.
 
 ## Workspace Map
 
 - `crates/core`: runtime contracts, config model, registry, command/capability model, event bus.
 - `crates/api`: only binary; starts runtime, loads Lua assets, exposes HTTP + WebSocket API, and wires persistence/history.
 - `crates/adapters`: empty shim kept for backwards compatibility; no longer links adapter crates. Do not add new deps here.
-- `crates/adapter-open-meteo`: native Rust implementation retained for reference and unit tests. It is **not** registered at runtime — install the WASM plugin via `homecmdr plugin add plugin-open-meteo` instead.
 - `crates/plugin-host`: WASM runtime (wasmtime 44, component model). Exposes `WasmAdapter`/`WasmAdapterFactory` that implement the same `Adapter`/`AdapterFactory` traits as native adapters, so `Runtime` and the API layer are unaware of WASM vs native. HTTP inside WASM is provided by `ureq` (pure-sync, no Tokio dependency).
 - `crates/scenes`, `crates/automations`, `crates/lua-host`: Lua asset loading/execution. `mlua` is vendored Lua 5.4, so no system Lua dependency should be needed.
 - `crates/store-sql`: SQLite store plus in-code schema initialization/migrations and history storage.

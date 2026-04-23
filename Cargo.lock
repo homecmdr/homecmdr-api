@@ -3,21 +3,6 @@
 version = 4
 
 [[package]]
-name = "adapter-open-meteo"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "homecmdr-core",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

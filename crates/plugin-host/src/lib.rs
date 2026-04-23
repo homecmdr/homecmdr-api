@@ -107,8 +107,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Load the WASM plugin, call `poll()` against a mock server, and verify
-    /// that it produces the expected 12 device updates — matching parity with
-    /// the native `adapter-open-meteo` adapter.
+    /// that it produces the expected 12 device updates.
     #[test]
     fn wasm_open_meteo_plugin_produces_expected_device_updates() {
         let path = match wasm_path() {
