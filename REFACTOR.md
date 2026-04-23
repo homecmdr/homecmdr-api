@@ -10,7 +10,7 @@ See code review findings for full rationale.
 | # | Crate / File | Lines | Severity | Status |
 |---|---|---|---|---|
 | 1 | `crates/api/src/main.rs` | 7,947 | Critical | ✅ Complete |
-| 2 | `crates/automations/src/lib.rs` | 5,694 | Critical | ⬜ Pending |
+| 2 | `crates/automations/src/lib.rs` | 5,694 | Critical | ✅ Complete |
 | 3 | `crates/store-sql` + `store-postgres` history filter dedup | ~400 dup | High | ⬜ Pending |
 | 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ⬜ Pending |
 | 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ⬜ Pending |
@@ -90,6 +90,25 @@ crates/automations/src/
     ├── scheduled.rs      # WallClock/Cron/Sunrise/Sunset + run_scheduled_trigger_loop()
     └── interval.rs       # Interval + run_interval_trigger_loop()
 ```
+
+### Checklist
+
+- [x] Create `types.rs`
+- [x] Create `concurrency.rs`
+- [x] Create `schedule.rs`
+- [x] Create `events.rs`
+- [x] Create `conditions.rs`
+- [x] Create `state.rs`
+- [x] Create `catalog.rs`
+- [x] Create `runner.rs`
+- [x] Create `triggers/mod.rs`
+- [x] Create `triggers/device.rs`
+- [x] Create `triggers/scheduled.rs`
+- [x] Create `triggers/interval.rs`
+- [x] Slim down `lib.rs` to re-exports + module declarations
+- [x] Extract `tests.rs`
+- [x] `cargo check --workspace` passes
+- [x] `cargo test -p homecmdr-automations` passes (34/34)
 
 ---
 
