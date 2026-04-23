@@ -13,7 +13,7 @@ See code review findings for full rationale.
 | 2 | `crates/automations/src/lib.rs` | 5,694 | Critical | ✅ Complete |
 | 3 | `crates/store-sql` + `store-postgres` history filter dedup | ~400 dup | High | ✅ Complete |
 | 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ✅ Complete |
-| 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ⬜ Pending |
+| 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ✅ Complete |
 | 6 | `crates/core/src/registry.rs` — move validators | 706 | Moderate | ⬜ Pending |
 | 7 | `crates/core/src/config.rs` — config submodule | 460 | Low/Watch | ⬜ Pending |
 
@@ -166,11 +166,23 @@ crates/lua-host/src/
 ```
 crates/scenes/src/
 ├── lib.rs        # public re-exports
-├── types.rs      # Scene, SceneSummary, SceneRunOutcome
+├── types.rs      # Scene, SceneSummary, SceneRunOutcome, SceneExecutionResult, ReloadError
 ├── catalog.rs    # impl SceneCatalog
 ├── runner.rs     # impl SceneRunner, concurrency tracking
-└── loader.rs     # load_scene_file(), execute_scene_inline(), evaluate_scene_module()
+├── loader.rs     # load_scene_file(), execute_scene_inline(), evaluate_scene_module()
+└── tests.rs      # all tests
 ```
+
+### Checklist
+
+- [x] Create `types.rs` — `Scene`, `SceneSummary`, `SceneRunOutcome`, `SceneExecutionResult`, `ReloadError`
+- [x] Create `loader.rs` — `load_scene_file`, `execute_scene_inline`, `evaluate_scene_module`
+- [x] Create `catalog.rs` — `SceneCatalog` + all impls
+- [x] Create `runner.rs` — `SceneRunner`, `PerSceneConcurrency`, `decide_scene_dispatch`, `run_and_finalize`, `spawn_queued_scene`
+- [x] Extract `tests.rs`
+- [x] Slim down `lib.rs` to module declarations + public re-exports
+- [x] `cargo check --workspace` passes
+- [x] `cargo test -p homecmdr-scenes` passes (7/7)
 
 ---
 
