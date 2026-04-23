@@ -11,6 +11,16 @@ plugins/*/target/
 # SQLx offline metadata
 .sqlx/
 
+# Local dev config override — copy of default.toml with local additions.
+# Never committed; keeps local plugin entries and secrets off remote.
+config/local.toml
+
+# Installed plugin binaries and manifests.
+# These are written by `homecmdr plugin add` or copied in manually during dev.
+# They are not source-controlled — each environment installs what it needs.
+config/plugins/*.wasm
+config/plugins/*.plugin.toml
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
