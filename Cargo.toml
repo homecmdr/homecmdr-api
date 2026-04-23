@@ -8,7 +8,6 @@ members = [
     "crates/adapter-open-meteo",
     "crates/store-sql",
     "crates/store-postgres",
-    "crates/mcp-server",
     "crates/plugin-host",
     "crates/plugin-sdk",
 ]
