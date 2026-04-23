@@ -12,7 +12,7 @@ See code review findings for full rationale.
 | 1 | `crates/api/src/main.rs` | 7,947 | Critical | ✅ Complete |
 | 2 | `crates/automations/src/lib.rs` | 5,694 | Critical | ✅ Complete |
 | 3 | `crates/store-sql` + `store-postgres` history filter dedup | ~400 dup | High | ✅ Complete |
-| 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ⬜ Pending |
+| 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ✅ Complete |
 | 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ⬜ Pending |
 | 6 | `crates/core/src/registry.rs` — move validators | 706 | Moderate | ⬜ Pending |
 | 7 | `crates/core/src/config.rs` — config submodule | 460 | Low/Watch | ⬜ Pending |
@@ -144,8 +144,20 @@ crates/lua-host/src/
 ├── context.rs    # LuaExecutionContext UserData impl
 ├── convert.rs    # lua_value_to_attribute(), attribute_to_lua_value(), etc.
 ├── loader.rs     # ScriptLoader, require() searcher, path-traversal protection
-└── runtime.rs    # ExecutionMode, prepare_lua(), install_execution_hook(), evaluate_module()
+├── runtime.rs    # ExecutionMode, prepare_lua(), install_execution_hook(), evaluate_module()
+└── tests.rs      # all tests
 ```
+
+### Checklist
+
+- [x] Create `context.rs` — `CommandExecutionResult`, `LuaExecutionContext` + `UserData` impl
+- [x] Create `convert.rs` — all value conversion and model-to-attribute helpers
+- [x] Create `loader.rs` — `ScriptLoader`, `resolve_script_module_path` (`pub(crate)`)
+- [x] Create `runtime.rs` — `ExecutionMode`, `LuaRuntimeOptions`, `install_execution_hook`, `prepare_lua`, `evaluate_module`
+- [x] Extract `tests.rs`
+- [x] Slim down `lib.rs` to module declarations + public re-exports
+- [x] `cargo check --workspace` passes
+- [x] `cargo test -p homecmdr-lua-host` passes (9/9)
 
 ---
 
