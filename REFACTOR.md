@@ -15,7 +15,7 @@ See code review findings for full rationale.
 | 4 | `crates/lua-host/src/lib.rs` | 1,137 | High | ✅ Complete |
 | 5 | `crates/scenes/src/lib.rs` | 983 | Moderate | ✅ Complete |
 | 6 | `crates/core/src/registry.rs` — move validators | 706 | Moderate | ✅ Complete |
-| 7 | `crates/core/src/config.rs` — config submodule | 460 | Low/Watch | ⬜ Pending |
+| 7 | `crates/core/src/config.rs` — config submodule | 460 | Low/Watch | ✅ Complete |
 
 ---
 
@@ -214,15 +214,24 @@ remain in `registry.rs`.
 
 ---
 
-## Task 7: `crates/core/src/config.rs` — submodule (low priority)
-
-Only if the file grows significantly. Target layout:
+## Task 7: `crates/core/src/config.rs` — submodule
 
 ```
 crates/core/src/config/
-├── mod.rs          # Config, load_from_file(), validate()
+├── mod.rs          # Config, AdapterConfig, AdaptersConfig, LoggingConfig, load_from_file(), validate()
 ├── api.rs          # ApiConfig, RateLimitConfig, ApiCorsConfig
-├── persistence.rs  # PersistenceConfig, HistoryConfig
-├── runtime.rs      # ScenesConfig, AutomationsConfig, ScriptsConfig
-└── system.rs       # LocaleConfig, TelemetryConfig, AuthConfig, PluginsConfig
+├── persistence.rs  # PersistenceConfig, HistoryConfig, PersistenceBackend
+├── runtime.rs      # ScenesConfig, AutomationsConfig, AutomationRunnerConfig, ScriptsConfig
+└── system.rs       # LocaleConfig, TelemetryConfig, TelemetrySelectionConfig, AuthConfig, PluginsConfig
 ```
+
+### Checklist
+
+- [x] Create `config/api.rs` — `ApiConfig`, `RateLimitConfig`, `ApiCorsConfig`
+- [x] Create `config/persistence.rs` — `PersistenceConfig`, `HistoryConfig`, `PersistenceBackend`
+- [x] Create `config/runtime.rs` — `ScenesConfig`, `AutomationsConfig`, `AutomationRunnerConfig`, `ScriptsConfig`
+- [x] Create `config/system.rs` — `LocaleConfig`, `TelemetryConfig`, `AuthConfig`, `PluginsConfig`
+- [x] Create `config/mod.rs` — `Config`, `load_from_file`, `validate`, re-exports from submodules
+- [x] Remove flat `config.rs`
+- [x] `cargo check --workspace` passes
+- [x] `cargo test -p homecmdr-core` passes (52/52)
