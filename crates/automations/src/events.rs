@@ -1,3 +1,10 @@
+//! Event matching and payload building for automation triggers.
+//!
+//! When a runtime event (device state change, adapter started, system error)
+//! arrives on the event bus, the functions in this module decide whether it
+//! matches an automation's trigger and, if so, build the `AttributeValue`
+//! object that gets passed to the Lua `execute(ctx, event)` function.
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -9,7 +16,12 @@ use homecmdr_core::registry::DeviceRegistry;
 use crate::types::{AdapterLifecycleEvent, Automation, ThresholdTrigger, Trigger, TriggerContext};
 
 // ── Attribute helpers ─────────────────────────────────────────────────────────
+// Low-level helpers for extracting numeric values from attributes and comparing
+// them against trigger or condition rules.
 
+/// Extract a numeric value from an `AttributeValue`.  Works with bare integers
+/// and floats, and also with structured objects that have a `"value"` field
+/// (e.g. `{ "value": 21, "unit": "celsius" }`).
 pub(crate) fn attribute_value_to_f64(value: &AttributeValue) -> Option<f64> {
     match value {
         AttributeValue::Integer(value) => Some(*value as f64),
@@ -23,6 +35,8 @@ pub(crate) fn attribute_value_to_f64(value: &AttributeValue) -> Option<f64> {
     }
 }
 
+/// Returns `true` if `value` satisfies the `equals` or `threshold` rule.
+/// If neither rule is set, returns `true` (no filter applied).
 pub(crate) fn attribute_matches(
     value: &AttributeValue,
     equals: Option<&AttributeValue>,
@@ -51,6 +65,9 @@ pub(crate) fn attribute_matches(
     true
 }
 
+/// Returns `true` if the value just crossed the threshold boundary — it was
+/// on the wrong side before and is now on the right side.  Used by the
+/// threshold trigger so it only fires once per crossing, not on every update.
 pub(crate) fn crossed_threshold(
     previous_value: Option<&AttributeValue>,
     current_value: &AttributeValue,
@@ -78,7 +95,13 @@ pub(crate) fn crossed_threshold(
 }
 
 // ── Event builders ────────────────────────────────────────────────────────────
+// These functions inspect an incoming runtime event and decide whether it
+// matches an automation's trigger.  If it does, they build and return the
+// `AttributeValue` object that is passed to the Lua `execute(ctx, event)`
+// function.  Returning `None` means "this event is not for this automation".
 
+/// Try to match `event` against `automation`'s trigger.  Returns the Lua event
+/// payload if there is a match, or `None` if the event should be ignored.
 pub(crate) fn automation_event_from_runtime_event(
     automation: &Automation,
     event: &Event,
@@ -170,6 +193,9 @@ pub(crate) fn automation_event_from_runtime_event(
     }
 }
 
+/// Used when the event bus falls behind (lags) and events were dropped.
+/// Reads the device's current state from the registry and produces an event
+/// payload as if the device had just changed, so no trigger is silently missed.
 pub(crate) fn automation_event_from_registry_snapshot(
     automation: &Automation,
     registry: &DeviceRegistry,
@@ -419,6 +445,8 @@ fn device_state_change_event(
     AttributeValue::Object(event)
 }
 
+/// Build the event payload for an `adapter_lifecycle` trigger that fired
+/// because an adapter started.
 pub(crate) fn adapter_started_event(adapter: &str) -> AttributeValue {
     AttributeValue::Object(HashMap::from([
         (
@@ -436,6 +464,7 @@ pub(crate) fn adapter_started_event(adapter: &str) -> AttributeValue {
     ]))
 }
 
+/// Build the event payload for a `system_error` trigger.
 pub(crate) fn system_error_event(message: &str) -> AttributeValue {
     AttributeValue::Object(HashMap::from([
         (
@@ -449,6 +478,9 @@ pub(crate) fn system_error_event(message: &str) -> AttributeValue {
     ]))
 }
 
+/// Build the event payload for a scheduled trigger (wall_clock, cron, sunrise,
+/// or sunset).  The payload includes the scheduled time and any trigger-specific
+/// fields like `hour`/`minute` or `offset_mins`.
 pub(crate) fn scheduled_trigger_event(
     trigger: &Trigger,
     scheduled_at: DateTime<Utc>,

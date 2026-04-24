@@ -1,3 +1,11 @@
+//! Scheduled trigger loop for automations.
+//!
+//! One background task is spawned per scheduled automation (wall_clock, cron,
+//! sunrise, sunset).  The task computes the next fire time, sleeps until then,
+//! and spawns the automation execution.  For resumable-schedule automations it
+//! consults the persisted state on startup so it can catch up on any slots
+//! that were missed while the server was down.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,6 +21,14 @@ use crate::state::{next_scheduled_fire_after, AutomationStateStore};
 use crate::runner::AutomationExecutionObserver;
 use crate::types::{Automation, TriggerContext};
 
+// ── Scheduled trigger loop ────────────────────────────────────────────────────
+// Computes the next fire time on startup (consulting saved state for resumable
+// schedules), sleeps until then, and then advances to the following slot.
+// Exits cleanly if the trigger produces no future occurrences.
+
+/// Run a scheduled trigger loop for `automation`.  Sleeps until the next
+/// scheduled fire time, then spawns the automation and advances to the
+/// following slot.
 pub(crate) async fn run_scheduled_trigger_loop(
     runtime: Arc<Runtime>,
     catalog: AutomationCatalog,

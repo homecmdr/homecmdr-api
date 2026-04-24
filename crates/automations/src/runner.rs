@@ -1,3 +1,14 @@
+//! The automation execution engine.
+//!
+//! [`AutomationRunner`] is the main entry point: call [`AutomationRunner::run`]
+//! to start background tasks for every trigger type in the catalog.  Each task
+//! monitors its own trigger source and calls [`spawn_automation_execution`]
+//! whenever a trigger fires.
+//!
+//! [`AutomationController`] is a cheap, cloneable handle to the running catalog
+//! that the HTTP API layer uses without needing to know about the background
+//! tasks.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,13 +37,21 @@ use crate::triggers::trigger_uses_event_bus;
 use crate::types::{Automation, AutomationExecutionResult, TriggerContext, DEFAULT_BACKSTOP_TIMEOUT};
 
 // ── Public observer trait ─────────────────────────────────────────────────────
+// Implement this to receive a callback every time an automation finishes,
+// whether it succeeded, was skipped, or errored.  The API layer uses this to
+// persist execution history records to the database.
 
+/// Receives a callback after every automation execution completes.
 pub trait AutomationExecutionObserver: Send + Sync {
     fn record(&self, entry: AutomationExecutionHistoryEntry);
 }
 
 // ── AutomationExecutionRecord (crate-internal) ────────────────────────────────
+// The raw execution outcome produced by `execute_automation` before it is
+// converted into the public `AutomationExecutionResult` type.
 
+/// Internal execution record — like [`AutomationExecutionResult`] but not part
+/// of the public API.
 #[derive(Debug)]
 pub(crate) struct AutomationExecutionRecord {
     pub(crate) status: String,
@@ -42,7 +61,11 @@ pub(crate) struct AutomationExecutionRecord {
 }
 
 // ── ExecutionControl (crate-internal) ────────────────────────────────────────
+// A config bundle threaded through every spawn path so each spawned task has
+// what it needs (concurrency map, instruction limit, trigger context, timeout)
+// without having to borrow from the runner.
 
+/// Shared execution config passed to every background task and spawn call.
 #[derive(Clone)]
 pub(crate) struct ExecutionControl {
     pub(crate) concurrency: ConcurrencyMap,
@@ -52,7 +75,12 @@ pub(crate) struct ExecutionControl {
 }
 
 // ── AutomationRunner ──────────────────────────────────────────────────────────
+// Starts one background task per trigger type in the catalog and drives the
+// whole automation lifecycle.  Call `run()` once at server startup; it runs
+// until the runtime is shut down.
 
+/// Owns the catalog and all configuration needed to start the trigger loops.
+/// Consumed by [`run`] which spawns the background tasks.
 #[derive(Clone)]
 pub struct AutomationRunner {
     catalog: AutomationCatalog,
@@ -63,6 +91,7 @@ pub struct AutomationRunner {
 }
 
 impl AutomationRunner {
+    /// Create a new runner with the given catalog and sensible defaults.
     pub fn new(catalog: AutomationCatalog) -> Self {
         Self {
             catalog,
@@ -73,26 +102,35 @@ impl AutomationRunner {
         }
     }
 
+    /// Register an observer that will be called after every automation run.
     pub fn with_observer(mut self, observer: Arc<dyn AutomationExecutionObserver>) -> Self {
         self.observer = Some(observer);
         self
     }
 
+    /// Provide a persistent store for cooldown / dedup / resumable-schedule
+    /// state.  Without this, runtime state features are silently disabled.
     pub fn with_state_store(mut self, store: Arc<dyn DeviceStore>) -> Self {
         self.state_store = Some(store);
         self
     }
 
+    /// Supply latitude, longitude, and timezone for solar and time-window
+    /// triggers and conditions.
     pub fn with_trigger_context(mut self, trigger_context: TriggerContext) -> Self {
         self.trigger_context = trigger_context;
         self
     }
 
+    /// Override the hard deadline after which a still-running automation is
+    /// forcibly cancelled.  Defaults to [`DEFAULT_BACKSTOP_TIMEOUT`] (1 hour).
     pub fn with_backstop_timeout(mut self, duration: Duration) -> Self {
         self.backstop_timeout = duration;
         self
     }
 
+    /// Return a cloneable controller backed by the same catalog.  The HTTP
+    /// handlers receive this rather than the runner itself.
     pub fn controller(&self) -> AutomationController {
         AutomationController {
             catalog: self.catalog.clone(),
@@ -100,6 +138,8 @@ impl AutomationRunner {
         }
     }
 
+    /// Start all trigger loops and block until they all exit (which normally
+    /// only happens when the server shuts down).
     pub async fn run(self, runtime: Arc<Runtime>) {
         let trigger_context = self.trigger_context;
         let concurrency = self.catalog.concurrency.clone();
@@ -210,7 +250,11 @@ impl AutomationRunner {
 }
 
 // ── AutomationController ──────────────────────────────────────────────────────
+// A cheap, cloneable handle to the running catalog and observer.  The HTTP
+// API layer uses this to list, get, enable/disable, validate, and manually
+// execute automations without needing to touch the background tasks.
 
+/// Cloneable handle used by the HTTP API to interact with the running catalog.
 #[derive(Clone)]
 pub struct AutomationController {
     catalog: AutomationCatalog,
@@ -264,7 +308,12 @@ impl AutomationController {
 }
 
 // ── execute_automation ────────────────────────────────────────────────────────
+// Synchronous core execution: reads the Lua file, evaluates it in a fresh Lua
+// VM, calls `execute(ctx, event)`, and returns a timing record.  Everything
+// above this is async orchestration; this is where the Lua actually runs.
 
+/// Load and run a single automation's `execute` function.  Returns a record
+/// with the status, any error message, scene step results, and elapsed time.
 pub(crate) fn execute_automation(
     automation: &Automation,
     runtime: Arc<Runtime>,
@@ -322,7 +371,12 @@ pub(crate) fn execute_automation(
 }
 
 // ── spawn_automation_execution ────────────────────────────────────────────────
+// Enforces the concurrency mode (parallel, single, queued, restart) before
+// handing off to `do_spawn_execution`.  Returns immediately — the actual
+// execution runs in a Tokio task.
 
+/// Check the concurrency mode, then either spawn the automation, queue the
+/// trigger, or drop it with a warning.
 pub(crate) fn spawn_automation_execution(
     automation: Automation,
     runtime: Arc<Runtime>,
@@ -421,6 +475,9 @@ pub(crate) fn spawn_automation_execution(
 }
 
 // ── do_spawn_execution ────────────────────────────────────────────────────────
+// The main async body of a single automation run: applies debounce/duration
+// delays, checks the runtime-state policy, evaluates conditions, runs the Lua
+// script, and records the result via the observer.
 
 fn do_spawn_execution(
     automation: Automation,
@@ -588,6 +645,8 @@ fn do_spawn_execution(
 }
 
 // ── finalize_and_maybe_dequeue ────────────────────────────────────────────────
+// Decrements the active execution counter and, for Queued mode, pops the next
+// pending trigger and starts it immediately so the queue drains in order.
 
 fn finalize_and_maybe_dequeue(
     automation: Automation,
@@ -629,6 +688,8 @@ fn finalize_and_maybe_dequeue(
 }
 
 // ── notify_observer ───────────────────────────────────────────────────────────
+// Calls the observer if one is configured, then returns.  The observer records
+// execution history to the database.  Does nothing if no observer was registered.
 
 fn notify_observer(
     observer: Option<&Arc<dyn AutomationExecutionObserver>>,
@@ -652,7 +713,10 @@ fn notify_observer(
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+// Small utilities used only inside this file.
 
+/// Extract a positive integer field from an event object.  Returns `None` if
+/// the field is absent, not an integer, or zero.
 fn event_number_field(event: &AttributeValue, field: &str) -> Option<u64> {
     let AttributeValue::Object(fields) = event else {
         return None;
@@ -664,6 +728,10 @@ fn event_number_field(event: &AttributeValue, field: &str) -> Option<u64> {
     }
 }
 
+/// Wait `delay_secs` seconds and then check that the device attribute still
+/// has the expected value.  Returns `false` (abort) if the condition is no
+/// longer met, so the automation doesn't fire after the state has already
+/// changed back.
 async fn confirm_delayed_trigger(
     runtime: &Runtime,
     event: &AttributeValue,
@@ -689,6 +757,9 @@ async fn confirm_delayed_trigger(
     current_value == &expected_value
 }
 
+/// Extract the device id, attribute name, and expected value from a
+/// `device_state_change` event so the delayed-trigger check knows what to
+/// re-verify after the delay.
 fn delayed_trigger_target(event: &AttributeValue) -> Option<(String, String, AttributeValue)> {
     let AttributeValue::Object(fields) = event else {
         return None;
@@ -703,6 +774,8 @@ fn delayed_trigger_target(event: &AttributeValue) -> Option<(String, String, Att
     Some((device_id.clone(), attribute.clone(), value))
 }
 
+/// Extract the `scheduled_at` timestamp from a scheduled trigger event so
+/// the resumable-schedule state check knows which slot this execution covers.
 fn event_scheduled_at(event: &AttributeValue) -> Option<DateTime<Utc>> {
     let AttributeValue::Object(fields) = event else {
         return None;

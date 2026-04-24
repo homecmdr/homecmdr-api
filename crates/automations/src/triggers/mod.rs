@@ -1,3 +1,17 @@
+//! Trigger parsing and classification.
+//!
+//! Each automation Lua file contains a `trigger` table that describes what
+//! should cause the automation to run.  This module parses that table into the
+//! internal [`Trigger`] enum and provides small helpers used by the runner to
+//! classify triggers.
+//!
+//! The three trigger categories decide which background loop handles them:
+//! - **Event-bus** (`device_state_change`, `weather_state`, `adapter_lifecycle`,
+//!   `system_error`) — watched in `triggers/device.rs`
+//! - **Interval** — ticked in `triggers/interval.rs`
+//! - **Scheduled** (`wall_clock`, `cron`, `sunrise`, `sunset`) — driven by
+//!   `triggers/scheduled.rs`
+
 pub(crate) mod device;
 pub(crate) mod interval;
 pub(crate) mod scheduled;
@@ -15,7 +29,12 @@ use crate::types::{
 };
 
 // ── parse_trigger ─────────────────────────────────────────────────────────────
+// Reads the `trigger` table from the Lua automation module and converts it into
+// the internal `Trigger` enum.  Returns a descriptive error — including the
+// file path — for any unknown type or malformed field.
 
+/// Parse the `trigger` value returned by a Lua automation file into the
+/// internal [`Trigger`] enum.
 pub(crate) fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> {
     let mlua::Value::Table(table) = value else {
         bail!(
@@ -291,7 +310,11 @@ pub(crate) fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> 
 }
 
 // ── trigger helpers ───────────────────────────────────────────────────────────
+// Small classification and parsing utilities shared across this module and the
+// runner.
 
+/// Returns `true` if `automation`'s trigger is driven by the event bus rather
+/// than a timer.
 pub(crate) fn trigger_uses_event_bus(automation: &Automation) -> bool {
     matches!(
         automation.trigger,
@@ -302,6 +325,7 @@ pub(crate) fn trigger_uses_event_bus(automation: &Automation) -> bool {
     )
 }
 
+/// Return the string name of `trigger`'s type as it appears in Lua files.
 pub(crate) fn trigger_type_name(trigger: &Trigger) -> &'static str {
     match trigger {
         Trigger::DeviceStateChange { .. } => "device_state_change",
@@ -316,6 +340,8 @@ pub(crate) fn trigger_type_name(trigger: &Trigger) -> &'static str {
     }
 }
 
+/// Parse optional `above` and `below` fields from a trigger table into a
+/// [`ThresholdTrigger`].  Returns `None` if neither field is present.
 pub(crate) fn parse_threshold_trigger(
     table: &mlua::Table,
     path: &Path,
@@ -343,6 +369,10 @@ pub(crate) fn parse_threshold_trigger(
     Ok(Some(ThresholdTrigger { above, below }))
 }
 
+/// Validate the combination of `attribute`, `equals`, `threshold`,
+/// `debounce_secs`, and `duration_secs` for a device or weather trigger.
+/// Returns an error if the combination is not allowed (e.g. threshold without
+/// an attribute, or both `equals` and `above`/`below`).
 pub(crate) fn validate_extended_device_trigger(
     path: &Path,
     trigger_type: &str,

@@ -1,3 +1,10 @@
+//! Integration tests for the automations crate.
+//!
+//! Each test creates a temporary directory of `.lua` automation files, builds
+//! an in-memory runtime, runs the full catalog/runner pipeline, and asserts
+//! on execution results.  See the individual test functions for the specific
+//! scenario being covered.
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

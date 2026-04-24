@@ -1,3 +1,11 @@
+//! Loads automation Lua files from a directory and provides the in-memory
+//! catalog used by both the HTTP API and the trigger runner.
+//!
+//! On startup the catalog is built with [`AutomationCatalog::load_from_directory`],
+//! which fails fast on any error.  The API reload endpoint uses
+//! [`AutomationCatalog::reload_from_directory`] instead, which collects all
+//! errors and returns them together so callers can see every problem at once.
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +27,8 @@ use crate::types::{
 };
 
 // ── AutomationControlState ────────────────────────────────────────────────────
+// Tracks which automations have been explicitly enabled or disabled at runtime.
+// All automations default to enabled; a missing entry means "not overridden".
 
 #[derive(Debug, Clone, Default)]
 struct AutomationControlState {
@@ -26,7 +36,12 @@ struct AutomationControlState {
 }
 
 // ── AutomationCatalog ─────────────────────────────────────────────────────────
+// Holds the full set of loaded automations plus shared concurrency tracking.
+// Cheap to clone — the inner control state and concurrency map are both
+// wrapped in `Arc`, so clones share the same live data.
 
+/// The in-memory collection of all loaded automations.  Both the HTTP handlers
+/// and the background trigger loops hold a clone of this struct.
 #[derive(Debug, Clone, Default)]
 pub struct AutomationCatalog {
     pub(crate) automations: Vec<Automation>,
@@ -36,10 +51,15 @@ pub struct AutomationCatalog {
 }
 
 impl AutomationCatalog {
+    /// Returns an empty catalog with no automations.  Used in tests and as a
+    /// placeholder before the real catalog is loaded.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Loads every `.lua` file in `path` and fails immediately if any file has
+    /// a parse error or a duplicate `id`.  Use [`reload_from_directory`] when
+    /// you want to collect all errors instead of stopping at the first one.
     pub fn load_from_directory(
         path: impl AsRef<Path>,
         scripts_root: Option<PathBuf>,
@@ -82,6 +102,9 @@ impl AutomationCatalog {
         })
     }
 
+    /// Like [`load_from_directory`] but keeps going after errors so every
+    /// broken file is reported at once.  Returns `Err(errors)` if anything
+    /// fails; an empty `Ok` means all files loaded cleanly.
     pub fn reload_from_directory(
         path: impl AsRef<Path>,
         scripts_root: Option<PathBuf>,
@@ -178,6 +201,7 @@ impl AutomationCatalog {
         })
     }
 
+    /// Returns a summary for every loaded automation, sorted by id.
     pub fn summaries(&self) -> Vec<AutomationSummary> {
         self.automations
             .iter()
@@ -185,6 +209,7 @@ impl AutomationCatalog {
             .collect()
     }
 
+    /// Returns the summary for a single automation, or `None` if not found.
     pub fn get(&self, id: &str) -> Option<AutomationSummary> {
         self.automations
             .iter()
@@ -192,6 +217,8 @@ impl AutomationCatalog {
             .map(|automation| automation.summary.clone())
     }
 
+    /// Returns whether `id` is enabled, or `None` if it is not in the catalog.
+    /// An automation that has never been explicitly toggled returns `true`.
     pub fn is_enabled(&self, id: &str) -> Option<bool> {
         self.automations
             .iter()
@@ -199,6 +226,8 @@ impl AutomationCatalog {
             .map(|_| self.read_control().enabled.get(id).copied().unwrap_or(true))
     }
 
+    /// Enables or disables `id`.  Returns an error if `id` is not in the
+    /// catalog.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
         if self
             .automations
@@ -212,6 +241,8 @@ impl AutomationCatalog {
         Ok(enabled)
     }
 
+    /// Re-parses `id`'s Lua file from disk and returns its summary if it is
+    /// still valid.  Does not change the running catalog.
     pub fn validate(&self, id: &str) -> Result<AutomationSummary> {
         let automation = self
             .automations
@@ -222,6 +253,9 @@ impl AutomationCatalog {
         Ok(reloaded.summary)
     }
 
+    /// Manually executes `id` with the given trigger payload.  Conditions are
+    /// still evaluated — if they don't pass the result will have status
+    /// `"skipped"`.
     pub fn execute(
         &self,
         id: &str,
@@ -286,7 +320,13 @@ impl AutomationCatalog {
 }
 
 // ── load_automation_file ──────────────────────────────────────────────────────
+// Reads a single `.lua` file from disk, evaluates it in a fresh Lua VM, and
+// validates all required fields.  Returns a structured error if anything is
+// missing or malformed — the error message always includes the file path so
+// it is clear which file caused the problem.
 
+/// Load and validate a single automation Lua file.  Returns the fully-parsed
+/// [`Automation`] or an error describing what is wrong.
 pub(crate) fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> Result<Automation> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read automation file {}", path.display()))?;
@@ -372,7 +412,10 @@ pub(crate) fn load_automation_file(path: &Path, scripts_root: Option<&Path>) -> 
 }
 
 // ── evaluate_automation_module ────────────────────────────────────────────────
+// Thin wrapper around `mlua` that runs the Lua source and turns any error into
+// an `anyhow::Error` that includes the file path.
 
+/// Evaluate `source` as a Lua module and return the resulting table.
 pub(crate) fn evaluate_automation_module(
     lua: &Lua,
     source: &str,
@@ -388,6 +431,9 @@ pub(crate) fn evaluate_automation_module(
 }
 
 // ── parse_runtime_state_policy ────────────────────────────────────────────────
+// Reads the optional `state` table from the Lua module and converts it into a
+// `RuntimeStatePolicy`.  Missing `state` table → all defaults (no cooldown,
+// no deduplication, not resumable).
 
 fn parse_runtime_state_policy(module: &mlua::Table, path: &Path) -> Result<RuntimeStatePolicy> {
     let state = module

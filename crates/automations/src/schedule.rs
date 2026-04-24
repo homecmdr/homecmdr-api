@@ -1,9 +1,22 @@
+//! Date and time math for scheduled triggers.
+//!
+//! Handles wall-clock times, cron expressions, and solar events (sunrise /
+//! sunset).  All returned times are in UTC.  Solar calculations use the
+//! latitude and longitude from the server's `TriggerContext`.
+
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use sunrise::{Coordinates, SolarDay, SolarEvent};
 
 use crate::types::{Trigger, TriggerContext};
 
+// ── Next occurrence helpers ───────────────────────────────────────────────────
+// Given a trigger and a reference time, return the next UTC time the trigger
+// should fire.  Returns `None` if the trigger is not schedule-based or if a
+// suitable time cannot be found (e.g. missing coordinates for solar triggers).
+
+/// Return the next time `trigger` should fire after `after`, or `None` if the
+/// trigger does not have a schedule (device/event-based triggers return `None`).
 pub(crate) fn next_schedule_time(
     trigger: &Trigger,
     after: DateTime<Utc>,
@@ -45,6 +58,13 @@ fn next_solar_occurrence(
     None
 }
 
+// ── Solar event time ──────────────────────────────────────────────────────────
+// Computes the exact UTC time of sunrise or sunset for a given date and
+// location, then applies the optional minute offset.
+
+/// Return the UTC time of sunrise or sunset at `(latitude, longitude)` on
+/// `date`, adjusted by `offset_mins`.  Returns `None` if the coordinates are
+/// invalid or if the sun does not rise/set on that day.
 pub(crate) fn solar_event_time(
     date: NaiveDate,
     latitude: f64,
@@ -62,6 +82,13 @@ pub(crate) fn solar_event_time(
     Some(base + ChronoDuration::minutes(offset_mins))
 }
 
+// ── Wall-clock occurrence ─────────────────────────────────────────────────────
+// Finds the next moment the clock shows hour:minute in the configured timezone.
+// If that time has already passed today, advances to tomorrow.
+
+/// Return the next UTC moment when the local clock shows `hour:minute` in the
+/// configured timezone.  Returns `None` if the timezone has a gap at that time
+/// (rare DST edge case).
 pub(crate) fn next_wall_clock_occurrence(
     hour: u32,
     minute: u32,

@@ -1,3 +1,10 @@
+//! Interval trigger loop for automations.
+//!
+//! One background task is spawned per `interval` automation.  The task fires
+//! the automation every `every_secs` seconds using a Tokio interval timer with
+//! `MissedTickBehavior::Skip` — if a tick is late, the missed ticks are dropped
+//! rather than delivered all at once.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +20,13 @@ use crate::state::AutomationStateStore;
 use crate::runner::AutomationExecutionObserver;
 use crate::types::Automation;
 
+// ── Interval trigger loop ─────────────────────────────────────────────────────
+// Ticks every `every_secs` seconds and hands the automation off to the runner.
+// Skips the tick if the automation is currently disabled.
+
+/// Run an interval trigger loop for `automation`.  Ticks every `every_secs`
+/// seconds and hands off to [`spawn_automation_execution`] if the automation
+/// is enabled.
 pub(crate) async fn run_interval_trigger_loop(
     runtime: Arc<Runtime>,
     catalog: AutomationCatalog,

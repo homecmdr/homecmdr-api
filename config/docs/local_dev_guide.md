@@ -48,8 +48,8 @@ The plugin scanner expects this directory to exist.  Create it once:
 mkdir -p config/plugins
 ```
 
-Files placed here (`*.wasm`, `*.plugin.toml`) are also gitignored — they will
-not be pushed.
+Files placed here (`*.wasm`, `*.plugin.toml`, and IPC adapter binaries) are
+also gitignored — they will not be pushed.
 
 ---
 
@@ -80,10 +80,22 @@ HOMECMDR_CONFIG=config/local.toml HOMECMDR_MASTER_KEY=mydevkey cargo run -p api
 
 ## 4. Adding a plugin for local testing
 
-This is the manual equivalent of `homecmdr plugin add`.  You need three
-things: the WASM binary, the manifest, and an adapter config block.
+This is the manual equivalent of `homecmdr plugin add`.  There are two plugin
+types; check the manifest's `adapter_type` field to know which applies:
 
-### Step A — build the plugin
+| `adapter_type` | How it runs | Example |
+|---|---|---|
+| `wasm` (or absent) | Loaded in-process by the WASM runtime | `elgato_lights` |
+| `ipc` | Spawned as a child process; pushes state via HTTP | `zigbee2mqtt` |
+
+---
+
+### 4a. WASM plugins (e.g. `elgato_lights`)
+
+You need three things: the `.wasm` binary, the manifest, and an adapter config
+block.
+
+#### Step A — build the plugin
 
 From the plugin's own directory (these live in `../plugins/<name>/` relative
 to the API workspace):
@@ -99,7 +111,7 @@ The compiled filename uses underscores and matches the crate name in
 `Cargo.toml`.  For `plugin-elgato-lights-wasm` this produces
 `plugin_elgato_lights_wasm.wasm`.
 
-### Step B — copy binary and manifest into config/plugins
+#### Step B — copy binary and manifest into config/plugins
 
 ```bash
 # Back in homecmdr-api/
@@ -116,7 +128,7 @@ The `.wasm` filename stem must match the manifest stem:
 The manifest's `[plugin] name` field must also match the key you add in the
 next step.
 
-### Step C — add the adapter config block to config/local.toml
+#### Step C — add the adapter config block to config/local.toml
 
 Open `config/local.toml` and append a section for the plugin.  The entire
 section is forwarded as JSON to the plugin's `init()` function at startup.
@@ -130,7 +142,7 @@ base_url = "http://127.0.0.1:9123"
 Check the plugin's source or its `*.plugin.toml` for the available fields and
 their defaults.
 
-### Step D — restart the API
+#### Step D — restart the API
 
 The plugin scanner runs at startup only.  Stop and restart:
 
@@ -146,7 +158,61 @@ INFO homecmdr_plugin_host: loaded plugin elgato_lights
 
 ---
 
+### 4b. IPC plugins (e.g. `zigbee2mqtt`)
+
+IPC adapters are compiled as native binaries and spawned as child processes by
+the API.  The manifest's `binary` field names the executable the API looks for
+inside `config/plugins/`.
+
+#### Step A — build the binary
+
+```bash
+cd ../plugins/plugin-zigbee2mqtt
+
+cargo build --release
+# binary is at:  target/release/zigbee2mqtt-adapter
+```
+
+#### Step B — copy binary and manifest into config/plugins
+
+```bash
+# Back in homecmdr-api/
+cp ../plugins/plugin-zigbee2mqtt/target/release/zigbee2mqtt-adapter \
+   config/plugins/zigbee2mqtt-adapter
+
+cp ../plugins/plugin-zigbee2mqtt/zigbee2mqtt.plugin.toml \
+   config/plugins/zigbee2mqtt.plugin.toml
+```
+
+The binary filename must match the `binary` field in the manifest exactly
+(no `.wasm` extension — it is a plain native executable).
+
+#### Step C — add the adapter config block to config/local.toml
+
+```toml
+[adapters.zigbee2mqtt]
+mqtt_host  = "127.0.0.1"
+mqtt_port  = 1883
+base_topic = "zigbee2mqtt"
+```
+
+#### Step D — restart the API
+
+```bash
+HOMECMDR_CONFIG=config/local.toml cargo run -p api
+```
+
+The API spawns the child process and you should see:
+
+```
+INFO homecmdr_api::startup: spawned IPC adapter zigbee2mqtt
+```
+
+---
+
 ## 5. The inner dev loop (plugin source changes)
+
+### WASM plugins
 
 Once the plugin is set up, the loop for iterating on its source is:
 
@@ -169,6 +235,27 @@ HOMECMDR_CONFIG=config/local.toml cargo run -p api
 There is no hot-reload for plugins — a restart is always required after
 replacing a `.wasm` file.
 
+### IPC plugins
+
+```bash
+# 1. Edit plugin source in ../plugins/plugin-zigbee2mqtt/src/main.rs
+
+# 2. Rebuild the native binary
+cd ../plugins/plugin-zigbee2mqtt
+cargo build --release
+
+# 3. Copy the fresh binary (manifest does not need re-copying unless changed)
+cd ../../homecmdr-api
+cp ../plugins/plugin-zigbee2mqtt/target/release/zigbee2mqtt-adapter \
+   config/plugins/zigbee2mqtt-adapter
+
+# 4. Restart the API
+HOMECMDR_CONFIG=config/local.toml cargo run -p api
+```
+
+The API kills and re-spawns the child process on each startup — no special
+signal handling is needed during development.
+
 ---
 
 ## 6. What is and is not pushed to remote
@@ -179,6 +266,7 @@ replacing a `.wasm` file.
 | `config/local.toml` | **No** | Gitignored — your local overrides live here |
 | `config/plugins/*.wasm` | **No** | Gitignored — installed per environment |
 | `config/plugins/*.plugin.toml` | **No** | Gitignored — installed per environment |
+| `config/plugins/*-adapter` | **No** | Gitignored — IPC adapter binaries, installed per environment |
 | `config/scenes/*.lua` | Yes | Scene scripts are source-controlled |
 | `config/automations/*.lua` | Yes | Automation scripts are source-controlled |
 | `config/scripts/*.lua` | Yes | Shared Lua modules are source-controlled |
@@ -221,10 +309,11 @@ RUST_LOG=debug HOMECMDR_CONFIG=config/local.toml cargo run -p api
 ## 8. Troubleshooting
 
 **Plugin does not appear in `/adapters`**
-- Check that both `<name>.wasm` and `<name>.plugin.toml` are in `config/plugins/`.
+- For **WASM** plugins: check that both `<name>.wasm` and `<name>.plugin.toml` are in `config/plugins/`.
+- For **IPC** plugins: check that the named binary (from the manifest's `binary` field) and `<name>.plugin.toml` are in `config/plugins/`, and that the binary is executable.
 - Check that `[plugins] enabled = true` and `directory = "config/plugins"` are in your local config.
 - Check that `[adapters.<name>]` exists in your local config and the name matches `[plugin] name` in the manifest exactly (snake_case).
-- Look for an error line at startup: `ERROR homecmdr_plugin_host`.
+- Look for a warning or error line at startup: `WARN` / `ERROR homecmdr_plugin_host`.
 
 **`cargo run` picks up the wrong config**
 - Make sure you are running from `homecmdr-api/` (the workspace root).
@@ -232,7 +321,13 @@ RUST_LOG=debug HOMECMDR_CONFIG=config/local.toml cargo run -p api
 
 **Plugin builds but crashes at init**
 - Run with `RUST_LOG=debug` to see the full tracing output.
-- The plugin's `init()` return value appears as a log line; any `Err(...)` string is printed there.
+- For WASM plugins: the plugin's `init()` return value appears as a log line; any `Err(...)` string is printed there.
+- For IPC plugins: the child process writes to stdout/stderr, which is forwarded to the API log.
+
+**IPC adapter binary not found**
+- Ensure the binary has been compiled and copied to `config/plugins/` with the exact name from the manifest's `binary` field.
+- On Linux/macOS, check the file is executable: `chmod +x config/plugins/zigbee2mqtt-adapter`.
+- Do **not** place a `.wasm` file for an IPC adapter — it will be ignored.
 
 **`wasm32-wasip2` target not found**
 ```bash

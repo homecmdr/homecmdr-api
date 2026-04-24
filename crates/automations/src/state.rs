@@ -1,3 +1,14 @@
+//! Runtime-state persistence for automations.
+//!
+//! Some automations declare a `state` table in their Lua file that enables
+//! cooldown windows (don't fire more than once per N seconds), deduplication
+//! (don't fire twice with the same payload within a window), or resumable
+//! scheduling (pick up where the schedule left off after a restart).
+//!
+//! This module reads and writes those state records through the `DeviceStore`
+//! and provides the [`should_skip_trigger`] decision helper used by the
+//! execution path.
+
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -8,7 +19,13 @@ use crate::schedule::next_schedule_time;
 use crate::types::{Automation, LoadedAutomationRuntimeState, TriggerContext, TriggerDecision};
 
 // ── AutomationStateStore ──────────────────────────────────────────────────────
+// Thin wrapper around `DeviceStore` that handles I/O errors gracefully.
+// A failed state load is logged and treated as "no previous state" so an
+// automation is never silently skipped because the database was temporarily
+// unavailable.
 
+/// Wraps the persistent device store to provide typed load/save helpers for
+/// automation runtime state.
 #[derive(Clone)]
 pub(crate) struct AutomationStateStore {
     pub(crate) store: Arc<dyn DeviceStore>,
@@ -41,7 +58,14 @@ impl AutomationStateStore {
 }
 
 // ── should_skip_trigger ───────────────────────────────────────────────────────
+// Checks cooldown and deduplication windows before an execution starts.
+// Returns `Skip` if the automation fired too recently or if the same payload
+// was seen within the deduplication window.
 
+/// Decide whether this trigger should be skipped based on the automation's
+/// runtime-state policy.  Returns [`TriggerDecision::Execute`] if the policy
+/// allows execution, or [`TriggerDecision::Skip`] if a cooldown or dedup window
+/// is still active.
 pub(crate) async fn should_skip_trigger(
     automation: &Automation,
     event: &AttributeValue,
@@ -104,7 +128,12 @@ pub(crate) async fn should_skip_trigger(
 }
 
 // ── persist_runtime_state ─────────────────────────────────────────────────────
+// Writes the current timestamp and a fingerprint of the trigger payload to the
+// store after a successful execution, so future cooldown/dedup checks can see
+// when and what last ran.
 
+/// Save the execution timestamp and trigger fingerprint for `automation` so
+/// future calls to [`should_skip_trigger`] can enforce cooldown and dedup rules.
 pub(crate) async fn persist_runtime_state(
     automation: &Automation,
     event: &AttributeValue,
@@ -127,7 +156,13 @@ pub(crate) async fn persist_runtime_state(
 }
 
 // ── next_scheduled_fire_after ─────────────────────────────────────────────────
+// For resumable-schedule automations, looks up the last scheduled fire time
+// from the store and returns the *next* occurrence after that.  This means
+// a server restart won't repeat a slot that already fired.
 
+/// For a resumable-schedule automation, return the next fire time based on the
+/// last recorded scheduled-at timestamp.  Returns `None` if the automation does
+/// not use resumable scheduling or if no state is available.
 pub(crate) async fn next_scheduled_fire_after(
     automation: &Automation,
     state_store: Option<AutomationStateStore>,
@@ -150,6 +185,9 @@ pub(crate) async fn next_scheduled_fire_after(
 }
 
 // ── trigger_fingerprint / canonicalize_attribute_value ────────────────────────
+// Produces a stable, order-independent string key for any `AttributeValue`.
+// Object fields are sorted by key before serialization so two identical objects
+// with different field ordering produce the same fingerprint.
 
 fn trigger_fingerprint(event: &AttributeValue) -> String {
     canonicalize_attribute_value(event)

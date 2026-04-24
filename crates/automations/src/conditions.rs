@@ -1,3 +1,11 @@
+//! Condition evaluation for automations.
+//!
+//! Before an automation runs, every condition in its `conditions` list is
+//! checked in order.  If any condition fails the automation is skipped and
+//! the caller receives a message explaining which condition failed and why.
+//!
+//! Conditions are also parsed here from the Lua module's `conditions` table.
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -11,6 +19,12 @@ use crate::types::{
     Automation, Condition, SolarConditionPoint, SolarEventKind, ThresholdCondition, TriggerContext,
 };
 
+// ── Condition evaluation ──────────────────────────────────────────────────────
+// Runs every condition for an automation and returns the first failure message,
+// or `None` if all conditions pass.
+
+/// Check all conditions for `automation` in order.  Returns the first failure
+/// message, or `None` if everything passes.
 pub(crate) async fn first_failed_condition(
     automation: &Automation,
     runtime: &Runtime,
@@ -28,6 +42,8 @@ pub(crate) async fn first_failed_condition(
     None
 }
 
+/// Evaluate a single condition.  Returns `Ok(())` if it passes, or `Err` with
+/// a human-readable reason if it does not.
 pub(crate) async fn evaluate_condition(
     condition: &Condition,
     runtime: &Runtime,
@@ -171,6 +187,12 @@ fn solar_condition_time(
     )
 }
 
+// ── Condition parsing ─────────────────────────────────────────────────────────
+// Reads the optional `conditions` sequence from a Lua automation module and
+// converts each entry into the internal `Condition` enum.
+
+/// Parse the `conditions` table from a Lua automation module.  Returns an
+/// empty `Vec` if the field is absent.
 pub(crate) fn parse_conditions(module: &mlua::Table, path: &Path) -> Result<Vec<Condition>> {
     let conditions = module
         .get::<Option<mlua::Table>>("conditions")
