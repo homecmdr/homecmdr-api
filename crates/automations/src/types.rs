@@ -100,6 +100,19 @@ pub(crate) enum Trigger {
     SystemError {
         contains: Option<String>,
     },
+    /// Fires when any person's presence state changes.  Optionally filtered by
+    /// `person_id` and/or the new state string (e.g. `"home"`, `"away"`,
+    /// `"zone:work"`).
+    PersonStateChange {
+        /// When `None`, triggers for any person.
+        person_id: Option<String>,
+        /// When `None`, triggers for any new state.
+        to: Option<String>,
+    },
+    /// Fires when the last person transitions away from home (all persons away).
+    AllPersonsAway,
+    /// Fires when the first person transitions to home (any person arrives home).
+    AnyPersonHome,
     WallClock {
         hour: u32,
         minute: u32,
@@ -160,6 +173,16 @@ pub(crate) enum Condition {
         after: Option<SolarConditionPoint>,
         before: Option<SolarConditionPoint>,
     },
+    /// Check that a specific person is in the given state (e.g. `"home"`,
+    /// `"away"`, `"unknown"`, `"zone:work"`).
+    PersonState {
+        person_id: String,
+        state: String,
+    },
+    /// Passes only when every known person is away from home.
+    AllPersonsAway,
+    /// Passes only when at least one person is home.
+    AnyPersonHome,
 }
 
 /// Optional numeric bounds for a condition check.

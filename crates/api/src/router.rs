@@ -20,7 +20,7 @@
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use homecmdr_core::config::Config;
 use homecmdr_core::store::ApiKeyRole;
@@ -28,7 +28,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-    adapters, admin, automations, devices, events, health, history, plugins, scenes,
+    adapters, admin, automations, devices, events, health, history, persons, plugins, scenes,
 };
 use crate::middleware::{check_auth, SharedRateLimit};
 use crate::state::AppState;
@@ -73,6 +73,14 @@ pub fn app(state: AppState, config: &Config) -> Router {
         .route("/events", get(events::events))
         .route("/plugins", get(plugins::list_plugins))
         .route("/plugins/{name}", get(plugins::get_plugin))
+        .route("/persons", get(persons::list_persons))
+        .route("/persons/{id}", get(persons::get_person))
+        .route(
+            "/persons/{id}/history",
+            get(persons::get_person_history),
+        )
+        .route("/zones", get(persons::list_zones))
+        .route("/zones/{id}", get(persons::get_zone))
         .route_layer({
             let s = state.clone();
             middleware::from_fn(move |req: Request, next: Next| {
@@ -114,6 +122,24 @@ pub fn app(state: AppState, config: &Config) -> Router {
             post(automations::validate_automation),
         )
         .route("/ingest/devices", post(events::ingest_devices))
+        .route("/ingest/location", post(persons::ingest_location))
+        // ── Persons write
+        .route("/persons", post(persons::create_person))
+        .route(
+            "/persons/{id}",
+            put(persons::update_person).delete(persons::delete_person),
+        )
+        .route("/persons/{id}/trackers", post(persons::link_tracker))
+        .route(
+            "/persons/{id}/trackers/{device_id}",
+            delete(persons::unlink_tracker),
+        )
+        // ── Zones write
+        .route("/zones", post(persons::create_zone))
+        .route(
+            "/zones/{id}",
+            put(persons::update_zone).delete(persons::delete_zone),
+        )
         .route_layer(middleware::from_fn(move |req: Request, next: Next| {
             let rate_limiter = rate_limiter.clone();
             async move {

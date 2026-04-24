@@ -26,8 +26,9 @@ use anyhow::{Context, Result};
 use homecmdr_automations::{AutomationCatalog, AutomationExecutionObserver, TriggerContext};
 use homecmdr_core::adapter::{Adapter, AdapterFactory};
 use homecmdr_core::config::{Config, PersistenceBackend, TelemetrySelectionConfig};
+use homecmdr_core::person_registry::PersonRegistry;
 use homecmdr_core::runtime::Runtime;
-use homecmdr_core::store::{ApiKeyStore, DeviceStore};
+use homecmdr_core::store::{ApiKeyStore, DeviceStore, PersonStore};
 use homecmdr_plugin_host::{
     create_engine, IpcAdapterEntry, IpcAdapterHost, PluginManager, PluginManifest,
     WasmAdapterFactory,
@@ -60,7 +61,7 @@ pub async fn run() -> Result<()> {
 
     init_tracing(&config.logging.level)?;
 
-    let (device_store, auth_key_store) = create_device_store(&config)
+    let (device_store, auth_key_store, person_store) = create_device_store(&config)
         .await
         .context("failed to create persistence store")?;
 
@@ -129,6 +130,23 @@ pub async fn run() -> Result<()> {
         runtime.registry().restore_groups(groups);
     }
 
+    // Build the person registry if persistence is enabled.
+    let person_registry = if let Some(ref ps) = person_store {
+        let locale = &config.locale;
+        match PersonRegistry::new(ps.clone(), runtime.bus().clone(), locale).await {
+            Ok(reg) => {
+                tracing::info!("PersonRegistry initialised");
+                Some(Arc::new(reg))
+            }
+            Err(e) => {
+                tracing::error!("failed to initialise PersonRegistry: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let automation_observer =
         device_store.clone().and_then(|store| {
             if config.persistence.history.enabled {
@@ -146,6 +164,7 @@ pub async fn run() -> Result<()> {
         device_store.clone(),
         trigger_context,
         backstop_timeout,
+        person_registry.clone(),
     );
     let automation_control = Arc::new(automation_runner.controller());
     let (automation_runner_tx, automation_runner_rx) = watch::channel(automation_runner.clone());
@@ -173,6 +192,8 @@ pub async fn run() -> Result<()> {
         health: health.clone(),
         store: device_store.clone(),
         auth_key_store,
+        person_store: person_store.clone(),
+        person_registry,
         master_key_hash,
         history: HistorySettings::from_config(&config),
         scenes_enabled: config.scenes.enabled,
@@ -207,6 +228,7 @@ pub async fn run() -> Result<()> {
         trigger_context,
         runtime: runtime.clone(),
         backstop_timeout,
+        person_registry: app_state.person_registry.clone(),
     };
     let listener = tokio::net::TcpListener::bind(&config.api.bind_address)
         .await
@@ -226,11 +248,17 @@ pub async fn run() -> Result<()> {
     // This runs every hour regardless of load; the store implementation
     // decides which rows to delete based on `retention_days`.
     let prune_task = device_store.clone().map(|store| {
+        let person_store_prune = person_store.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 if let Err(e) = store.prune_history().await {
                     tracing::warn!("history pruning failed: {e:#}");
+                }
+                if let Some(ref ps) = person_store_prune {
+                    if let Err(e) = ps.prune_person_history().await {
+                        tracing::warn!("person history pruning failed: {e:#}");
+                    }
                 }
             }
         })
@@ -519,17 +547,22 @@ pub fn resolve_database_url(url: &str, auto_create: bool) -> Result<String> {
 }
 
 /// Opens the persistence store (SQLite or Postgres) and returns it as a
-/// pair of trait objects: one for device data and one for API key management.
+/// triple of trait objects: one for device data, one for API key management,
+/// and one for person/zone data.
 ///
-/// Both trait objects point at the same underlying store implementation; they
-/// are split by trait so callers only get the surface they need.
+/// All three trait objects point at the same underlying store implementation;
+/// they are split by trait so callers only get the surface they need.
 ///
-/// Returns `(None, None)` when persistence is disabled in config.
+/// Returns `(None, None, None)` when persistence is disabled in config.
 pub async fn create_device_store(
     config: &Config,
-) -> Result<(Option<Arc<dyn DeviceStore>>, Option<Arc<dyn ApiKeyStore>>)> {
+) -> Result<(
+    Option<Arc<dyn DeviceStore>>,
+    Option<Arc<dyn ApiKeyStore>>,
+    Option<Arc<dyn PersonStore>>,
+)> {
     if !config.persistence.enabled {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
 
     let database_url = config
@@ -562,7 +595,8 @@ pub async fn create_device_store(
             );
             Ok((
                 Some(store.clone() as Arc<dyn DeviceStore>),
-                Some(store as Arc<dyn ApiKeyStore>),
+                Some(store.clone() as Arc<dyn ApiKeyStore>),
+                Some(store as Arc<dyn PersonStore>),
             ))
         }
         PersistenceBackend::Postgres => {
@@ -597,7 +631,8 @@ pub async fn create_device_store(
             );
             Ok((
                 Some(store.clone() as Arc<dyn DeviceStore>),
-                Some(store as Arc<dyn ApiKeyStore>),
+                Some(store.clone() as Arc<dyn ApiKeyStore>),
+                Some(store as Arc<dyn PersonStore>),
             ))
         }
     }

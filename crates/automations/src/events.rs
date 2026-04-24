@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use homecmdr_core::event::Event;
-use homecmdr_core::model::{AttributeValue, Attributes, DeviceId};
+use homecmdr_core::model::{AttributeValue, Attributes, DeviceId, PersonState};
 use homecmdr_core::registry::DeviceRegistry;
 
 use crate::types::{AdapterLifecycleEvent, Automation, ThresholdTrigger, Trigger, TriggerContext};
@@ -188,6 +188,57 @@ pub(crate) fn automation_event_from_runtime_event(
             }
 
             Some(system_error_event(message))
+        }
+        // ── Person triggers ───────────────────────────────────────────────────
+        (
+            Trigger::PersonStateChange { person_id, to },
+            Event::PersonStateChanged {
+                person_id: evt_person_id,
+                person_name,
+                to: new_state,
+                from: _,
+                source_device: _,
+            },
+        ) => {
+            // Filter by person_id if set.
+            if person_id
+                .as_deref()
+                .is_some_and(|expected| expected != evt_person_id.0.as_str())
+            {
+                return None;
+            }
+            let new_state_str = person_state_to_string(new_state);
+            // Filter by target state if set (supports both "home" and "zone:work").
+            if to.as_deref().is_some_and(|expected| expected != new_state_str.as_str()) {
+                return None;
+            }
+            Some(person_state_change_event(
+                &evt_person_id.0,
+                person_name,
+                &new_state_str,
+            ))
+        }
+        (Trigger::AllPersonsAway, Event::AllPersonsAway) => {
+            Some(AttributeValue::Object(HashMap::from([(
+                "type".to_string(),
+                AttributeValue::Text("all_persons_away".to_string()),
+            )])))
+        }
+        (Trigger::AnyPersonHome, Event::AnyPersonHome { person_id, person_name }) => {
+            Some(AttributeValue::Object(HashMap::from([
+                (
+                    "type".to_string(),
+                    AttributeValue::Text("any_person_home".to_string()),
+                ),
+                (
+                    "person_id".to_string(),
+                    AttributeValue::Text(person_id.0.clone()),
+                ),
+                (
+                    "person_name".to_string(),
+                    AttributeValue::Text(person_name.clone()),
+                ),
+            ])))
         }
         _ => None,
     }
@@ -474,6 +525,55 @@ pub(crate) fn system_error_event(message: &str) -> AttributeValue {
         (
             "message".to_string(),
             AttributeValue::Text(message.to_string()),
+        ),
+    ]))
+}
+
+/// Convert a [`PersonState`] to its canonical string representation used in
+/// trigger payloads and condition matching.
+pub(crate) fn person_state_to_str(state: &PersonState) -> &'static str {
+    match state {
+        PersonState::Home => "home",
+        PersonState::Away => "away",
+        PersonState::Unknown => "unknown",
+        PersonState::Zone { .. } => "zone",
+        PersonState::Room { .. } => "room",
+    }
+}
+
+/// Build a detailed state string for a person state (includes zone/room id).
+pub(crate) fn person_state_to_string(state: &PersonState) -> String {
+    match state {
+        PersonState::Home => "home".to_string(),
+        PersonState::Away => "away".to_string(),
+        PersonState::Unknown => "unknown".to_string(),
+        PersonState::Zone { zone_id } => format!("zone:{}", zone_id.0),
+        PersonState::Room { room_id } => format!("room:{}", room_id.0),
+    }
+}
+
+/// Build the event payload for a `person_state_change` trigger.
+pub(crate) fn person_state_change_event(
+    person_id: &str,
+    person_name: &str,
+    state: &str,
+) -> AttributeValue {
+    AttributeValue::Object(HashMap::from([
+        (
+            "type".to_string(),
+            AttributeValue::Text("person_state_change".to_string()),
+        ),
+        (
+            "person_id".to_string(),
+            AttributeValue::Text(person_id.to_string()),
+        ),
+        (
+            "person_name".to_string(),
+            AttributeValue::Text(person_name.to_string()),
+        ),
+        (
+            "state".to_string(),
+            AttributeValue::Text(state.to_string()),
         ),
     ]))
 }

@@ -18,6 +18,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use homecmdr_core::model::{AttributeValue, DeviceId};
+use homecmdr_core::person_registry::PersonRegistry;
 use homecmdr_core::runtime::Runtime;
 use homecmdr_core::store::{AutomationExecutionHistoryEntry, DeviceStore, SceneStepResult};
 use homecmdr_lua_host::{
@@ -72,6 +73,7 @@ pub(crate) struct ExecutionControl {
     pub(crate) max_instructions: u64,
     pub(crate) trigger_context: TriggerContext,
     pub(crate) backstop_timeout: Duration,
+    pub(crate) person_registry: Option<Arc<PersonRegistry>>,
 }
 
 // ── AutomationRunner ──────────────────────────────────────────────────────────
@@ -88,6 +90,7 @@ pub struct AutomationRunner {
     state_store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
     backstop_timeout: Duration,
+    person_registry: Option<Arc<PersonRegistry>>,
 }
 
 impl AutomationRunner {
@@ -99,6 +102,7 @@ impl AutomationRunner {
             state_store: None,
             trigger_context: TriggerContext::default(),
             backstop_timeout: DEFAULT_BACKSTOP_TIMEOUT,
+            person_registry: None,
         }
     }
 
@@ -129,12 +133,19 @@ impl AutomationRunner {
         self
     }
 
+    /// Provide the person registry so person-state conditions can be evaluated.
+    pub fn with_person_registry(mut self, person_registry: Arc<PersonRegistry>) -> Self {
+        self.person_registry = Some(person_registry);
+        self
+    }
+
     /// Return a cloneable controller backed by the same catalog.  The HTTP
     /// handlers receive this rather than the runner itself.
     pub fn controller(&self) -> AutomationController {
         AutomationController {
             catalog: self.catalog.clone(),
             observer: self.observer.clone(),
+            person_registry: self.person_registry.clone(),
         }
     }
 
@@ -144,6 +155,7 @@ impl AutomationRunner {
         let trigger_context = self.trigger_context;
         let concurrency = self.catalog.concurrency.clone();
         let backstop_timeout = self.backstop_timeout;
+        let person_registry = self.person_registry.clone();
         self.run_with_options(
             runtime,
             ExecutionControl {
@@ -151,6 +163,7 @@ impl AutomationRunner {
                 max_instructions: DEFAULT_MAX_INSTRUCTIONS,
                 trigger_context,
                 backstop_timeout,
+                person_registry,
             },
         )
         .await;
@@ -259,6 +272,7 @@ impl AutomationRunner {
 pub struct AutomationController {
     catalog: AutomationCatalog,
     observer: Option<Arc<dyn AutomationExecutionObserver>>,
+    person_registry: Option<Arc<PersonRegistry>>,
 }
 
 impl AutomationController {
@@ -291,7 +305,7 @@ impl AutomationController {
     ) -> Result<AutomationExecutionResult> {
         let result = self
             .catalog
-            .execute(id, runtime, trigger_payload.clone(), trigger_context)?;
+            .execute(id, runtime, trigger_payload.clone(), trigger_context, self.person_registry.as_ref())?;
         if let Some(observer) = &self.observer {
             observer.record(AutomationExecutionHistoryEntry {
                 executed_at: Utc::now(),
@@ -321,6 +335,7 @@ pub(crate) fn execute_automation(
     scripts_root: Option<&Path>,
     cancel: Arc<AtomicBool>,
     max_instructions: u64,
+    person_registry: Option<Arc<PersonRegistry>>,
 ) -> Result<AutomationExecutionRecord> {
     let started = Instant::now();
     let source = fs::read_to_string(&automation.path).with_context(|| {
@@ -343,7 +358,10 @@ pub(crate) fn execute_automation(
         )
     })?;
 
-    let ctx = LuaExecutionContext::new(runtime);
+    let mut ctx = LuaExecutionContext::new(runtime);
+    if let Some(registry) = person_registry {
+        ctx = ctx.with_person_registry(registry);
+    }
     let event =
         attribute_to_lua_value(&lua, event).map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
@@ -532,6 +550,7 @@ fn do_spawn_execution(
             &event,
             Utc::now(),
             execution.trigger_context,
+            execution.person_registry.as_ref(),
         )
         .await
         {
@@ -563,6 +582,7 @@ fn do_spawn_execution(
         let state_store_for_task = state_store.clone();
         let max_instructions = execution.max_instructions;
         let runtime_for_task = runtime.clone();
+        let person_registry_for_task = execution.person_registry.clone();
 
         let join_handle = tokio::spawn(async move {
             execute_automation(
@@ -572,6 +592,7 @@ fn do_spawn_execution(
                 scripts_root_for_task.as_deref(),
                 cancel,
                 max_instructions,
+                person_registry_for_task,
             )
         });
 

@@ -5,14 +5,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use homecmdr_core::model::{
-    AttributeValue, Attributes, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata, Room,
-    RoomId,
+    AttributeValue, Attributes, Device, DeviceGroup, DeviceId, DeviceKind, GroupId, Metadata,
+    Person, PersonId, PersonState, Room, RoomId, Zone, ZoneId,
 };
 use homecmdr_core::history_filter::{self as hf, HistorySelection};
 use homecmdr_core::store::{
     ApiKeyRecord, ApiKeyRole, ApiKeyStore, AttributeHistoryEntry, AutomationExecutionHistoryEntry,
-    AutomationRuntimeState, CommandAuditEntry, DeviceHistoryEntry, DeviceStore,
-    SceneExecutionHistoryEntry,
+    AutomationRuntimeState, CommandAuditEntry, DeviceHistoryEntry, DeviceStore, PersonHistoryEntry,
+    PersonStore, SceneExecutionHistoryEntry,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -160,6 +160,7 @@ const SCHEMA_VERSION_V1: i64 = 1;
 const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
 const SCHEMA_VERSION_V4: i64 = 4;
+const SCHEMA_VERSION_V5: i64 = 5;
 
 const CREATE_API_KEYS_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -170,6 +171,66 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at TEXT NOT NULL,
     last_used_at TEXT
 )
+"#;
+
+const ALTER_API_KEYS_ADD_PERSON_ID_SQL: &str =
+    "ALTER TABLE api_keys ADD COLUMN person_id TEXT";
+
+const CREATE_PERSONS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS persons (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    picture TEXT,
+    state_json TEXT NOT NULL,
+    state_source TEXT,
+    latitude REAL,
+    longitude REAL,
+    updated_at TEXT NOT NULL
+)
+"#;
+
+const CREATE_PERSON_TRACKERS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS person_trackers (
+    person_id TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL,
+    tracker_order INTEGER NOT NULL,
+    PRIMARY KEY (person_id, device_id)
+)
+"#;
+
+const CREATE_PERSON_TRACKERS_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_person_trackers_person_order
+ON person_trackers(person_id, tracker_order)
+"#;
+
+const CREATE_ZONES_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS zones (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    radius_meters REAL NOT NULL,
+    icon TEXT,
+    passive INTEGER NOT NULL DEFAULT 0
+)
+"#;
+
+const CREATE_PERSON_HISTORY_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS person_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    zone_id TEXT,
+    source_device_id TEXT,
+    latitude REAL,
+    longitude REAL,
+    recorded_at TEXT NOT NULL
+)
+"#;
+
+const CREATE_PERSON_HISTORY_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_person_history_person_time
+ON person_history(person_id, recorded_at DESC)
 "#;
 
 #[derive(Debug, Clone)]
@@ -252,6 +313,9 @@ impl SqliteDeviceStore {
         }
         if schema_version < 4 {
             self.migrate_to_v4().await?;
+        }
+        if schema_version < 5 {
+            self.migrate_to_v5().await?;
         }
 
         Ok(())
@@ -403,6 +467,59 @@ impl SqliteDeviceStore {
         )
         .bind(SCHEMA_VERSION_KEY)
         .bind(SCHEMA_VERSION_V4.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to write SQLite schema version")?;
+
+        Ok(())
+    }
+
+    async fn migrate_to_v5(&self) -> Result<()> {
+        // Add person_id column to existing api_keys table.
+        sqlx::query(ALTER_API_KEYS_ADD_PERSON_ID_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to add person_id column to SQLite api_keys table")?;
+
+        sqlx::query(CREATE_PERSONS_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite persons table")?;
+
+        sqlx::query(CREATE_PERSON_TRACKERS_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite person_trackers table")?;
+
+        sqlx::query(CREATE_PERSON_TRACKERS_INDEX_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite person_trackers index")?;
+
+        sqlx::query(CREATE_ZONES_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite zones table")?;
+
+        sqlx::query(CREATE_PERSON_HISTORY_TABLE_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite person_history table")?;
+
+        sqlx::query(CREATE_PERSON_HISTORY_INDEX_SQL)
+            .execute(&self.pool)
+            .await
+            .context("failed to create SQLite person_history index")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO schema_metadata (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+        )
+        .bind(SCHEMA_VERSION_KEY)
+        .bind(SCHEMA_VERSION_V5.to_string())
         .execute(&self.pool)
         .await
         .context("failed to write SQLite schema version")?;
@@ -1054,17 +1171,20 @@ impl ApiKeyStore for SqliteDeviceStore {
         key_hash: &str,
         label: &str,
         role: ApiKeyRole,
+        person_id: Option<&PersonId>,
     ) -> anyhow::Result<ApiKeyRecord> {
         let now = Utc::now();
         let role_str = api_key_role_to_str(role);
+        let person_id_val = person_id.map(|p| p.0.as_str());
 
         let result = sqlx::query(
-            "INSERT INTO api_keys (key_hash, label, role, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO api_keys (key_hash, label, role, created_at, person_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(key_hash)
         .bind(label)
         .bind(role_str)
         .bind(now.to_rfc3339())
+        .bind(person_id_val)
         .execute(&self.pool)
         .await
         .context("failed to insert api key")?;
@@ -1072,7 +1192,7 @@ impl ApiKeyStore for SqliteDeviceStore {
         let id = result.last_insert_rowid();
 
         let row = sqlx::query(
-            "SELECT id, key_hash, label, role, created_at, last_used_at FROM api_keys WHERE id = ?1",
+            "SELECT id, key_hash, label, role, created_at, last_used_at, person_id FROM api_keys WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(&self.pool)
@@ -1084,11 +1204,26 @@ impl ApiKeyStore for SqliteDeviceStore {
 
     async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyRecord>> {
         let rows = sqlx::query(
-            "SELECT id, key_hash, label, role, created_at, last_used_at FROM api_keys ORDER BY id ASC",
+            "SELECT id, key_hash, label, role, created_at, last_used_at, person_id FROM api_keys ORDER BY id ASC",
         )
         .fetch_all(&self.pool)
         .await
         .context("failed to list api keys")?;
+
+        rows.into_iter().map(api_key_from_row).collect()
+    }
+
+    async fn list_api_keys_for_person(
+        &self,
+        person_id: &PersonId,
+    ) -> anyhow::Result<Vec<ApiKeyRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, key_hash, label, role, created_at, last_used_at, person_id FROM api_keys WHERE person_id = ?1 ORDER BY id ASC",
+        )
+        .bind(&person_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list api keys for person")?;
 
         rows.into_iter().map(api_key_from_row).collect()
     }
@@ -1105,7 +1240,7 @@ impl ApiKeyStore for SqliteDeviceStore {
 
     async fn lookup_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<ApiKeyRecord>> {
         let row = sqlx::query(
-            "SELECT id, key_hash, label, role, created_at, last_used_at FROM api_keys WHERE key_hash = ?1",
+            "SELECT id, key_hash, label, role, created_at, last_used_at, person_id FROM api_keys WHERE key_hash = ?1",
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -1395,14 +1530,353 @@ fn api_key_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ApiKeyRecord> {
                 .map(|dt| dt.with_timezone(&Utc))
         })
         .transpose()?;
+    let person_id = row
+        .get::<Option<String>, _>("person_id")
+        .map(PersonId);
 
     Ok(ApiKeyRecord {
         id,
         key_hash,
         label,
         role,
+        person_id,
         created_at,
         last_used_at,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// PersonStore impl for SqliteDeviceStore
+// ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+impl PersonStore for SqliteDeviceStore {
+    async fn upsert_person(&self, person: &Person) -> anyhow::Result<()> {
+        let state_json = serde_json::to_string(&person.state)
+            .context("failed to serialize PersonState")?;
+        sqlx::query(
+            r#"
+            INSERT INTO persons (id, name, picture, state_json, state_source, latitude, longitude, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+                name        = excluded.name,
+                picture     = excluded.picture,
+                state_json  = excluded.state_json,
+                state_source = excluded.state_source,
+                latitude    = excluded.latitude,
+                longitude   = excluded.longitude,
+                updated_at  = excluded.updated_at
+            "#,
+        )
+        .bind(&person.id.0)
+        .bind(&person.name)
+        .bind(&person.picture)
+        .bind(&state_json)
+        .bind(person.state_source.as_ref().map(|d| &d.0))
+        .bind(person.latitude)
+        .bind(person.longitude)
+        .bind(person.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to upsert person '{}'", person.id.0))?;
+
+        Ok(())
+    }
+
+    async fn load_person(&self, id: &PersonId) -> anyhow::Result<Option<Person>> {
+        let row = sqlx::query(
+            "SELECT id, name, picture, state_json, state_source, latitude, longitude, updated_at FROM persons WHERE id = ?1",
+        )
+        .bind(&id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to load person '{}'", id.0))?;
+
+        let Some(row) = row else { return Ok(None) };
+
+        let trackers = self.load_person_trackers_inner(id).await?;
+        person_from_row(row, trackers).map(Some)
+    }
+
+    async fn load_all_persons(&self) -> anyhow::Result<Vec<Person>> {
+        let rows = sqlx::query(
+            "SELECT id, name, picture, state_json, state_source, latitude, longitude, updated_at FROM persons ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load all persons")?;
+
+        let mut persons = Vec::with_capacity(rows.len());
+        for row in rows {
+            let pid: String = row.get("id");
+            let trackers = self.load_person_trackers_inner(&PersonId(pid.clone())).await?;
+            persons.push(person_from_row(row, trackers)?);
+        }
+        Ok(persons)
+    }
+
+    async fn delete_person(&self, id: &PersonId) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM persons WHERE id = ?1")
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete person '{}'", id.0))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_person_trackers(
+        &self,
+        person_id: &PersonId,
+        trackers: &[DeviceId],
+    ) -> anyhow::Result<()> {
+        // Delete existing tracker rows then insert fresh ordered list.
+        sqlx::query("DELETE FROM person_trackers WHERE person_id = ?1")
+            .bind(&person_id.0)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete trackers for person '{}'", person_id.0))?;
+
+        for (order, device_id) in trackers.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO person_trackers (person_id, device_id, tracker_order) VALUES (?1, ?2, ?3)",
+            )
+            .bind(&person_id.0)
+            .bind(&device_id.0)
+            .bind(order as i64)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to insert tracker '{}' for person '{}'",
+                    device_id.0, person_id.0
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn upsert_zone(&self, zone: &Zone) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO zones (id, name, latitude, longitude, radius_meters, icon, passive)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                name          = excluded.name,
+                latitude      = excluded.latitude,
+                longitude     = excluded.longitude,
+                radius_meters = excluded.radius_meters,
+                icon          = excluded.icon,
+                passive       = excluded.passive
+            "#,
+        )
+        .bind(&zone.id.0)
+        .bind(&zone.name)
+        .bind(zone.latitude)
+        .bind(zone.longitude)
+        .bind(zone.radius_meters)
+        .bind(&zone.icon)
+        .bind(zone.passive as i64)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to upsert zone '{}'", zone.id.0))?;
+
+        Ok(())
+    }
+
+    async fn load_zone(&self, id: &ZoneId) -> anyhow::Result<Option<Zone>> {
+        let row = sqlx::query(
+            "SELECT id, name, latitude, longitude, radius_meters, icon, passive FROM zones WHERE id = ?1",
+        )
+        .bind(&id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to load zone '{}'", id.0))?;
+
+        row.map(zone_from_row).transpose()
+    }
+
+    async fn load_all_zones(&self) -> anyhow::Result<Vec<Zone>> {
+        let rows = sqlx::query(
+            "SELECT id, name, latitude, longitude, radius_meters, icon, passive FROM zones ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load all zones")?;
+
+        rows.into_iter().map(zone_from_row).collect()
+    }
+
+    async fn delete_zone(&self, id: &ZoneId) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM zones WHERE id = ?1")
+            .bind(&id.0)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete zone '{}'", id.0))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn record_person_history(&self, entry: &PersonHistoryEntry) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO person_history (person_id, state, zone_id, source_device_id, latitude, longitude, recorded_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+        )
+        .bind(&entry.person_id.0)
+        .bind(&entry.state)
+        .bind(entry.zone_id.as_ref().map(|z| &z.0))
+        .bind(entry.source_device_id.as_ref().map(|d| &d.0))
+        .bind(entry.latitude)
+        .bind(entry.longitude)
+        .bind(entry.recorded_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to record person history for '{}'", entry.person_id.0))?;
+
+        Ok(())
+    }
+
+    async fn load_person_history(
+        &self,
+        person_id: &PersonId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PersonHistoryEntry>> {
+        let start_str = start.map(|dt| dt.to_rfc3339());
+        let end_str = end.map(|dt| dt.to_rfc3339());
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id, person_id, state, zone_id, source_device_id, latitude, longitude, recorded_at
+            FROM person_history
+            WHERE person_id = ?1
+              AND (?2 IS NULL OR recorded_at >= ?2)
+              AND (?3 IS NULL OR recorded_at <= ?3)
+            ORDER BY recorded_at DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(&person_id.0)
+        .bind(&start_str)
+        .bind(&end_str)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("failed to load person history for '{}'", person_id.0))?;
+
+        rows.into_iter().map(person_history_from_row).collect()
+    }
+
+    async fn prune_person_history(&self) -> anyhow::Result<()> {
+        let Some(retention) = self.history.retention else {
+            return Ok(());
+        };
+        let cutoff = chrono::Duration::from_std(retention)
+            .context("invalid SQLite history retention duration")?;
+        let cutoff = (Utc::now() - cutoff).to_rfc3339();
+        sqlx::query("DELETE FROM person_history WHERE recorded_at < ?1")
+            .bind(&cutoff)
+            .execute(&self.pool)
+            .await
+            .context("failed to prune SQLite person history")?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row conversion helpers for person/zone/person_history
+// ---------------------------------------------------------------------------
+
+impl SqliteDeviceStore {
+    async fn load_person_trackers_inner(&self, person_id: &PersonId) -> Result<Vec<DeviceId>> {
+        let rows = sqlx::query(
+            "SELECT device_id FROM person_trackers WHERE person_id = ?1 ORDER BY tracker_order ASC",
+        )
+        .bind(&person_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("failed to load trackers for person '{}'", person_id.0))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| DeviceId(r.get::<String, _>("device_id")))
+            .collect())
+    }
+}
+
+fn person_from_row(row: sqlx::sqlite::SqliteRow, trackers: Vec<DeviceId>) -> Result<Person> {
+    let id: String = row.get("id");
+    let name: String = row.get("name");
+    let picture: Option<String> = row.get("picture");
+    let state_json: String = row.get("state_json");
+    let state: PersonState = serde_json::from_str(&state_json)
+        .with_context(|| format!("invalid state_json for person '{id}'"))?;
+    let state_source: Option<String> = row.get("state_source");
+    let latitude: Option<f64> = row.get("latitude");
+    let longitude: Option<f64> = row.get("longitude");
+    let updated_at_str: String = row.get("updated_at");
+    let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+        .with_context(|| format!("invalid updated_at '{updated_at_str}' for person '{id}'"))?
+        .with_timezone(&Utc);
+
+    Ok(Person {
+        id: PersonId(id),
+        name,
+        picture,
+        trackers,
+        state,
+        state_source: state_source.map(DeviceId),
+        latitude,
+        longitude,
+        updated_at,
+    })
+}
+
+fn zone_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Zone> {
+    let id: String = row.get("id");
+    let name: String = row.get("name");
+    let latitude: f64 = row.get("latitude");
+    let longitude: f64 = row.get("longitude");
+    let radius_meters: f64 = row.get("radius_meters");
+    let icon: Option<String> = row.get("icon");
+    let passive: i64 = row.get("passive");
+
+    Ok(Zone {
+        id: ZoneId(id),
+        name,
+        latitude,
+        longitude,
+        radius_meters,
+        icon,
+        passive: passive != 0,
+    })
+}
+
+fn person_history_from_row(row: sqlx::sqlite::SqliteRow) -> Result<PersonHistoryEntry> {
+    let id: i64 = row.get("id");
+    let person_id: String = row.get("person_id");
+    let state: String = row.get("state");
+    let zone_id: Option<String> = row.get("zone_id");
+    let source_device_id: Option<String> = row.get("source_device_id");
+    let latitude: Option<f64> = row.get("latitude");
+    let longitude: Option<f64> = row.get("longitude");
+    let recorded_at_str: String = row.get("recorded_at");
+    let recorded_at = DateTime::parse_from_rfc3339(&recorded_at_str)
+        .with_context(|| {
+            format!("invalid recorded_at '{recorded_at_str}' for person_history id {id}")
+        })?
+        .with_timezone(&Utc);
+
+    Ok(PersonHistoryEntry {
+        id,
+        person_id: PersonId(person_id),
+        state,
+        zone_id: zone_id.map(ZoneId),
+        source_device_id: source_device_id.map(DeviceId),
+        latitude,
+        longitude,
+        recorded_at,
     })
 }
 

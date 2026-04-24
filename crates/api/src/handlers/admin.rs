@@ -22,6 +22,8 @@ use homecmdr_core::event::Event;
 use homecmdr_plugin_host::PluginManager;
 use rand::Rng;
 
+use homecmdr_core::model::PersonId;
+
 use crate::dto::{
     ApiError, ApiKeyResponse, CreateApiKeyRequest, CreateApiKeyResponse, DiagnosticsResponse,
     ReloadErrorDetail, ReloadResponse, ReloadWatchItem, ReloadWatchResponse,
@@ -209,8 +211,9 @@ pub async fn create_api_key(
     };
     let token_hash = sha256_hex(&token);
 
+    let person_id = req.person_id.map(PersonId);
     let record = key_store
-        .create_api_key(&token_hash, &req.label, req.role)
+        .create_api_key(&token_hash, &req.label, req.role, person_id.as_ref())
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -218,6 +221,7 @@ pub async fn create_api_key(
         id: record.id,
         label: record.label,
         role: record.role,
+        person_id: record.person_id.map(|p| p.0),
         token,
         created_at: record.created_at,
     }))
@@ -243,6 +247,7 @@ pub async fn list_api_keys(
                 id: r.id,
                 label: r.label,
                 role: r.role,
+                person_id: r.person_id.map(|p| p.0),
                 created_at: r.created_at,
                 last_used_at: r.last_used_at,
             })

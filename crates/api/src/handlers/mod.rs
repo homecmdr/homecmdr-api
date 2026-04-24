@@ -15,6 +15,7 @@
 //! | `events`        | WebSocket event stream, device ingest endpoint      |
 //! | `plugins`       | Plugin catalog and Lua file management              |
 //! | `admin`         | Diagnostics, catalog reloads, API key management    |
+//! | `persons`       | Person/zone CRUD and companion-app location ingest  |
 
 pub mod adapters;
 pub mod admin;
@@ -23,5 +24,6 @@ pub mod devices;
 pub mod events;
 pub mod health;
 pub mod history;
+pub mod persons;
 pub mod plugins;
 pub mod scenes;

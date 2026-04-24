@@ -6,6 +6,9 @@ pub struct LocaleConfig {
     pub timezone: String,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Radius in metres of the auto-created home zone.  Defaults to 100 m.
+    #[serde(default = "default_home_zone_radius")]
+    pub home_zone_radius_meters: f64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,6 +51,7 @@ impl Default for LocaleConfig {
             timezone: default_timezone(),
             latitude: None,
             longitude: None,
+            home_zone_radius_meters: default_home_zone_radius(),
         }
     }
 }
@@ -79,4 +83,8 @@ fn default_master_key() -> String {
 
 fn default_plugins_directory() -> String {
     "config/plugins".to_string()
+}
+
+fn default_home_zone_radius() -> f64 {
+    100.0
 }

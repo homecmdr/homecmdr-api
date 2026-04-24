@@ -17,7 +17,8 @@ use homecmdr_automations::{
     TriggerContext,
 };
 use homecmdr_core::runtime::Runtime;
-use homecmdr_core::store::{ApiKeyStore, AutomationExecutionHistoryEntry, DeviceStore};
+use homecmdr_core::store::{ApiKeyStore, AutomationExecutionHistoryEntry, DeviceStore, PersonStore};
+use homecmdr_core::person_registry::PersonRegistry;
 use homecmdr_plugin_host::PluginManifest;
 use homecmdr_scenes::SceneRunner;
 use tokio::sync::watch;
@@ -68,6 +69,14 @@ pub struct AppState {
     /// The API-key database — usually the same backing store as `store`.
     /// `None` when persistence is disabled.
     pub auth_key_store: Option<Arc<dyn ApiKeyStore>>,
+
+    /// The person/zone database — usually the same backing store.
+    /// `None` when persistence is disabled.
+    pub person_store: Option<Arc<dyn PersonStore>>,
+
+    /// The person registry — manages persons, zones, and presence state.
+    /// `None` when persistence is disabled.
+    pub person_registry: Option<Arc<PersonRegistry>>,
 
     /// SHA-256 hash of the master key from config.  Compared against the hash
     /// of bearer tokens on every authenticated request.
@@ -173,6 +182,7 @@ pub struct ReloadController {
     pub trigger_context: TriggerContext,
     pub runtime: Arc<Runtime>,
     pub backstop_timeout: Duration,
+    pub person_registry: Option<Arc<PersonRegistry>>,
 }
 
 /// The return type of `build_adapters`: a list of adapter instances, their
@@ -420,6 +430,7 @@ pub fn build_automation_runner(
     store: Option<Arc<dyn DeviceStore>>,
     trigger_context: TriggerContext,
     backstop_timeout: Duration,
+    person_registry: Option<Arc<PersonRegistry>>,
 ) -> AutomationRunner {
     let runner = if let Some(observer) = observer {
         AutomationRunner::new(catalog)
@@ -432,8 +443,14 @@ pub fn build_automation_runner(
             .with_backstop_timeout(backstop_timeout)
     };
 
-    if let Some(store) = store {
+    let runner = if let Some(store) = store {
         runner.with_state_store(store)
+    } else {
+        runner
+    };
+
+    if let Some(registry) = person_registry {
+        runner.with_person_registry(registry)
     } else {
         runner
     }
@@ -471,6 +488,7 @@ pub fn make_state(
         store.clone(),
         trigger_context,
         Duration::from_secs(3600),
+        None,
     );
     let control = Arc::new(runner.controller());
     let (automation_runner_tx, _automation_runner_rx) = watch::channel(runner);
@@ -486,6 +504,8 @@ pub fn make_state(
         health,
         store,
         auth_key_store,
+        person_store: None,
+        person_registry: None,
         master_key_hash,
         history,
         scenes_enabled,

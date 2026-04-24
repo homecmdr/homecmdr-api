@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use homecmdr_core::command::DeviceCommand;
-use homecmdr_core::model::{AttributeValue, Device, DeviceGroup, DeviceKind, Metadata, Room};
+use homecmdr_core::model::{
+    AttributeValue, Device, DeviceGroup, DeviceKind, Metadata, Person, PersonState, Room,
+};
 use mlua::{Table, Value};
 
 pub fn lua_table_to_command(table: &Table) -> mlua::Result<DeviceCommand> {
@@ -153,6 +155,53 @@ pub fn group_to_attribute_value(group: &DeviceGroup) -> AttributeValue {
                     .map(|member| AttributeValue::Text(member.0.clone()))
                     .collect(),
             ),
+        ),
+    ]))
+}
+
+pub fn person_to_attribute_value(person: &Person) -> AttributeValue {
+    let state_tag = match &person.state {
+        PersonState::Home => "home".to_string(),
+        PersonState::Away => "away".to_string(),
+        PersonState::Unknown => "unknown".to_string(),
+        PersonState::Zone { zone_id } => format!("zone:{}", zone_id.0),
+        PersonState::Room { room_id } => format!("room:{}", room_id.0),
+    };
+    AttributeValue::Object(HashMap::from([
+        ("id".to_string(), AttributeValue::Text(person.id.0.clone())),
+        ("name".to_string(), AttributeValue::Text(person.name.clone())),
+        (
+            "picture".to_string(),
+            match &person.picture {
+                Some(url) => AttributeValue::Text(url.clone()),
+                None => AttributeValue::Null,
+            },
+        ),
+        ("state".to_string(), AttributeValue::Text(state_tag)),
+        (
+            "state_source".to_string(),
+            match &person.state_source {
+                Some(id) => AttributeValue::Text(id.0.clone()),
+                None => AttributeValue::Null,
+            },
+        ),
+        (
+            "latitude".to_string(),
+            match person.latitude {
+                Some(v) => AttributeValue::Float(v),
+                None => AttributeValue::Null,
+            },
+        ),
+        (
+            "longitude".to_string(),
+            match person.longitude {
+                Some(v) => AttributeValue::Float(v),
+                None => AttributeValue::Null,
+            },
+        ),
+        (
+            "updated_at".to_string(),
+            AttributeValue::Text(person.updated_at.to_rfc3339()),
         ),
     ]))
 }
