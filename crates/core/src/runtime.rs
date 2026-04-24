@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -20,6 +21,10 @@ pub struct Runtime {
     adapters: Vec<Arc<dyn Adapter>>,
     bus: EventBus,
     registry: DeviceRegistry,
+    /// Names of adapters managed as external IPC processes.  Commands to
+    /// devices whose adapter name appears here are dispatched via the event
+    /// bus rather than an in-process call.
+    ipc_adapter_names: HashSet<String>,
 }
 
 impl Runtime {
@@ -32,7 +37,17 @@ impl Runtime {
             adapters,
             bus,
             registry,
+            ipc_adapter_names: HashSet::new(),
         }
+    }
+
+    /// Register the set of adapter names that are managed as external IPC
+    /// processes.  Commands to these adapters are dispatched via the event
+    /// bus; commands to any adapter name absent from both this set and the
+    /// in-process adapter list will be rejected with an error.
+    pub fn with_ipc_adapters(mut self, names: HashSet<String>) -> Self {
+        self.ipc_adapter_names = names;
+        self
     }
 
     pub async fn run(&self) {
@@ -67,14 +82,20 @@ impl Runtime {
             return adapter.command(id, command, self.registry.clone()).await;
         }
 
-        // No in-process adapter owns this device.  Publish a
-        // DeviceCommandDispatched event so that IPC adapter processes
-        // (which subscribe to the /events WebSocket) can handle it.
-        self.bus.publish(Event::DeviceCommandDispatched {
-            id: id.clone(),
-            command,
-        });
-        Ok(true)
+        // No in-process adapter owns this device.  If it is a known IPC
+        // adapter, dispatch via the event bus so the external process can
+        // handle it.  Otherwise the adapter is not registered at all and we
+        // must return an error — silently swallowing the command would make
+        // scenes report "ok" for devices whose plugin is not installed.
+        if self.ipc_adapter_names.contains(adapter_name) {
+            self.bus.publish(Event::DeviceCommandDispatched {
+                id: id.clone(),
+                command,
+            });
+            return Ok(true);
+        }
+
+        anyhow::bail!("no adapter registered for '{adapter_name}'")
     }
 
     pub async fn invoke(&self, request: InvokeRequest) -> anyhow::Result<Option<InvokeResponse>> {

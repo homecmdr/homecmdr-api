@@ -387,5 +387,16 @@ pub async fn ingest_devices(
         }
     }
 
+    // Signal to the health monitor that this IPC adapter is alive.  WASM
+    // adapters self-report by publishing AdapterStarted at the top of their
+    // run() loop; IPC adapters have no in-process run() loop, so the first
+    // (and every subsequent) successful ingest call serves the same purpose.
+    // This transitions the adapter from "starting" → "ok" and also recovers
+    // the status after a transient error.
+    state
+        .runtime
+        .bus()
+        .publish(Event::AdapterStarted { adapter });
+
     Ok(Json(json!({ "upserted": upserted })))
 }

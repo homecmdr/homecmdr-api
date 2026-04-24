@@ -80,7 +80,7 @@ pub async fn run() -> Result<()> {
         config.automations.enabled,
     );
 
-    let runtime = Arc::new(Runtime::new(adapters, config.runtime));
+    let runtime = Arc::new(Runtime::new(adapters, config.runtime).with_ipc_adapters(ipc_adapter_names.clone()));
     let scripts_root = config
         .scripts
         .enabled
