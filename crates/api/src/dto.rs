@@ -14,7 +14,7 @@ use homecmdr_core::capability::{CapabilityOwnershipPolicy, CapabilitySchema};
 use homecmdr_core::model::AttributeValue;
 use homecmdr_core::store::{
     ApiKeyRole, AttributeHistoryEntry, AutomationExecutionHistoryEntry, CommandAuditEntry,
-    DeviceHistoryEntry, SceneExecutionHistoryEntry, SceneStepResult,
+    DeviceHistoryEntry, PersonHistoryEntry, SceneExecutionHistoryEntry, SceneStepResult,
 };
 use homecmdr_plugin_host::PluginManifest;
 use homecmdr_scenes::SceneExecutionResult;
@@ -182,6 +182,10 @@ pub struct GroupCommandResult {
 pub struct CreateApiKeyRequest {
     pub label: String,
     pub role: ApiKeyRole,
+    /// Optional person ID to link to this API key.  When set, requests
+    /// authenticated with this key are attributed to that person (e.g. a
+    /// companion app submitting location updates).
+    pub person_id: Option<String>,
 }
 
 /// Response body for `POST /auth/keys`.
@@ -191,6 +195,7 @@ pub struct CreateApiKeyResponse {
     pub id: i64,
     pub label: String,
     pub role: ApiKeyRole,
+    pub person_id: Option<String>,
     pub token: String,
     pub created_at: DateTime<Utc>,
 }
@@ -202,6 +207,7 @@ pub struct ApiKeyResponse {
     pub id: i64,
     pub label: String,
     pub role: ApiKeyRole,
+    pub person_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
 }
@@ -462,6 +468,84 @@ pub struct DiagnosticsResponse {
     pub persistence: ComponentStatus,
     pub automations_component: ComponentStatus,
     pub adapters: Vec<AdapterSummary>,
+}
+
+// ── Person / zone shapes ──────────────────────────────────────────────────────
+
+/// Request body for `POST /persons`.
+#[derive(Debug, Deserialize)]
+pub struct CreatePersonRequest {
+    /// Stable slug-style identifier, e.g. `"alice"`.
+    pub id: String,
+    /// Display name shown in the UI.
+    pub name: String,
+    /// Optional URL or file path to a profile picture.
+    pub picture: Option<String>,
+}
+
+/// Request body for `PUT /persons/{id}`.
+#[derive(Debug, Deserialize)]
+pub struct UpdatePersonRequest {
+    pub name: Option<String>,
+    pub picture: Option<String>,
+}
+
+/// Request body for `POST /persons/{id}/trackers` — link a tracker device.
+#[derive(Debug, Deserialize)]
+pub struct LinkTrackerRequest {
+    /// The device ID to link (e.g. `"myapp:phone-alice"`).
+    pub device_id: String,
+}
+
+/// Response body for `GET /persons/{id}/history`.
+#[derive(Debug, Serialize)]
+pub struct PersonHistoryResponse {
+    pub person_id: String,
+    pub entries: Vec<PersonHistoryEntry>,
+}
+
+/// Request body for `POST /zones`.
+#[derive(Debug, Deserialize)]
+pub struct CreateZoneRequest {
+    /// Stable slug-style identifier, e.g. `"work"`.
+    pub id: String,
+    pub name: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    /// Zone radius in metres (default 100).
+    pub radius_meters: f64,
+    /// Optional icon name (e.g. `"mdi:briefcase"`).
+    pub icon: Option<String>,
+    /// When `true`, the zone is hidden from the map but usable in automations.
+    #[serde(default)]
+    pub passive: bool,
+}
+
+/// Request body for `PUT /zones/{id}`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateZoneRequest {
+    pub name: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub radius_meters: Option<f64>,
+    pub icon: Option<String>,
+    pub passive: Option<bool>,
+}
+
+/// Request body for `POST /ingest/location`.
+///
+/// Called by companion apps to report a GPS fix for the person linked to the
+/// authenticating API key.  The key must have a `person_id` set.
+#[derive(Debug, Deserialize)]
+pub struct IngestLocationRequest {
+    pub latitude: f64,
+    pub longitude: f64,
+    /// Horizontal accuracy in metres (informational — stored but not used for
+    /// zone detection).
+    pub accuracy_meters: Option<f64>,
+    /// Stable device identifier (e.g. a phone UUID).  When omitted the server
+    /// generates `location:<person_id>` automatically.
+    pub device_id: Option<String>,
 }
 
 // ── IPC ingest shapes ─────────────────────────────────────────────────────────

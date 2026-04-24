@@ -204,6 +204,23 @@ pub(crate) fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> 
 
             Ok(Trigger::SystemError { contains })
         }
+        "person_state_change" => {
+            let person_id = table.get::<Option<String>>("person_id").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} trigger field 'person_id' is invalid: {error}",
+                    path.display()
+                )
+            })?;
+            let to = table.get::<Option<String>>("to").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} trigger field 'to' is invalid: {error}",
+                    path.display()
+                )
+            })?;
+            Ok(Trigger::PersonStateChange { person_id, to })
+        }
+        "all_persons_away" => Ok(Trigger::AllPersonsAway),
+        "any_person_home" => Ok(Trigger::AnyPersonHome),
         "wall_clock" => {
             let hour = table.get::<u32>("hour").map_err(|error| {
                 anyhow::anyhow!(
@@ -302,7 +319,7 @@ pub(crate) fn parse_trigger(value: mlua::Value, path: &Path) -> Result<Trigger> 
             Ok(Trigger::Interval { every_secs })
         }
         _ => bail!(
-            "automation file {} has unsupported trigger type '{}'; supported types are device_state_change, weather_state, adapter_lifecycle, system_error, wall_clock, cron, sunrise, sunset, and interval",
+            "automation file {} has unsupported trigger type '{}'; supported types are device_state_change, weather_state, adapter_lifecycle, system_error, person_state_change, all_persons_away, any_person_home, wall_clock, cron, sunrise, sunset, and interval",
             path.display(),
             trigger_type
         ),
@@ -322,6 +339,9 @@ pub(crate) fn trigger_uses_event_bus(automation: &Automation) -> bool {
             | Trigger::WeatherState { .. }
             | Trigger::AdapterLifecycle { .. }
             | Trigger::SystemError { .. }
+            | Trigger::PersonStateChange { .. }
+            | Trigger::AllPersonsAway
+            | Trigger::AnyPersonHome
     )
 }
 
@@ -332,6 +352,9 @@ pub(crate) fn trigger_type_name(trigger: &Trigger) -> &'static str {
         Trigger::WeatherState { .. } => "weather_state",
         Trigger::AdapterLifecycle { .. } => "adapter_lifecycle",
         Trigger::SystemError { .. } => "system_error",
+        Trigger::PersonStateChange { .. } => "person_state_change",
+        Trigger::AllPersonsAway => "all_persons_away",
+        Trigger::AnyPersonHome => "any_person_home",
         Trigger::WallClock { .. } => "wall_clock",
         Trigger::Cron { .. } => "cron",
         Trigger::Sunrise { .. } => "sunrise",

@@ -248,6 +248,34 @@ pub fn event_to_frame(event: Event) -> serde_json::Value {
         Event::DeviceCommandDispatched { id, command } => {
             json!({ "type": "device.command_dispatched", "id": id.0, "command": command })
         }
+        // Person/zone events are streamed as typed frames.
+        Event::PersonStateChanged { person_id, person_name, to, .. } => {
+            json!({ "type": "person.state_changed", "id": person_id.0, "name": person_name, "state": to })
+        }
+        Event::PersonAdded { person } => {
+            json!({ "type": "person.added", "person": person })
+        }
+        Event::PersonUpdated { person } => {
+            json!({ "type": "person.updated", "person": person })
+        }
+        Event::PersonRemoved { person_id } => {
+            json!({ "type": "person.removed", "id": person_id.0 })
+        }
+        Event::AllPersonsAway => {
+            json!({ "type": "all_persons_away" })
+        }
+        Event::AnyPersonHome { person_id, person_name } => {
+            json!({ "type": "any_person_home", "id": person_id.0, "name": person_name })
+        }
+        Event::ZoneAdded { zone } => {
+            json!({ "type": "zone.added", "zone": zone })
+        }
+        Event::ZoneUpdated { zone } => {
+            json!({ "type": "zone.updated", "zone": zone })
+        }
+        Event::ZoneRemoved { zone_id } => {
+            json!({ "type": "zone.removed", "id": zone_id.0 })
+        }
     }
 }
 

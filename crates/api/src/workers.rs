@@ -297,6 +297,18 @@ pub async fn run_persistence_worker(
 
             // These events require no persistence action.
             Ok(Event::DeviceCommandDispatched { .. }) => {}
+
+            // Person/zone events are handled by PersonRegistry — no additional
+            // persistence action needed here.
+            Ok(Event::PersonStateChanged { .. })
+            | Ok(Event::PersonAdded { .. })
+            | Ok(Event::PersonUpdated { .. })
+            | Ok(Event::PersonRemoved { .. })
+            | Ok(Event::AllPersonsAway)
+            | Ok(Event::AnyPersonHome { .. })
+            | Ok(Event::ZoneAdded { .. })
+            | Ok(Event::ZoneUpdated { .. })
+            | Ok(Event::ZoneRemoved { .. }) => {}
         }
     }
 }

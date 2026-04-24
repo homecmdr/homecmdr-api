@@ -7,10 +7,12 @@
 //! Conditions are also parsed here from the Lua module's `conditions` table.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
-use homecmdr_core::model::{AttributeValue, DeviceId, RoomId};
+use homecmdr_core::model::{AttributeValue, DeviceId, PersonId, RoomId};
+use homecmdr_core::person_registry::PersonRegistry;
 use homecmdr_core::runtime::Runtime;
 
 use crate::events::attribute_value_to_f64;
@@ -31,10 +33,11 @@ pub(crate) async fn first_failed_condition(
     event: &AttributeValue,
     now: DateTime<Utc>,
     trigger_context: TriggerContext,
+    person_registry: Option<&Arc<PersonRegistry>>,
 ) -> Option<String> {
     for (index, condition) in automation.conditions.iter().enumerate() {
         if let Err(error) =
-            evaluate_condition(condition, runtime, event, now, trigger_context).await
+            evaluate_condition(condition, runtime, event, now, trigger_context, person_registry).await
         {
             return Some(format!("condition {} failed: {error}", index + 1));
         }
@@ -50,6 +53,7 @@ pub(crate) async fn evaluate_condition(
     _event: &AttributeValue,
     now: DateTime<Utc>,
     trigger_context: TriggerContext,
+    person_registry: Option<&Arc<PersonRegistry>>,
 ) -> Result<()> {
     match condition {
         Condition::DeviceState {
@@ -140,6 +144,40 @@ pub(crate) async fn evaluate_condition(
                 if now > before_time {
                     bail!("sun_position before point passed")
                 }
+            }
+            Ok(())
+        }
+        Condition::PersonState {
+            person_id,
+            state: expected_state,
+        } => {
+            let registry = person_registry
+                .with_context(|| "person_state condition requires person registry (persistence must be enabled)")?;
+            let person = registry
+                .get_person(&PersonId(person_id.clone()))
+                .await
+                .with_context(|| format!("person '{person_id}' not found"))?;
+            let actual_state = crate::events::person_state_to_string(&person.state);
+            if actual_state != *expected_state {
+                bail!(
+                    "person_state did not match: expected '{expected_state}', got '{actual_state}'"
+                )
+            }
+            Ok(())
+        }
+        Condition::AllPersonsAway => {
+            let registry = person_registry
+                .with_context(|| "all_persons_away condition requires person registry (persistence must be enabled)")?;
+            if !registry.all_persons_away().await {
+                bail!("not all persons are away")
+            }
+            Ok(())
+        }
+        Condition::AnyPersonHome => {
+            let registry = person_registry
+                .with_context(|| "any_person_home condition requires person registry (persistence must be enabled)")?;
+            if !registry.any_person_home().await {
+                bail!("no person is currently home")
             }
             Ok(())
         }
@@ -362,8 +400,25 @@ fn parse_condition(value: mlua::Value, path: &Path) -> Result<Condition> {
             }
             Ok(Condition::SunPosition { after, before })
         }
+        "person_state" => {
+            let person_id = table.get::<String>("person_id").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} person_state condition requires 'person_id': {error}",
+                    path.display()
+                )
+            })?;
+            let state = table.get::<String>("state").map_err(|error| {
+                anyhow::anyhow!(
+                    "automation file {} person_state condition requires 'state': {error}",
+                    path.display()
+                )
+            })?;
+            Ok(Condition::PersonState { person_id, state })
+        }
+        "all_persons_away" => Ok(Condition::AllPersonsAway),
+        "any_person_home" => Ok(Condition::AnyPersonHome),
         _ => bail!(
-            "automation file {} has unsupported condition type '{}'; supported types are device_state, presence, time_window, room_state, and sun_position",
+            "automation file {} has unsupported condition type '{}'; supported types are device_state, presence, time_window, room_state, sun_position, person_state, all_persons_away, and any_person_home",
             path.display(),
             condition_type
         ),

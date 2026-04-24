@@ -84,6 +84,7 @@ pub fn reload_controller_from_state(state: &AppState) -> ReloadController {
         trigger_context: state.trigger_context,
         runtime: state.runtime.clone(),
         backstop_timeout: state.backstop_timeout,
+        person_registry: state.person_registry.clone(),
     }
 }
 
@@ -260,6 +261,7 @@ pub fn reload_automations_internal(
                 controller.store.clone(),
                 controller.trigger_context,
                 controller.backstop_timeout,
+                controller.person_registry.clone(),
             );
             let next_controller = Arc::new(runner.controller());
 

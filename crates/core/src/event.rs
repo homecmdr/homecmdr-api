@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::DeviceCommand;
-use crate::model::{Attributes, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
+use crate::model::{
+    Attributes, Device, DeviceGroup, DeviceId, GroupId, Person, PersonId, PersonState, Room,
+    RoomId, Zone, ZoneId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadError {
@@ -100,5 +103,45 @@ pub enum Event {
     },
     SystemError {
         message: String,
+    },
+    // -----------------------------------------------------------------------
+    // Person events
+    // -----------------------------------------------------------------------
+    /// Fired when a person's derived location state changes.
+    PersonStateChanged {
+        person_id: PersonId,
+        person_name: String,
+        from: PersonState,
+        to: PersonState,
+        /// The tracker device that provided the authoritative reading.
+        source_device: Option<DeviceId>,
+    },
+    PersonAdded {
+        person: Person,
+    },
+    PersonUpdated {
+        person: Person,
+    },
+    PersonRemoved {
+        person_id: PersonId,
+    },
+    /// Fired when the last person at home leaves (all persons are now away).
+    AllPersonsAway,
+    /// Fired when the first person arrives home (at least one person is now home).
+    AnyPersonHome {
+        person_id: PersonId,
+        person_name: String,
+    },
+    // -----------------------------------------------------------------------
+    // Zone events
+    // -----------------------------------------------------------------------
+    ZoneAdded {
+        zone: Zone,
+    },
+    ZoneUpdated {
+        zone: Zone,
+    },
+    ZoneRemoved {
+        zone_id: ZoneId,
     },
 }

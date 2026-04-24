@@ -25,6 +25,7 @@ pub mod handlers {
     pub mod events; // WebSocket event stream + IPC ingest endpoint
     pub mod health; // GET /health, GET /ready
     pub mod history; // Device/attribute/command history queries
+    pub mod persons; // Person/zone CRUD + location ingest
     pub mod plugins; // Plugin list + Lua file read/write
     pub mod scenes; // Scene list and execute
 }

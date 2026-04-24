@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{bail, Context, Result};
 use homecmdr_core::model::AttributeValue;
+use homecmdr_core::person_registry::PersonRegistry;
 use homecmdr_core::runtime::Runtime;
 use homecmdr_lua_host::{evaluate_module, parse_execution_mode, LuaRuntimeOptions, DEFAULT_MAX_INSTRUCTIONS};
 use mlua::{Function, Lua};
@@ -262,6 +263,7 @@ impl AutomationCatalog {
         runtime: Arc<Runtime>,
         trigger_payload: AttributeValue,
         trigger_context: TriggerContext,
+        person_registry: Option<&Arc<PersonRegistry>>,
     ) -> Result<AutomationExecutionResult> {
         let automation = self
             .automations
@@ -276,6 +278,7 @@ impl AutomationCatalog {
                 &trigger_payload,
                 chrono::Utc::now(),
                 trigger_context,
+                person_registry,
             ))
         }) {
             return Ok(AutomationExecutionResult {
@@ -294,6 +297,7 @@ impl AutomationCatalog {
             self.scripts_root.as_deref(),
             cancel,
             DEFAULT_MAX_INSTRUCTIONS,
+            person_registry.cloned(),
         )?;
 
         Ok(AutomationExecutionResult {

@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::command::DeviceCommand;
-use crate::model::{AttributeValue, Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
+use crate::model::{
+    AttributeValue, Device, DeviceGroup, DeviceId, GroupId, Person, PersonId, Room, RoomId, Zone,
+    ZoneId,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceHistoryEntry {
@@ -160,6 +163,10 @@ pub struct ApiKeyRecord {
     pub key_hash: String,
     pub label: String,
     pub role: ApiKeyRole,
+    /// Optional link to a [`Person`].  When set, requests authenticated with
+    /// this key are attributed to that person (e.g. companion app location
+    /// ingestion).
+    pub person_id: Option<PersonId>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
 }
@@ -171,9 +178,73 @@ pub trait ApiKeyStore: Send + Sync + 'static {
         key_hash: &str,
         label: &str,
         role: ApiKeyRole,
+        person_id: Option<&PersonId>,
     ) -> anyhow::Result<ApiKeyRecord>;
     async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyRecord>>;
+    async fn list_api_keys_for_person(
+        &self,
+        person_id: &PersonId,
+    ) -> anyhow::Result<Vec<ApiKeyRecord>>;
     async fn revoke_api_key(&self, id: i64) -> anyhow::Result<bool>;
     async fn lookup_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<ApiKeyRecord>>;
     async fn touch_api_key(&self, id: i64) -> anyhow::Result<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Person history
+// ---------------------------------------------------------------------------
+
+/// A single recorded location-state transition for a person.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonHistoryEntry {
+    pub id: i64,
+    pub person_id: PersonId,
+    /// Serialised `PersonState` tag, e.g. `"home"`, `"away"`, `"zone"`, `"room"`, `"unknown"`.
+    pub state: String,
+    /// Zone id when `state == "zone"`.
+    pub zone_id: Option<ZoneId>,
+    /// Tracker device that was the authoritative source.
+    pub source_device_id: Option<DeviceId>,
+    /// GPS latitude at time of transition (if available).
+    pub latitude: Option<f64>,
+    /// GPS longitude at time of transition (if available).
+    pub longitude: Option<f64>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// PersonStore trait
+// ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+pub trait PersonStore: Send + Sync + 'static {
+    // --- persons ---
+    async fn upsert_person(&self, person: &Person) -> anyhow::Result<()>;
+    async fn load_person(&self, id: &PersonId) -> anyhow::Result<Option<Person>>;
+    async fn load_all_persons(&self) -> anyhow::Result<Vec<Person>>;
+    async fn delete_person(&self, id: &PersonId) -> anyhow::Result<bool>;
+    /// Replace the full ordered list of tracker device IDs for a person.
+    async fn update_person_trackers(
+        &self,
+        person_id: &PersonId,
+        trackers: &[DeviceId],
+    ) -> anyhow::Result<()>;
+
+    // --- zones ---
+    async fn upsert_zone(&self, zone: &Zone) -> anyhow::Result<()>;
+    async fn load_zone(&self, id: &ZoneId) -> anyhow::Result<Option<Zone>>;
+    async fn load_all_zones(&self) -> anyhow::Result<Vec<Zone>>;
+    async fn delete_zone(&self, id: &ZoneId) -> anyhow::Result<bool>;
+
+    // --- person history ---
+    async fn record_person_history(&self, entry: &PersonHistoryEntry) -> anyhow::Result<()>;
+    async fn load_person_history(
+        &self,
+        person_id: &PersonId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PersonHistoryEntry>>;
+    /// Prune person history rows older than the configured retention window.
+    async fn prune_person_history(&self) -> anyhow::Result<()>;
 }

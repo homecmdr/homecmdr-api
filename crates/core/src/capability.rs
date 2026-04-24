@@ -98,6 +98,13 @@ pub const DOOR: &str = "door";
 pub const GARAGE_DOOR: &str = "garage_door";
 pub const COVER_POSITION: &str = "cover_position";
 pub const COVER_TILT: &str = "cover_tilt";
+// tracker capability keys
+pub const TRACKER_TYPE: &str = "tracker.type";
+pub const TRACKER_STATE: &str = "tracker.state";
+pub const TRACKER_LATITUDE: &str = "tracker.latitude";
+pub const TRACKER_LONGITUDE: &str = "tracker.longitude";
+pub const TRACKER_ACCURACY: &str = "tracker.accuracy";
+pub const TRACKER_CONSIDER_HOME: &str = "tracker.consider_home";
 pub const CUSTOM_ATTRIBUTE_PREFIX: &str = "custom.";
 
 pub const COLOR_MODE_VALUES: [&str; 5] = ["color_temp", "rgb", "xy", "hs", "white"];
@@ -145,6 +152,10 @@ pub const ACTION_MEDIA_PLAYBACK: [&str; 5] = ["play", "pause", "stop", "next", "
 pub const ACTION_LOCK: [&str; 2] = ["lock", "unlock"];
 pub const ACTION_OPEN_CLOSE_STOP: [&str; 3] = ["open", "close", "stop"];
 pub const ACTION_COVER: [&str; 4] = ["open", "close", "stop", "set"];
+// tracker type values: gps = phone/satellite, stationary = wifi/router, ble = beacon
+pub const TRACKER_TYPE_VALUES: [&str; 3] = ["gps", "stationary", "ble"];
+// tracker state values: home, not_home, or a zone id string
+pub const TRACKER_STATE_VALUES: [&str; 2] = ["home", "not_home"];
 
 pub const CAPABILITY_OWNERSHIP_RULES: [&str; 4] = [
     "Use device.attributes.<capability_key> whenever a canonical capability already exists for the state or command.",
@@ -662,7 +673,62 @@ pub const ACCESS_CAPABILITIES: [CapabilityDefinition; 5] = [
     },
 ];
 
-pub const ALL_CAPABILITIES: [&[CapabilityDefinition]; 8] = [
+/// Tracker capabilities — can be present on any device (phone, BLE tag, watch, router entry).
+///
+/// A device that carries these attributes is eligible to be linked to a [`crate::model::Person`]
+/// as one of their location trackers.
+pub const TRACKER_CAPABILITIES: [CapabilityDefinition; 6] = [
+    CapabilityDefinition {
+        domain: "tracker",
+        key: TRACKER_TYPE,
+        schema: CapabilitySchema::Enum(&TRACKER_TYPE_VALUES),
+        read_only: false,
+        actions: &ACTION_SET,
+        description: "How the tracker determines location: gps (satellite/phone), stationary (wifi/router), or ble (Bluetooth beacon).",
+    },
+    CapabilityDefinition {
+        domain: "tracker",
+        key: TRACKER_STATE,
+        schema: CapabilitySchema::String,
+        read_only: false,
+        actions: &ACTION_SET,
+        description: "Current location state: 'home', 'not_home', or a zone id string.",
+    },
+    CapabilityDefinition {
+        domain: "tracker",
+        key: TRACKER_LATITUDE,
+        schema: CapabilitySchema::Measurement,
+        read_only: false,
+        actions: &ACTION_SET,
+        description: "GPS latitude in decimal degrees (GPS tracker type only).",
+    },
+    CapabilityDefinition {
+        domain: "tracker",
+        key: TRACKER_LONGITUDE,
+        schema: CapabilitySchema::Measurement,
+        read_only: false,
+        actions: &ACTION_SET,
+        description: "GPS longitude in decimal degrees (GPS tracker type only).",
+    },
+    CapabilityDefinition {
+        domain: "tracker",
+        key: TRACKER_ACCURACY,
+        schema: CapabilitySchema::Measurement,
+        read_only: false,
+        actions: &ACTION_SET,
+        description: "GPS fix accuracy in metres (GPS tracker type only).",
+    },
+    CapabilityDefinition {
+        domain: "tracker",
+        key: TRACKER_CONSIDER_HOME,
+        schema: CapabilitySchema::Integer,
+        read_only: false,
+        actions: &ACTION_SET,
+        description: "Seconds to wait before marking a stationary tracker as not_home after it was last seen home. Prevents false departures. Default 180.",
+    },
+];
+
+pub const ALL_CAPABILITIES: [&[CapabilityDefinition]; 9] = [
     &WEATHER_CAPABILITIES,
     &LIGHT_CAPABILITIES,
     &SENSOR_CAPABILITIES,
@@ -671,6 +737,7 @@ pub const ALL_CAPABILITIES: [&[CapabilityDefinition]; 8] = [
     &ENERGY_CAPABILITIES,
     &MEDIA_CAPABILITIES,
     &ACCESS_CAPABILITIES,
+    &TRACKER_CAPABILITIES,
 ];
 
 pub fn weather_capability(key: &str) -> Option<&'static CapabilityDefinition> {

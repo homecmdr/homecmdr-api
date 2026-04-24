@@ -3,7 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use homecmdr_core::invoke::InvokeRequest;
-use homecmdr_core::model::{AttributeValue, DeviceId};
+use homecmdr_core::model::{AttributeValue, DeviceId, PersonId};
+use homecmdr_core::person_registry::PersonRegistry;
 use homecmdr_core::runtime::Runtime;
 use mlua::{Table, UserData, UserDataMethods, Value};
 use tokio::runtime::Handle;
@@ -11,7 +12,8 @@ use tokio::task::block_in_place;
 
 use crate::convert::{
     attribute_to_lua_value, device_to_attribute_value, group_to_attribute_value,
-    lua_table_to_command, lua_value_to_attribute, room_to_attribute_value,
+    lua_table_to_command, lua_value_to_attribute, person_to_attribute_value,
+    room_to_attribute_value,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,7 @@ impl ExecutionResults {
 pub struct LuaExecutionContext {
     runtime: Arc<Runtime>,
     execution_results: ExecutionResults,
+    person_registry: Option<Arc<PersonRegistry>>,
 }
 
 impl LuaExecutionContext {
@@ -45,7 +48,13 @@ impl LuaExecutionContext {
         Self {
             runtime,
             execution_results: ExecutionResults::default(),
+            person_registry: None,
         }
+    }
+
+    pub fn with_person_registry(mut self, person_registry: Arc<PersonRegistry>) -> Self {
+        self.person_registry = Some(person_registry);
+        self
     }
 
     pub fn into_results(self) -> Vec<CommandExecutionResult> {
@@ -285,6 +294,49 @@ impl UserData for LuaExecutionContext {
                     .block_on(tokio::time::sleep(std::time::Duration::from_secs_f64(secs)))
             });
             Ok(())
+        });
+
+        methods.add_method("get_person", |lua, this, person_id: String| {
+            let Some(registry) = &this.person_registry else {
+                return Ok(Value::Nil);
+            };
+            let person = block_in_place(|| {
+                Handle::current().block_on(registry.get_person(&PersonId(person_id)))
+            });
+            match person {
+                Some(p) => attribute_to_lua_value(&lua, person_to_attribute_value(&p)),
+                None => Ok(Value::Nil),
+            }
+        });
+
+        methods.add_method("list_persons", |lua, this, (): ()| {
+            let Some(registry) = &this.person_registry else {
+                return attribute_to_lua_value(&lua, AttributeValue::Array(Vec::new()));
+            };
+            let persons = block_in_place(|| Handle::current().block_on(registry.list_persons()));
+            let values = persons
+                .into_iter()
+                .map(|p| person_to_attribute_value(&p))
+                .collect();
+            attribute_to_lua_value(&lua, AttributeValue::Array(values))
+        });
+
+        methods.add_method("all_persons_away", |_, this, (): ()| {
+            let Some(registry) = &this.person_registry else {
+                return Ok(false);
+            };
+            Ok(block_in_place(|| {
+                Handle::current().block_on(registry.all_persons_away())
+            }))
+        });
+
+        methods.add_method("any_person_home", |_, this, (): ()| {
+            let Some(registry) = &this.person_registry else {
+                return Ok(false);
+            };
+            Ok(block_in_place(|| {
+                Handle::current().block_on(registry.any_person_home())
+            }))
         });
     }
 }
