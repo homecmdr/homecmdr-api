@@ -297,28 +297,41 @@ impl PersonRegistry {
             inner.zones.insert(zone.id.clone(), zone);
         }
 
-        // Ensure home zone exists
+        // Always sync the home zone from locale config so that changes to
+        // local.toml are reflected on the next restart (the zone is persisted
+        // to the store, so if the coordinates were previously created with
+        // different values the stored record must be updated).
         let home_id = ZoneId(HOME_ZONE_ID.to_string());
-        if !inner.zones.contains_key(&home_id) {
-            if let (Some(lat), Some(lon)) = (locale.latitude, locale.longitude) {
-                let home_zone = Zone {
-                    id: home_id.clone(),
-                    name: "Home".to_string(),
-                    latitude: lat,
-                    longitude: lon,
-                    radius_meters: locale.home_zone_radius_meters,
-                    icon: Some("mdi:home".to_string()),
-                    passive: false,
-                };
-                store.upsert_zone(&home_zone).await?;
+        if let (Some(lat), Some(lon)) = (locale.latitude, locale.longitude) {
+            let existing = inner.zones.get(&home_id);
+            let home_zone = Zone {
+                id: home_id.clone(),
+                name: existing
+                    .map(|z| z.name.clone())
+                    .unwrap_or_else(|| "Home".to_string()),
+                latitude: lat,
+                longitude: lon,
+                radius_meters: locale.home_zone_radius_meters,
+                icon: existing
+                    .and_then(|z| z.icon.clone())
+                    .or_else(|| Some("mdi:home".to_string())),
+                passive: false,
+            };
+            store.upsert_zone(&home_zone).await?;
+            if existing.is_none() {
                 info!(
                     "Auto-created home zone at ({}, {}) radius {}m",
                     lat, lon, locale.home_zone_radius_meters
                 );
-                inner.zones.insert(home_id, home_zone);
             } else {
-                warn!("No locale.latitude/longitude configured — home zone not created");
+                info!(
+                    "Synced home zone from config: ({}, {}) radius {}m",
+                    lat, lon, locale.home_zone_radius_meters
+                );
             }
+            inner.zones.insert(home_id, home_zone);
+        } else {
+            warn!("No locale.latitude/longitude configured — home zone not created");
         }
 
         // Load persons
@@ -327,6 +340,43 @@ impl PersonRegistry {
             inner.persons.insert(person.id.clone(), person);
         }
         inner.rebuild_device_index();
+
+        // Seed GPS tracker snapshots from persisted person coordinates.
+        //
+        // On restart the `trackers` HashMap starts empty.  Without seeding it,
+        // `derive_person_state` has no GPS data and every GPS-tracked person
+        // immediately reverts to `Unknown` — even though we have their last
+        // known position stored on the `Person` record.  We reconstruct a
+        // minimal snapshot here so the correct home/away state is preserved
+        // until the companion app sends its next location ping.
+        {
+            for person in inner.persons.values() {
+                if let (Some(lat), Some(lon), Some(source)) = (
+                    person.latitude,
+                    person.longitude,
+                    person.state_source.clone(),
+                ) {
+                    if person.trackers.contains(&source) {
+                        inner.trackers.entry(source.clone()).or_insert_with(|| {
+                            TrackerSnapshot {
+                                device_id: source,
+                                tracker_type: TrackerType::Gps,
+                                state: String::new(),
+                                latitude: Some(lat),
+                                longitude: Some(lon),
+                                consider_home_secs: DEFAULT_CONSIDER_HOME_SECS,
+                                last_updated: person.updated_at,
+                                last_home_at: if matches!(person.state, PersonState::Home) {
+                                    Some(person.updated_at)
+                                } else {
+                                    None
+                                },
+                            }
+                        });
+                    }
+                }
+            }
+        }
 
         let registry = Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -340,6 +390,15 @@ impl PersonRegistry {
             registry.inner.read().await.persons.len(),
             registry.inner.read().await.zones.len(),
         );
+
+        // Re-derive all persons immediately after startup.  The tracker
+        // snapshots seeded above may differ from the persisted person state
+        // (e.g. after an unclean shutdown or a zone coordinate correction), so
+        // this ensures the correct Home/Away state is written to the DB and
+        // recorded in history before the first incoming location ping.
+        if let Err(e) = registry.re_derive_all_persons().await {
+            warn!(error = %e, "Failed to re-derive person states at startup");
+        }
 
         Ok(registry)
     }

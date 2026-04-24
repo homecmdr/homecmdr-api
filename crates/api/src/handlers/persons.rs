@@ -18,8 +18,9 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use homecmdr_core::model::{DeviceId, Person, PersonId, Zone, ZoneId};
-use homecmdr_core::person_registry::HOME_ZONE_ID;
+use homecmdr_core::capability::TRACKER_TYPE;
+use homecmdr_core::model::{AttributeValue, DeviceId, Person, PersonId, Zone, ZoneId};
+use homecmdr_core::person_registry::{PersonRegistry, HOME_ZONE_ID};
 
 use crate::dto::{
     ApiError, CreatePersonRequest, CreateZoneRequest, HistoryQuery, IngestLocationRequest,
@@ -394,6 +395,37 @@ pub async fn ingest_location(
         .person_registry
         .as_ref()
         .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "person registry not available"))?;
+
+    // Ensure the tracker device exists in the main device registry BEFORE
+    // calling ingest_location.  person_registry::ingest_location fires a
+    // DeviceStateChanged event on the bus; the persistence worker handles that
+    // event by looking up the device via `runtime.registry().get(&id)`.
+    // If the upsert happens after the event is published, the worker may
+    // process the event before the device exists in the registry and silently
+    // drop the save.  Upserting first eliminates this race.
+    //
+    // Only tracker.type is set here — tracker.latitude and tracker.longitude
+    // are CapabilitySchema::Measurement (require a {value,unit} object) so
+    // setting them as raw floats fails validate_device() with a 500.
+    // Coordinate persistence is handled by person_registry::ingest_location()
+    // which writes directly to the person record and bypasses device validation.
+    let device_id = DeviceId(
+        req.device_id
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("location:{}", person_id.0)),
+    );
+    let mut tracker = PersonRegistry::build_tracker_device(&device_id);
+    tracker.attributes.insert(
+        TRACKER_TYPE.to_string(),
+        AttributeValue::Text("gps".to_string()),
+    );
+    state
+        .runtime
+        .registry()
+        .upsert(tracker)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     registry
         .ingest_location(
