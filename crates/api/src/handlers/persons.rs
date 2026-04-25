@@ -5,6 +5,9 @@
 //! - `GET  /persons/{id}`                  — get a person
 //! - `PUT  /persons/{id}`                  — update a person's display fields
 //! - `DELETE /persons/{id}`                — remove a person
+//! - `POST /persons/{id}/picture`          — upload a profile picture (multipart)
+//! - `GET  /persons/{id}/picture`          — serve the uploaded profile picture
+//! - `DELETE /persons/{id}/picture`        — delete the profile picture
 //! - `POST /persons/{id}/trackers`         — link a tracker device
 //! - `DELETE /persons/{id}/trackers/{did}` — unlink a tracker device
 //! - `GET  /persons/{id}/history`          — location state history
@@ -15,8 +18,10 @@
 //! - `DELETE /zones/{id}`                  — remove a zone
 //! - `POST /ingest/location`               — companion-app GPS ingest
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::Response;
+use axum::body::Body;
 use axum::Json;
 use homecmdr_core::capability::TRACKER_TYPE;
 use homecmdr_core::model::{AttributeValue, DeviceId, Person, PersonId, Zone, ZoneId};
@@ -178,6 +183,229 @@ pub async fn delete_person(
     } else {
         Err(ApiError::not_found(format!("person '{id}' not found")))
     }
+}
+
+// ── Person picture endpoints ──────────────────────────────────────────────────
+
+/// Returns the image file extension corresponding to a MIME content type.
+fn ext_for_content_type(content_type: &str) -> &'static str {
+    // Strip any parameters (e.g. "image/jpeg; charset=…") before matching.
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    match base {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "jpg", // covers image/jpeg, image/jpg, and any unknown image type
+    }
+}
+
+/// Returns the MIME content type for a file extension.
+fn content_type_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/jpeg",
+    }
+}
+
+/// The set of extensions we look for when reading or deleting a stored picture.
+const PICTURE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
+
+/// Uploads or replaces the profile picture for a person.
+///
+/// Accepts `multipart/form-data` with a single image field (any name).
+/// The file is saved under `pictures_directory/<id>.<ext>` where the
+/// extension is derived from the field's `Content-Type`.  Only `image/*`
+/// content types are accepted.
+///
+/// The person's `picture` field is updated to `/persons/{id}/picture` so
+/// that callers can retrieve it via `GET /persons/{id}/picture`.
+///
+/// Returns the updated person, or 404 if the person does not exist.
+pub async fn upload_person_picture(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<Person>, ApiError> {
+    // Basic safety: reject IDs that could escape the pictures directory.
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid person id"));
+    }
+
+    let registry = state
+        .person_registry
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "person registry not available"))?;
+
+    let mut person = registry
+        .get_person(&PersonId(id.clone()))
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("person '{id}' not found")))?;
+
+    // Read the first field from the multipart body.
+    let (image_bytes, content_type) = loop {
+        let field = multipart
+            .next_field()
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
+            .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "no image field in multipart upload"))?;
+
+        let ct = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        if !ct.starts_with("image/") {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unsupported content type '{ct}'; only image/* is accepted"),
+            ));
+        }
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+        break (data, ct);
+    };
+
+    let ext = ext_for_content_type(&content_type);
+    let dir = std::path::Path::new(&state.pictures_directory);
+
+    tokio::fs::create_dir_all(dir).await.map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create pictures directory: {e}"),
+        )
+    })?;
+
+    // Remove any previously stored picture for this person regardless of extension.
+    for old_ext in PICTURE_EXTENSIONS {
+        let _ = tokio::fs::remove_file(dir.join(format!("{id}.{old_ext}"))).await;
+    }
+
+    tokio::fs::write(dir.join(format!("{id}.{ext}")), &image_bytes)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to save picture: {e}"),
+            )
+        })?;
+
+    person.picture = Some(format!("/persons/{id}/picture"));
+    registry
+        .update_person(person.clone())
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(person))
+}
+
+/// Serves the stored profile picture for a person.
+///
+/// Returns the raw image bytes with the appropriate `Content-Type` header,
+/// or 404 if the person does not exist or has no uploaded picture.
+pub async fn get_person_picture(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response<Body>, ApiError> {
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid person id"));
+    }
+
+    let registry = state
+        .person_registry
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "person registry not available"))?;
+
+    registry
+        .get_person(&PersonId(id.clone()))
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("person '{id}' not found")))?;
+
+    let dir = std::path::Path::new(&state.pictures_directory);
+
+    // Find whichever extension was stored.
+    let mut found: Option<(std::path::PathBuf, &'static str)> = None;
+    for ext in PICTURE_EXTENSIONS {
+        let path = dir.join(format!("{id}.{ext}"));
+        if path.exists() {
+            found = Some((path, content_type_for_ext(ext)));
+            break;
+        }
+    }
+
+    let (path, content_type) = found
+        .ok_or_else(|| ApiError::not_found(format!("no picture found for person '{id}'")))?;
+
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to read picture: {e}"),
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(bytes))
+        .expect("response builds"))
+}
+
+/// Deletes the stored profile picture for a person and clears the `picture` field.
+///
+/// Returns 204 No Content on success, or 404 if the person does not exist or
+/// has no uploaded picture.
+pub async fn delete_person_picture(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid person id"));
+    }
+
+    let registry = state
+        .person_registry
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "person registry not available"))?;
+
+    let mut person = registry
+        .get_person(&PersonId(id.clone()))
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("person '{id}' not found")))?;
+
+    let dir = std::path::Path::new(&state.pictures_directory);
+    let mut deleted = false;
+
+    for ext in PICTURE_EXTENSIONS {
+        let path = dir.join(format!("{id}.{ext}"));
+        if path.exists() {
+            tokio::fs::remove_file(&path).await.map_err(|e| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to delete picture: {e}"),
+                )
+            })?;
+            deleted = true;
+        }
+    }
+
+    if !deleted {
+        return Err(ApiError::not_found(format!(
+            "no picture found for person '{id}'"
+        )));
+    }
+
+    person.picture = None;
+    registry
+        .update_person(person)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Links a tracker device to a person.

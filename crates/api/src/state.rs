@@ -102,6 +102,10 @@ pub struct AppState {
     pub plugins_enabled: bool,
     pub plugins_directory: String,
 
+    /// Directory on disk where uploaded person pictures are stored.
+    /// Derived from `HOMECMDR_DATA_DIR/persons/pictures` at startup.
+    pub pictures_directory: String,
+
     /// In-memory list of installed plugin manifests, updated by `POST /plugins/reload`.
     pub plugin_catalog: Arc<RwLock<Vec<PluginManifest>>>,
 
@@ -523,6 +527,7 @@ pub fn make_state(
         backstop_timeout: Duration::from_secs(3600),
         plugins_enabled: false,
         plugins_directory: String::new(),
+        pictures_directory: String::new(),
         plugin_catalog: Arc::new(RwLock::new(Vec::new())),
         ipc_adapter_names: Arc::new(HashSet::new()),
     }

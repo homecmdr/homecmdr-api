@@ -81,6 +81,7 @@ pub fn app(state: AppState, config: &Config) -> Router {
             "/persons/{id}/history",
             get(persons::get_person_history),
         )
+        .route("/persons/{id}/picture", get(persons::get_person_picture))
         .route("/zones", get(persons::list_zones))
         .route("/zones/{id}", get(persons::get_zone))
         .route_layer({
@@ -130,6 +131,10 @@ pub fn app(state: AppState, config: &Config) -> Router {
         .route(
             "/persons/{id}",
             put(persons::update_person).delete(persons::delete_person),
+        )
+        .route(
+            "/persons/{id}/picture",
+            post(persons::upload_person_picture).delete(persons::delete_person_picture),
         )
         .route("/persons/{id}/trackers", post(persons::link_tracker))
         .route(

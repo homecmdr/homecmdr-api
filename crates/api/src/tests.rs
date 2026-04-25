@@ -25,6 +25,10 @@ use tokio::sync::{oneshot, Notify};
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 
+use homecmdr_core::config::LocaleConfig;
+use homecmdr_core::person_registry::PersonRegistry;
+use homecmdr_core::store::PersonStore;
+
 use super::*;
 
 const TEST_MASTER_KEY: &str = "homecmdr-test-key-for-tests-only";
@@ -1640,6 +1644,9 @@ async fn automations_endpoint_lists_loaded_automations() {
             backstop_timeout: Duration::from_secs(3600),
             plugins_enabled: false,
             plugins_directory: String::new(),
+            pictures_directory: String::new(),
+            person_store: None,
+            person_registry: None,
             plugin_catalog: Arc::new(RwLock::new(Vec::new())),
             ipc_adapter_names: Arc::new(HashSet::new()),
         },
@@ -1781,6 +1788,8 @@ async fn automation_control_endpoints_toggle_validate_and_execute() {
             health: test_health(&["open_meteo"]),
             store: None,
             auth_key_store: None,
+            person_store: None,
+            person_registry: None,
             master_key_hash: sha256_hex(TEST_MASTER_KEY),
             history: history_settings(false),
             scenes_enabled: false,
@@ -1795,6 +1804,7 @@ async fn automation_control_endpoints_toggle_validate_and_execute() {
             backstop_timeout: Duration::from_secs(3600),
             plugins_enabled: false,
             plugins_directory: String::new(),
+            pictures_directory: String::new(),
             plugin_catalog: Arc::new(RwLock::new(Vec::new())),
             ipc_adapter_names: Arc::new(HashSet::new()),
         },
@@ -2065,6 +2075,8 @@ async fn adapter_detail_endpoint_reports_last_error() {
             health,
             store: None,
             auth_key_store: None,
+            person_store: None,
+            person_registry: None,
             master_key_hash: sha256_hex(TEST_MASTER_KEY),
             history: history_settings(false),
             scenes_enabled: false,
@@ -2079,6 +2091,7 @@ async fn adapter_detail_endpoint_reports_last_error() {
             backstop_timeout: Duration::from_secs(3600),
             plugins_enabled: false,
             plugins_directory: String::new(),
+            pictures_directory: String::new(),
             plugin_catalog: Arc::new(RwLock::new(Vec::new())),
             ipc_adapter_names: Arc::new(HashSet::new()),
         },
@@ -2583,6 +2596,8 @@ async fn scene_history_endpoint_returns_recorded_scene_runs() {
             health: test_health(&["open_meteo"]),
             store: Some(store.clone()),
             auth_key_store: None,
+            person_store: None,
+            person_registry: None,
             master_key_hash: sha256_hex(TEST_MASTER_KEY),
             history: history_settings(true),
             scenes_enabled: true,
@@ -2597,6 +2612,7 @@ async fn scene_history_endpoint_returns_recorded_scene_runs() {
             backstop_timeout: Duration::from_secs(3600),
             plugins_enabled: false,
             plugins_directory: String::new(),
+            pictures_directory: String::new(),
             plugin_catalog: Arc::new(RwLock::new(Vec::new())),
             ipc_adapter_names: Arc::new(HashSet::new()),
         },
@@ -3731,6 +3747,311 @@ async fn file_api_rejects_non_lua_extension() {
         .expect("non-lua request completes");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = shutdown.send(());
+    handle.await.expect("server task completes");
+}
+
+// ── Person picture endpoint tests ─────────────────────────────────────────────
+
+/// Builds a server that has a live `PersonRegistry` and a temporary pictures
+/// directory wired into `AppState`.  The returned `PathBuf` is the pictures dir.
+async fn spawn_test_server_with_person_registry(
+) -> (
+    SocketAddr,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+    std::path::PathBuf, // pictures directory
+) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+
+    let database_url = temp_sqlite_url();
+    let store = Arc::new(
+        SqliteDeviceStore::new(&database_url, true)
+            .await
+            .expect("sqlite store for person tests"),
+    );
+    let person_store: Arc<dyn PersonStore> = store.clone() as Arc<dyn PersonStore>;
+
+    let runtime = Arc::new(Runtime::new(
+        Vec::new(),
+        RuntimeConfig {
+            event_bus_capacity: 16,
+        },
+    ));
+
+    let locale = LocaleConfig::default();
+    let registry = PersonRegistry::new(person_store, runtime.bus().clone(), &locale)
+        .await
+        .expect("person registry initializes");
+
+    let pictures_dir =
+        std::env::temp_dir().join(format!("homecmdr-pictures-test-{unique}"));
+    std::fs::create_dir_all(&pictures_dir).expect("create temp pictures dir");
+
+    let config = test_config(serde_json::Map::new());
+    let mut state = make_state(
+        runtime,
+        empty_scenes(),
+        Arc::new(AutomationCatalog::empty()),
+        TriggerContext::default(),
+        test_health(&[]),
+        Some(store.clone() as Arc<dyn DeviceStore>),
+        None,
+        sha256_hex(TEST_MASTER_KEY),
+        history_settings(false),
+        config.scenes.enabled,
+        config.automations.enabled,
+        config.scenes.directory.clone(),
+        config.automations.directory.clone(),
+        None,
+    );
+    state.person_registry = Some(Arc::new(registry));
+    state.pictures_directory = pictures_dir.to_string_lossy().to_string();
+
+    let app = app(state, &config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("read test listener address");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("test server exits cleanly");
+    });
+
+    (addr, shutdown_tx, handle, pictures_dir)
+}
+
+#[tokio::test]
+async fn person_picture_upload_stores_file_and_updates_picture_field() {
+    let (addr, shutdown, handle, _pics_dir) =
+        spawn_test_server_with_person_registry().await;
+
+    // Create a person first.
+    let create_resp = test_client()
+        .post(format!("http://{addr}/persons"))
+        .json(&serde_json::json!({ "id": "alice", "name": "Alice" }))
+        .send()
+        .await
+        .expect("create person request succeeds");
+    assert_eq!(create_resp.status(), StatusCode::OK);
+
+    // Upload a small 1×1 white PNG.
+    let png_bytes: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00,
+        0x90, 0x77, 0x53, 0xde, // IHDR CRC
+        0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, // IDAT chunk
+        0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+        0xe2, 0x21, 0xbc, 0x33, // IDAT CRC
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82, // IEND
+    ];
+    let part = reqwest::multipart::Part::bytes(png_bytes.to_vec())
+        .mime_str("image/png")
+        .expect("valid mime");
+    let form = reqwest::multipart::Form::new().part("picture", part);
+
+    let upload_resp = test_client()
+        .post(format!("http://{addr}/persons/alice/picture"))
+        .multipart(form)
+        .send()
+        .await
+        .expect("upload request succeeds");
+
+    assert_eq!(upload_resp.status(), StatusCode::OK);
+    let body = upload_resp.json::<Value>().await.expect("upload json body");
+    assert_eq!(body["picture"], "/persons/alice/picture");
+
+    let _ = shutdown.send(());
+    handle.await.expect("server task completes");
+}
+
+#[tokio::test]
+async fn person_picture_get_returns_uploaded_bytes() {
+    let (addr, shutdown, handle, _pics_dir) =
+        spawn_test_server_with_person_registry().await;
+
+    test_client()
+        .post(format!("http://{addr}/persons"))
+        .json(&serde_json::json!({ "id": "bob", "name": "Bob" }))
+        .send()
+        .await
+        .expect("create person");
+
+    // A minimal JPEG header (enough bytes to test content-type round-trip).
+    let jpeg_bytes: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+        0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+    ];
+    let part = reqwest::multipart::Part::bytes(jpeg_bytes.to_vec())
+        .mime_str("image/jpeg")
+        .expect("valid mime");
+    let form = reqwest::multipart::Form::new().part("picture", part);
+    test_client()
+        .post(format!("http://{addr}/persons/bob/picture"))
+        .multipart(form)
+        .send()
+        .await
+        .expect("upload");
+
+    let get_resp = test_client()
+        .get(format!("http://{addr}/persons/bob/picture"))
+        .send()
+        .await
+        .expect("get picture request succeeds");
+
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let ct = get_resp
+        .headers()
+        .get("content-type")
+        .expect("content-type header")
+        .to_str()
+        .expect("content-type is utf-8");
+    assert!(ct.starts_with("image/jpeg"), "unexpected content-type: {ct}");
+    let bytes = get_resp.bytes().await.expect("picture bytes");
+    assert_eq!(bytes.as_ref(), jpeg_bytes);
+
+    let _ = shutdown.send(());
+    handle.await.expect("server task completes");
+}
+
+#[tokio::test]
+async fn person_picture_delete_removes_file_and_clears_field() {
+    let (addr, shutdown, handle, pics_dir) =
+        spawn_test_server_with_person_registry().await;
+
+    test_client()
+        .post(format!("http://{addr}/persons"))
+        .json(&serde_json::json!({ "id": "carol", "name": "Carol" }))
+        .send()
+        .await
+        .expect("create person");
+
+    let png: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    let part = reqwest::multipart::Part::bytes(png.to_vec())
+        .mime_str("image/png")
+        .expect("valid mime");
+    test_client()
+        .post(format!("http://{addr}/persons/carol/picture"))
+        .multipart(reqwest::multipart::Form::new().part("picture", part))
+        .send()
+        .await
+        .expect("upload");
+
+    // Verify the file is on disk.
+    assert!(
+        pics_dir.join("carol.png").exists(),
+        "picture file should exist after upload"
+    );
+
+    let del_resp = test_client()
+        .delete(format!("http://{addr}/persons/carol/picture"))
+        .send()
+        .await
+        .expect("delete picture request succeeds");
+
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    // File should be gone.
+    assert!(
+        !pics_dir.join("carol.png").exists(),
+        "picture file should be removed after delete"
+    );
+
+    // Person's picture field should be null.
+    let person_resp = test_client()
+        .get(format!("http://{addr}/persons/carol"))
+        .send()
+        .await
+        .expect("get person after delete");
+    let person = person_resp.json::<Value>().await.expect("person json");
+    assert!(
+        person["picture"].is_null(),
+        "picture field should be null after delete"
+    );
+
+    let _ = shutdown.send(());
+    handle.await.expect("server task completes");
+}
+
+#[tokio::test]
+async fn person_picture_get_returns_404_when_no_picture_uploaded() {
+    let (addr, shutdown, handle, _pics_dir) =
+        spawn_test_server_with_person_registry().await;
+
+    test_client()
+        .post(format!("http://{addr}/persons"))
+        .json(&serde_json::json!({ "id": "dave", "name": "Dave" }))
+        .send()
+        .await
+        .expect("create person");
+
+    let resp = test_client()
+        .get(format!("http://{addr}/persons/dave/picture"))
+        .send()
+        .await
+        .expect("get picture request completes");
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let _ = shutdown.send(());
+    handle.await.expect("server task completes");
+}
+
+#[tokio::test]
+async fn person_picture_upload_returns_404_for_unknown_person() {
+    let (addr, shutdown, handle, _pics_dir) =
+        spawn_test_server_with_person_registry().await;
+
+    let part = reqwest::multipart::Part::bytes(vec![0u8; 4])
+        .mime_str("image/png")
+        .expect("valid mime");
+    let resp = test_client()
+        .post(format!("http://{addr}/persons/nobody/picture"))
+        .multipart(reqwest::multipart::Form::new().part("picture", part))
+        .send()
+        .await
+        .expect("upload request completes");
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let _ = shutdown.send(());
+    handle.await.expect("server task completes");
+}
+
+#[tokio::test]
+async fn person_picture_upload_rejects_non_image_content_type() {
+    let (addr, shutdown, handle, _pics_dir) =
+        spawn_test_server_with_person_registry().await;
+
+    test_client()
+        .post(format!("http://{addr}/persons"))
+        .json(&serde_json::json!({ "id": "eve", "name": "Eve" }))
+        .send()
+        .await
+        .expect("create person");
+
+    let part = reqwest::multipart::Part::bytes(b"not an image".to_vec())
+        .mime_str("text/plain")
+        .expect("valid mime");
+    let resp = test_client()
+        .post(format!("http://{addr}/persons/eve/picture"))
+        .multipart(reqwest::multipart::Form::new().part("picture", part))
+        .send()
+        .await
+        .expect("upload request completes");
+
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let _ = shutdown.send(());
     handle.await.expect("server task completes");

@@ -181,6 +181,20 @@ pub async fn run() -> Result<()> {
         Vec::new()
     };
 
+    // Determine the directory where uploaded person pictures are stored.
+    // Mirrors how resolve_database_url handles HOMECMDR_DATA_DIR.
+    let pictures_directory = {
+        let data_dir = std::env::var("HOMECMDR_DATA_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "data".to_string());
+        std::path::Path::new(&data_dir)
+            .join("persons")
+            .join("pictures")
+            .to_string_lossy()
+            .to_string()
+    };
+
     let app_state = AppState {
         runtime: runtime.clone(),
         scenes: Arc::new(RwLock::new(scenes)),
@@ -208,6 +222,7 @@ pub async fn run() -> Result<()> {
         backstop_timeout,
         plugins_enabled: config.plugins.enabled,
         plugins_directory: config.plugins.directory.clone(),
+        pictures_directory,
         plugin_catalog: Arc::new(RwLock::new(initial_plugin_manifests)),
         ipc_adapter_names: Arc::new(ipc_adapter_names),
     };
