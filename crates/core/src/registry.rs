@@ -8,6 +8,12 @@ use crate::event::Event;
 use crate::model::{Device, DeviceGroup, DeviceId, GroupId, Room, RoomId};
 use crate::validation::validate_device;
 
+/// In-memory store for devices, rooms, and groups.
+///
+/// All mutations go through this struct, which validates the change and then
+/// publishes the appropriate Event on the bus so that automations, the SSE
+/// stream, and the persistence worker can react.  Clone-safe — all fields are
+/// wrapped in `Arc<RwLock<…>>`.
 #[derive(Debug, Clone)]
 pub struct DeviceRegistry {
     bus: EventBus,
@@ -26,6 +32,10 @@ impl DeviceRegistry {
         }
     }
 
+    /// Insert or update a device.  Publishes:
+    /// - `DeviceAdded` for a brand-new device
+    /// - `DeviceStateChanged` when attributes, kind, or metadata differ
+    /// - `DeviceSeen` for a heartbeat with no attribute changes
     pub async fn upsert(&self, device: Device) -> Result<()> {
         validate_device(&device)?;
         validate_room_assignment(self, &device)?;
@@ -70,6 +80,7 @@ impl DeviceRegistry {
         Ok(())
     }
 
+    /// Bulk-load devices from the database at startup without firing any events.
     pub fn restore(&self, devices: Vec<Device>) -> Result<()> {
         let mut restored = HashMap::with_capacity(devices.len());
 
@@ -85,6 +96,7 @@ impl DeviceRegistry {
         Ok(())
     }
 
+    /// Bulk-load rooms from the database at startup without firing any events.
     pub fn restore_rooms(&self, rooms: Vec<Room>) {
         let mut restored = HashMap::with_capacity(rooms.len());
 
@@ -96,6 +108,8 @@ impl DeviceRegistry {
         *current = restored;
     }
 
+    /// Bulk-load groups from the database at startup, silently pruning any
+    /// members whose device no longer exists (e.g. removed while offline).
     pub fn restore_groups(&self, groups: Vec<DeviceGroup>) {
         let devices = read_guard(&self.devices);
         let mut restored = HashMap::with_capacity(groups.len());
@@ -120,6 +134,8 @@ impl DeviceRegistry {
         *current = restored;
     }
 
+    /// Delete a device and automatically remove it from any groups it belonged to.
+    /// Returns `false` if the device was not found.
     pub async fn remove(&self, id: &DeviceId) -> bool {
         let removed = {
             let mut devices = write_guard(&self.devices);
@@ -240,6 +256,7 @@ impl DeviceRegistry {
         rooms.values().cloned().collect()
     }
 
+    /// Return all devices currently assigned to `room_id`.
     pub fn list_devices_in_room(&self, room_id: &RoomId) -> Vec<Device> {
         let devices = read_guard(&self.devices);
         devices
@@ -292,6 +309,7 @@ impl DeviceRegistry {
         groups.values().cloned().collect()
     }
 
+    /// Return all devices that are members of `group_id`, in member order.
     pub fn list_devices_in_group(&self, group_id: &GroupId) -> Vec<Device> {
         let members = {
             let groups = read_guard(&self.groups);
@@ -308,6 +326,8 @@ impl DeviceRegistry {
             .collect()
     }
 
+    /// Replace the complete member list for a group and publish
+    /// `GroupMembersChanged`.  Deduplicates the incoming list preserving order.
     pub async fn set_group_members(
         &self,
         group_id: &GroupId,
@@ -352,6 +372,8 @@ impl DeviceRegistry {
         Ok(true)
     }
 
+    /// Move a device to a different room, or clear its room assignment by
+    /// passing `None`.  Publishes `DeviceRoomChanged` when the assignment changes.
     pub async fn assign_device_to_room(
         &self,
         device_id: &DeviceId,

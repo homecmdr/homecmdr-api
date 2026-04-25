@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+/// HTTP server configuration (bind address, CORS, rate limits).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     #[serde(default = "default_api_bind_address")]
@@ -25,6 +26,8 @@ pub struct RateLimitConfig {
     pub burst_size: u64,
 }
 
+/// CORS config — required when the front-end is served from a different origin
+/// (e.g. a Vite dev server on port 5173 hitting the API on port 3001).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApiCorsConfig {
     pub enabled: bool,

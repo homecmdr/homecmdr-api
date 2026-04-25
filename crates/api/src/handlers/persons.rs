@@ -31,6 +31,8 @@ use crate::state::AppState;
 
 // ── Person read endpoints ─────────────────────────────────────────────────────
 
+/// Returns all persons currently in the registry.
+/// Returns 503 when persistence is disabled (the registry is not available).
 pub async fn list_persons(State(state): State<AppState>) -> Result<Json<Vec<Person>>, ApiError> {
     let registry = state
         .person_registry
@@ -39,6 +41,7 @@ pub async fn list_persons(State(state): State<AppState>) -> Result<Json<Vec<Pers
     Ok(Json(registry.list_persons().await))
 }
 
+/// Returns a single person by ID, or 404 if they do not exist.
 pub async fn get_person(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -54,6 +57,8 @@ pub async fn get_person(
         .ok_or_else(|| ApiError::not_found(format!("person '{id}' not found")))
 }
 
+/// Returns paginated location-state history for a person.
+/// Supports optional `start`, `end`, and `limit` query parameters.
 pub async fn get_person_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -85,6 +90,8 @@ pub async fn get_person_history(
 
 // ── Person write endpoints ────────────────────────────────────────────────────
 
+/// Creates a new person in the registry.
+/// The `id` field must be a stable slug-style identifier (e.g. `"alice"`).
 pub async fn create_person(
     State(state): State<AppState>,
     Json(req): Json<CreatePersonRequest>,
@@ -114,6 +121,9 @@ pub async fn create_person(
     Ok(Json(person))
 }
 
+/// Updates a person's display name and/or profile picture.
+/// Fields that are omitted in the request body are left unchanged.
+/// Returns 404 if the person does not exist.
 pub async fn update_person(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -147,6 +157,8 @@ pub async fn update_person(
     Ok(Json(person))
 }
 
+/// Permanently removes a person and all their tracker links.
+/// Returns 204 No Content on success, or 404 if not found.
 pub async fn delete_person(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -168,6 +180,10 @@ pub async fn delete_person(
     }
 }
 
+/// Links a tracker device to a person.
+///
+/// The tracker device ID is added to the person's `trackers` list.  Duplicate
+/// links are silently ignored.  Returns the updated person.
 pub async fn link_tracker(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -200,6 +216,8 @@ pub async fn link_tracker(
         .ok_or_else(|| ApiError::not_found(format!("person '{id}' not found")))
 }
 
+/// Removes a tracker device link from a person.
+/// Returns the updated person.  Returns 404 if the person does not exist.
 pub async fn unlink_tracker(
     State(state): State<AppState>,
     Path((id, device_id)): Path<(String, String)>,
@@ -231,6 +249,7 @@ pub async fn unlink_tracker(
 
 // ── Zone read endpoints ───────────────────────────────────────────────────────
 
+/// Returns all zones in the registry (including the auto-managed `home` zone).
 pub async fn list_zones(State(state): State<AppState>) -> Result<Json<Vec<Zone>>, ApiError> {
     let registry = state
         .person_registry
@@ -239,6 +258,7 @@ pub async fn list_zones(State(state): State<AppState>) -> Result<Json<Vec<Zone>>
     Ok(Json(registry.list_zones().await))
 }
 
+/// Returns a single zone by ID, or 404 if it does not exist.
 pub async fn get_zone(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -256,6 +276,8 @@ pub async fn get_zone(
 
 // ── Zone write endpoints ──────────────────────────────────────────────────────
 
+/// Creates a new zone.
+/// The `home` zone ID is reserved and cannot be created via this endpoint.
 pub async fn create_zone(
     State(state): State<AppState>,
     Json(req): Json<CreateZoneRequest>,
@@ -290,6 +312,8 @@ pub async fn create_zone(
     Ok(Json(zone))
 }
 
+/// Updates a zone's fields.  Only fields included in the request body are changed.
+/// Returns the updated zone, or 404 if the zone does not exist.
 pub async fn update_zone(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -332,6 +356,8 @@ pub async fn update_zone(
     Ok(Json(zone))
 }
 
+/// Permanently removes a zone.
+/// Returns 204 No Content on success, or 404 if not found.
 pub async fn delete_zone(
     State(state): State<AppState>,
     Path(id): Path<String>,

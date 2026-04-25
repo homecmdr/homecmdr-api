@@ -1,3 +1,5 @@
+//! The scene catalog: loads and indexes every `.lua` scene file in a directory.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,17 +11,25 @@ use homecmdr_lua_host::DEFAULT_MAX_INSTRUCTIONS;
 use crate::loader::{execute_scene_inline, load_scene_file};
 use crate::types::{ReloadError, Scene, SceneExecutionResult, SceneSummary};
 
+/// An in-memory index of all scenes loaded from a directory.
+///
+/// Created once at startup (or on hot-reload) and then cheaply cloned
+/// into `SceneRunner` via `Arc`.
 #[derive(Debug, Clone, Default)]
 pub struct SceneCatalog {
     pub(crate) scenes: HashMap<String, Scene>,
+    /// Optional root directory for shared Lua `require()` modules.
     pub(crate) scripts_root: Option<PathBuf>,
 }
 
 impl SceneCatalog {
+    /// Returns an empty catalog (no scenes loaded).
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Loads all `.lua` files from `path` and returns a populated catalog.
+    /// Fails fast on the first error (parse, missing fields, duplicate id, …).
     pub fn load_from_directory(
         path: impl AsRef<std::path::Path>,
         scripts_root: Option<PathBuf>,
@@ -55,6 +65,9 @@ impl SceneCatalog {
         })
     }
 
+    /// Like `load_from_directory` but designed for hot-reload: collects *all*
+    /// errors instead of stopping at the first one, so the caller can report
+    /// every broken file at once.  Returns `Err(errors)` if anything failed.
     pub fn reload_from_directory(
         path: impl AsRef<std::path::Path>,
         scripts_root: Option<PathBuf>,
@@ -147,6 +160,7 @@ impl SceneCatalog {
         })
     }
 
+    /// Returns a sorted list of scene summaries — used by the HTTP list endpoint.
     pub fn summaries(&self) -> Vec<SceneSummary> {
         let mut scenes = self
             .scenes

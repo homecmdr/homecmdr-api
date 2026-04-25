@@ -1,3 +1,8 @@
+//! Low-level Lua scene loading and execution helpers.
+//!
+//! These functions are called by both `SceneCatalog` (at load/reload time)
+//! and `SceneRunner` (when a scene is actually run).
+
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -13,6 +18,9 @@ use mlua::{Function, Lua};
 
 use crate::types::{Scene, SceneExecutionResult, SceneSummary};
 
+/// Reads a `.lua` file, evaluates it, and extracts the scene metadata
+/// (`id`, `name`, `description`, `mode`, `execute`).
+/// Does *not* run the `execute` function — that happens in `execute_scene_inline`.
 pub fn load_scene_file(path: &Path, scripts_root: Option<&Path>) -> Result<Scene> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read scene file {}", path.display()))?;
@@ -73,6 +81,9 @@ pub fn load_scene_file(path: &Path, scripts_root: Option<&Path>) -> Result<Scene
     })
 }
 
+/// Re-reads the scene file from disk and calls its `execute` function.
+/// `cancel` is an `AtomicBool` that the Lua host checks between instructions —
+/// setting it to `true` aborts the run early (used by Restart mode).
 pub fn execute_scene_inline(
     scene: &Scene,
     runtime: Arc<Runtime>,
@@ -109,6 +120,8 @@ pub fn execute_scene_inline(
         .collect())
 }
 
+/// Evaluates (but does not execute) a scene's Lua module and returns the
+/// resulting table so callers can inspect fields before committing.
 pub fn evaluate_scene_module(
     lua: &Lua,
     source: &str,
@@ -120,6 +133,8 @@ pub fn evaluate_scene_module(
     })
 }
 
+/// Converts a generic `CommandExecutionResult` (from lua-host) into the
+/// scene-specific `SceneExecutionResult`.
 fn scene_result_from_command_result(result: CommandExecutionResult) -> SceneExecutionResult {
     SceneExecutionResult {
         target: result.target,

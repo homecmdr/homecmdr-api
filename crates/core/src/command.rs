@@ -5,6 +5,8 @@ use crate::capability::{action_requires_value, capability_definition};
 use crate::model::AttributeValue;
 use crate::validation::validate_capability_attribute_value;
 
+// A command to send to a device: which capability to act on, what action to
+// perform, and an optional value (e.g. brightness 75 for a "set" action).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceCommand {
     pub capability: String,
@@ -22,6 +24,9 @@ pub struct DeviceCommand {
 }
 
 impl DeviceCommand {
+    /// Check that the capability exists, the action is allowed for it, and the
+    /// value (if any) matches the expected schema.  Returns an error with a
+    /// human-readable message if anything is wrong.
     pub fn validate(&self) -> Result<()> {
         let capability = capability_definition(&self.capability)
             .with_context(|| format!("unknown capability '{}'", self.capability))?;

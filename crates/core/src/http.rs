@@ -3,11 +3,16 @@ use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use std::time::Duration;
 use tokio::time::sleep;
 
+// Shared HTTP settings for all outbound requests (weather APIs, webhooks, etc.).
+// Keep these conservative — we don't want a slow external service to stall the
+// whole server.
 pub const EXTERNAL_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EXTERNAL_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const EXTERNAL_HTTP_MAX_ATTEMPTS: usize = 3;
 pub const EXTERNAL_HTTP_RETRY_DELAY: Duration = Duration::from_millis(250);
 
+/// Build a reqwest Client pre-configured with the shared timeout settings
+/// defined above.  Call this once and reuse the client across requests.
 pub fn external_http_client() -> Result<Client> {
     Client::builder()
         .timeout(EXTERNAL_HTTP_REQUEST_TIMEOUT)
@@ -16,6 +21,9 @@ pub fn external_http_client() -> Result<Client> {
         .context("failed to build external HTTP client")
 }
 
+/// Send `request`, retrying up to `MAX_ATTEMPTS` times on transient errors or
+/// retryable HTTP status codes (429, 5xx, timeout).  Returns the first
+/// successful response, or an error after all attempts are exhausted.
 pub async fn send_with_retry(request: RequestBuilder, operation: &str) -> Result<Response> {
     for attempt in 1..=EXTERNAL_HTTP_MAX_ATTEMPTS {
         let Some(request) = request.try_clone() else {
@@ -64,12 +72,16 @@ pub async fn send_with_retry(request: RequestBuilder, operation: &str) -> Result
     unreachable!("external HTTP retry loop always returns before exhausting attempts")
 }
 
+// Return true for status codes that indicate a temporary server-side problem
+// worth retrying: request timeout (408), rate-limited (429), or any 5xx.
 fn is_retryable_status(status: StatusCode) -> bool {
     status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
 }
 
+// Return true for network-level errors (connection refused, TCP timeout) that
+// are worth retrying rather than failing immediately.
 fn is_retryable_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect()
 }

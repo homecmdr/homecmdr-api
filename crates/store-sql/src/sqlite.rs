@@ -1,3 +1,14 @@
+//! SQLite-backed implementation of the HomeCmdr persistence stores.
+//!
+//! All schema is declared as `const &str` SQL below and applied on startup
+//! via `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.  There are
+//! no migration files — evolutionary changes require manual `ALTER TABLE`.
+//!
+//! `SqliteDeviceStore` implements three core traits:
+//! - `DeviceStore`  — devices, rooms, groups, command audit, history
+//! - `ApiKeyStore`  — API key CRUD and lookup
+//! - `PersonStore`  — persons, trackers, zones, person history
+
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -16,6 +27,8 @@ use homecmdr_core::store::{
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
+
+// ── Schema SQL ────────────────────────────────────────────────────────────────
 
 const CREATE_SCHEMA_METADATA_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_metadata (
@@ -233,6 +246,9 @@ CREATE INDEX IF NOT EXISTS idx_person_history_person_time
 ON person_history(person_id, recorded_at DESC)
 "#;
 
+// ── History config ────────────────────────────────────────────────────────────
+
+/// Controls whether history recording is active and for how long rows are kept.
 #[derive(Debug, Clone)]
 pub struct SqliteHistoryConfig {
     pub enabled: bool,
@@ -250,6 +266,10 @@ impl Default for SqliteHistoryConfig {
     }
 }
 
+// ── Store struct ──────────────────────────────────────────────────────────────
+
+/// The main SQLite store — holds a connection pool and the history config.
+/// Cheaply cloneable (the pool is `Arc`-backed internally by sqlx).
 #[derive(Clone)]
 pub struct SqliteDeviceStore {
     pool: SqlitePool,
@@ -669,6 +689,8 @@ impl SqliteDeviceStore {
         hf::should_record_automation_execution(&self.history.selection, entry)
     }
 }
+
+// ── DeviceStore impl ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
 impl DeviceStore for SqliteDeviceStore {
@@ -1164,6 +1186,8 @@ impl DeviceStore for SqliteDeviceStore {
     }
 }
 
+// ── ApiKeyStore impl ──────────────────────────────────────────────────────────
+
 #[async_trait::async_trait]
 impl ApiKeyStore for SqliteDeviceStore {
     async fn create_api_key(
@@ -1545,9 +1569,7 @@ fn api_key_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ApiKeyRecord> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// PersonStore impl for SqliteDeviceStore
-// ---------------------------------------------------------------------------
+// ── PersonStore impl ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
 impl PersonStore for SqliteDeviceStore {
@@ -1784,9 +1806,7 @@ impl PersonStore for SqliteDeviceStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Row conversion helpers for person/zone/person_history
-// ---------------------------------------------------------------------------
+// ── Row conversion helpers ────────────────────────────────────────────────────
 
 impl SqliteDeviceStore {
     async fn load_person_trackers_inner(&self, person_id: &PersonId) -> Result<Vec<DeviceId>> {

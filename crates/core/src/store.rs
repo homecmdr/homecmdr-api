@@ -7,12 +7,16 @@ use crate::model::{
     ZoneId,
 };
 
+// ── History entry types ────────────────────────────────────────────────────────
+
+/// A full snapshot of a device's state at a point in time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceHistoryEntry {
     pub observed_at: DateTime<Utc>,
     pub device: Device,
 }
 
+/// The value of a single attribute on a device at a point in time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttributeHistoryEntry {
     pub observed_at: DateTime<Utc>,
@@ -21,6 +25,8 @@ pub struct AttributeHistoryEntry {
     pub value: AttributeValue,
 }
 
+/// A record of a command that was dispatched to a device, including its
+/// outcome (success / error) and optional message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandAuditEntry {
     pub recorded_at: DateTime<Utc>,
@@ -32,6 +38,7 @@ pub struct CommandAuditEntry {
     pub message: Option<String>,
 }
 
+/// The outcome of a single step within a scene run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SceneStepResult {
     pub target: String,
@@ -39,6 +46,7 @@ pub struct SceneStepResult {
     pub message: Option<String>,
 }
 
+/// The full result of running a scene once.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneExecutionHistoryEntry {
     pub executed_at: DateTime<Utc>,
@@ -48,6 +56,8 @@ pub struct SceneExecutionHistoryEntry {
     pub results: Vec<SceneStepResult>,
 }
 
+/// The full result of a single automation execution, including what triggered
+/// it, how long it took, and the outcome of each command it issued.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutomationExecutionHistoryEntry {
     pub executed_at: DateTime<Utc>,
@@ -59,6 +69,8 @@ pub struct AutomationExecutionHistoryEntry {
     pub results: Vec<SceneStepResult>,
 }
 
+/// Persisted state that helps automations avoid re-firing for an event they
+/// already handled (debouncing via fingerprint matching and cooldown tracking).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutomationRuntimeState {
     pub updated_at: DateTime<Utc>,
@@ -68,6 +80,10 @@ pub struct AutomationRuntimeState {
     pub last_scheduled_at: Option<DateTime<Utc>>,
 }
 
+// ── DeviceStore ────────────────────────────────────────────────────────────────
+
+/// Async trait for persisting devices, rooms, groups, and all associated
+/// history.  Implemented by `SqliteDeviceStore` and `PostgresDeviceStore`.
 #[async_trait::async_trait]
 pub trait DeviceStore: Send + Sync + 'static {
     async fn load_all_devices(&self) -> anyhow::Result<Vec<Device>>;
@@ -135,6 +151,10 @@ pub trait DeviceStore: Send + Sync + 'static {
     async fn prune_history(&self) -> anyhow::Result<()>;
 }
 
+// ── API key types ──────────────────────────────────────────────────────────────
+
+/// Access level granted to an API key.  Roles are hierarchical:
+/// `Read ⊂ Write ⊂ Automation ⊂ Admin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiKeyRole {
@@ -145,7 +165,7 @@ pub enum ApiKeyRole {
 }
 
 impl ApiKeyRole {
-    /// Returns true when `self` grants at least the privileges of `required`.
+    /// Return true when `self` grants at least the privileges of `required`.
     pub fn satisfies(self, required: ApiKeyRole) -> bool {
         use ApiKeyRole::*;
         match required {
@@ -157,6 +177,7 @@ impl ApiKeyRole {
     }
 }
 
+/// A stored API key with its metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
     pub id: i64,
@@ -171,6 +192,7 @@ pub struct ApiKeyRecord {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
+/// Async trait for creating, listing, revoking, and looking up API keys.
 #[async_trait::async_trait]
 pub trait ApiKeyStore: Send + Sync + 'static {
     async fn create_api_key(
@@ -216,6 +238,7 @@ pub struct PersonHistoryEntry {
 // PersonStore trait
 // ---------------------------------------------------------------------------
 
+/// Async trait for persisting persons, zones, and person location history.
 #[async_trait::async_trait]
 pub trait PersonStore: Send + Sync + 'static {
     // --- persons ---

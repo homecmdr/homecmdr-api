@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+/// Settings for the scene catalog (directory, hot-reload).
 #[derive(Debug, Deserialize)]
 pub struct ScenesConfig {
     pub enabled: bool,
@@ -8,6 +9,7 @@ pub struct ScenesConfig {
     pub watch: bool,
 }
 
+/// Settings for the automation catalog (directory, hot-reload, runner limits).
 #[derive(Debug, Deserialize)]
 pub struct AutomationsConfig {
     pub enabled: bool,
@@ -32,6 +34,7 @@ pub struct AutomationRunnerConfig {
     pub backstop_timeout_secs: u64,
 }
 
+/// Settings for the persistent Lua scripts catalog (directory, hot-reload).
 #[derive(Debug, Deserialize)]
 pub struct ScriptsConfig {
     pub enabled: bool,

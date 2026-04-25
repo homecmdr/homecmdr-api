@@ -12,11 +12,14 @@ use crate::invoke::{InvokeRequest, InvokeResponse};
 use crate::model::DeviceId;
 use crate::registry::DeviceRegistry;
 
+/// Config knobs forwarded from `[runtime]` in the TOML config.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct RuntimeConfig {
     pub event_bus_capacity: usize,
 }
 
+/// Top-level object that owns all adapters and coordinates commands sent from
+/// the HTTP layer, scenes, and automations.  Clone-safe via Arc internals.
 pub struct Runtime {
     adapters: Vec<Arc<dyn Adapter>>,
     bus: EventBus,
@@ -50,6 +53,7 @@ impl Runtime {
         self
     }
 
+    /// Start all adapters and block until Ctrl-C is received.
     pub async fn run(&self) {
         self.run_until(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -65,6 +69,10 @@ impl Runtime {
         &self.bus
     }
 
+    /// Send a command to a device.  Routes to the matching in-process adapter,
+    /// or for IPC adapters publishes a `DeviceCommandDispatched` event so the
+    /// external process can pick it up.  Returns `false` if the device ID has
+    /// no `:` separator; returns an error if no matching adapter is registered.
     pub async fn command_device(
         &self,
         id: &DeviceId,
@@ -98,6 +106,8 @@ impl Runtime {
         anyhow::bail!("no adapter registered for '{adapter_name}'")
     }
 
+    /// Call an adapter-specific function and return its result.
+    /// Returns `None` if the target adapter is not registered in-process.
     pub async fn invoke(&self, request: InvokeRequest) -> anyhow::Result<Option<InvokeResponse>> {
         let Some((adapter_name, _)) = request.target.split_once(':') else {
             return Ok(None);
@@ -114,6 +124,7 @@ impl Runtime {
         adapter.invoke(request, self.registry.clone()).await
     }
 
+    /// Run all adapters concurrently until `shutdown` resolves, then abort them.
     pub(crate) async fn run_until<F>(&self, shutdown: F)
     where
         F: std::future::Future<Output = ()>,

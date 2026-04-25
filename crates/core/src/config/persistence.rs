@@ -1,18 +1,23 @@
 use serde::Deserialize;
 
+/// Database persistence settings.
 #[derive(Debug, Deserialize)]
 pub struct PersistenceConfig {
     pub enabled: bool,
     pub backend: PersistenceBackend,
     pub database_url: Option<String>,
+    /// When `true`, `CREATE TABLE IF NOT EXISTS` is run on every startup
+    /// so the schema is always in sync without a separate migration step.
     pub auto_create: bool,
     #[serde(default)]
     pub history: HistoryConfig,
 }
 
+/// Controls how much device-state history is stored.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HistoryConfig {
     pub enabled: bool,
+    /// How many days of history to keep before pruning.  `None` means keep forever.
     pub retention_days: Option<u64>,
     #[serde(default = "default_history_query_limit")]
     pub default_query_limit: usize,
@@ -20,6 +25,7 @@ pub struct HistoryConfig {
     pub max_query_limit: usize,
 }
 
+/// Which database backend to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceBackend {

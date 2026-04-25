@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::model::AttributeValue;
 
+/// Describes what Rust/JSON type a capability attribute value must conform to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilitySchema {
     Measurement,
@@ -20,6 +21,9 @@ pub enum CapabilitySchema {
     Enum(&'static [&'static str]),
 }
 
+/// Full metadata for one capability key: which domain it belongs to, what
+/// type its value must be, whether it is read-only, which actions can change
+/// it, and a short human-readable description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityDefinition {
     pub domain: &'static str,
@@ -30,6 +34,8 @@ pub struct CapabilityDefinition {
     pub description: &'static str,
 }
 
+/// Rules that govern where adapter data should be placed:
+/// canonical attribute keys, `custom.*` keys, or `metadata.vendor_specific`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityOwnershipPolicy {
     pub canonical_attribute_location: &'static str,
@@ -37,6 +43,9 @@ pub struct CapabilityOwnershipPolicy {
     pub vendor_metadata_field: &'static str,
     pub rules: &'static [&'static str],
 }
+
+// ── Canonical capability key strings ─────────────────────────────────────────
+// Use these constants instead of raw string literals everywhere in the codebase.
 
 pub const TEMPERATURE_OUTDOOR: &str = "temperature_outdoor";
 pub const TEMPERATURE_APPARENT: &str = "temperature_apparent";
@@ -752,6 +761,8 @@ pub fn light_capability(key: &str) -> Option<&'static CapabilityDefinition> {
         .find(|capability| capability.key == key)
 }
 
+/// Look up the full CapabilityDefinition for any canonical capability key,
+/// searching across all domains.  Returns `None` for unknown or custom keys.
 pub fn capability_definition(key: &str) -> Option<&'static CapabilityDefinition> {
     ALL_CAPABILITIES
         .iter()
@@ -759,6 +770,8 @@ pub fn capability_definition(key: &str) -> Option<&'static CapabilityDefinition>
         .find(|capability| capability.key == key)
 }
 
+/// Return `true` if `key` is a valid `custom.<adapter>.<field>` key.
+/// Requires at least two non-empty lowercase/digit/underscore segments after the prefix.
 pub fn is_custom_attribute_key(key: &str) -> bool {
     let Some(suffix) = key.strip_prefix(CUSTOM_ATTRIBUTE_PREFIX) else {
         return false;
@@ -777,10 +790,13 @@ pub fn is_custom_attribute_key(key: &str) -> bool {
     })
 }
 
+/// Return `true` for action names that require a `value` payload in the command
+/// (set, increase, decrease).
 pub fn action_requires_value(action: &str) -> bool {
     matches!(action, "set" | "increase" | "decrease")
 }
 
+/// Build a `Measurement` AttributeValue: `{ value: <f64>, unit: <string> }`.
 pub fn measurement_value(value: f64, unit: &str) -> AttributeValue {
     let mut fields = HashMap::new();
     fields.insert("value".to_string(), AttributeValue::Float(value));
@@ -788,6 +804,7 @@ pub fn measurement_value(value: f64, unit: &str) -> AttributeValue {
     AttributeValue::Object(fields)
 }
 
+/// Build an `Accumulation` AttributeValue: `{ value: <f64>, unit: <string>, period: <string> }`.
 pub fn accumulation_value(value: f64, unit: &str, period: &str) -> AttributeValue {
     let mut fields = HashMap::new();
     fields.insert("value".to_string(), AttributeValue::Float(value));

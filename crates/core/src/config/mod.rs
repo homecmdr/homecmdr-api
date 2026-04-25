@@ -17,6 +17,10 @@ use serde::Deserialize;
 
 use crate::runtime::RuntimeConfig;
 
+/// Root configuration struct — deserialised from a TOML file at startup.
+///
+/// Each section maps to one of the sub-modules in this directory.  Unknown keys
+/// in the TOML file are silently ignored.
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub runtime: RuntimeConfig,
@@ -43,9 +47,11 @@ pub struct Config {
     pub plugins: PluginsConfig,
 }
 
+// Each adapter has its own freeform JSON config block under `[adapters.<name>]`.
 pub type AdapterConfig = serde_json::Value;
 pub type AdaptersConfig = HashMap<String, AdapterConfig>;
 
+/// Controls the `tracing` log filter level (e.g. `"info"`, `"debug"`).
 #[derive(Debug, Deserialize)]
 pub struct LoggingConfig {
     pub level: String,

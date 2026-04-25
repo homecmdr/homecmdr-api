@@ -12,10 +12,12 @@ pub struct HistorySelection {
 
 // ── Top-level record-or-skip predicates ───────────────────────────────────────
 
+/// Return true if this device's full state snapshot should be persisted to history.
 pub fn should_record_device(sel: &HistorySelection, device: &Device) -> bool {
     selection_allows_device(sel, &device.id.0, &device.metadata.source)
 }
 
+/// Return true if a single attribute change on this device should be logged.
 pub fn should_record_attribute(
     sel: &HistorySelection,
     device: &Device,
@@ -25,6 +27,7 @@ pub fn should_record_attribute(
         && selection_allows_capability(sel, attribute)
 }
 
+/// Return true if this command entry should be written to the audit log.
 pub fn should_record_command_audit(sel: &HistorySelection, entry: &CommandAuditEntry) -> bool {
     selection_allows_device(
         sel,
@@ -33,6 +36,7 @@ pub fn should_record_command_audit(sel: &HistorySelection, entry: &CommandAuditE
     ) && selection_allows_capability(sel, &entry.command.capability)
 }
 
+/// Return true if this scene run should be stored in history.
 pub fn should_record_scene_execution(
     sel: &HistorySelection,
     entry: &SceneExecutionHistoryEntry,
@@ -47,6 +51,7 @@ pub fn should_record_scene_execution(
         .any(|result| selection_allows_device(sel, &result.target, device_adapter_name(&result.target)))
 }
 
+/// Return true if this automation run should be stored in history.
 pub fn should_record_automation_execution(
     sel: &HistorySelection,
     entry: &AutomationExecutionHistoryEntry,
@@ -66,6 +71,8 @@ pub fn should_record_automation_execution(
 
 // ── Primitive allow-checks ────────────────────────────────────────────────────
 
+/// Return true if the selection filter permits this device ID and adapter name.
+/// An empty list in the selection means "allow all".
 pub fn selection_allows_device(
     sel: &HistorySelection,
     device_id: &str,
@@ -79,11 +86,15 @@ pub fn selection_allows_device(
     device_match && adapter_match
 }
 
+/// Return true if the selection filter permits this capability key.
 pub fn selection_allows_capability(sel: &HistorySelection, capability: &str) -> bool {
     sel.capabilities.is_empty()
         || sel.capabilities.iter().any(|c| c == capability)
 }
 
+/// Return true if the trigger payload's embedded device/attribute passes the
+/// selection filter.  Automations without a device-based trigger always pass
+/// when no device or adapter filter is configured.
 pub fn selection_allows_trigger_payload(
     sel: &HistorySelection,
     payload: &AttributeValue,

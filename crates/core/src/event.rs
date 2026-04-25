@@ -6,30 +6,44 @@ use crate::model::{
     RoomId, Zone, ZoneId,
 };
 
+// Carries a filename and a human-readable message for a file that failed to
+// load during a hot-reload cycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadError {
     pub file: String,
     pub message: String,
 }
 
+// Every meaningful state change in the system is published as one of these
+// variants on the EventBus.  Automations, the SSE stream, the persistence
+// workers, and the Lua runtime all subscribe and react to these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    // ── Device lifecycle ────────────────────────────────────────────────────
+
+    /// Fired when a device's attributes, kind, or metadata changes.
     DeviceStateChanged {
         id: DeviceId,
         attributes: Attributes,
         previous_attributes: Attributes,
     },
+    /// Fired the first time a device is seen (new registration).
     DeviceAdded {
         device: Device,
     },
+    /// Fired when a device is deleted from the registry.
     DeviceRemoved {
         id: DeviceId,
     },
+    /// Fired when a device reports a heartbeat without changing its attributes.
     DeviceSeen {
         id: DeviceId,
         last_seen: chrono::DateTime<chrono::Utc>,
     },
+
+    // ── Room lifecycle ───────────────────────────────────────────────────────
+
     RoomAdded {
         room: Room,
     },
@@ -39,6 +53,9 @@ pub enum Event {
     RoomRemoved {
         id: RoomId,
     },
+
+    // ── Group lifecycle ──────────────────────────────────────────────────────
+
     GroupAdded {
         group: DeviceGroup,
     },
@@ -48,14 +65,17 @@ pub enum Event {
     GroupRemoved {
         id: GroupId,
     },
+    /// Fired whenever the ordered member list of a group changes.
     GroupMembersChanged {
         id: GroupId,
         members: Vec<DeviceId>,
     },
+    /// Fired when a device is moved to a different room (or unassigned).
     DeviceRoomChanged {
         id: DeviceId,
         room_id: Option<RoomId>,
     },
+    /// Fired once an adapter finishes its startup routine.
     AdapterStarted {
         adapter: String,
     },
@@ -66,6 +86,9 @@ pub enum Event {
         id: DeviceId,
         command: DeviceCommand,
     },
+
+    // ── Catalog / hot-reload lifecycle ──────────────────────────────────────
+
     SceneCatalogReloadStarted,
     SceneCatalogReloaded {
         loaded_count: usize,
@@ -101,6 +124,7 @@ pub enum Event {
         duration_ms: u64,
         errors: Vec<ReloadError>,
     },
+    /// Fired when an adapter or background task exits with an unrecoverable error.
     SystemError {
         message: String,
     },

@@ -5,10 +5,15 @@ use anyhow::Result;
 use crate::capability::{capability_definition, is_custom_attribute_key, CapabilitySchema};
 use crate::model::{AttributeValue, Device};
 
+/// Top-level validation gate called before any device is written to the
+/// registry.  Checks that every attribute on the device either matches a
+/// canonical capability schema or is a valid `custom.<adapter>.<field>` key.
 pub fn validate_device(device: &Device) -> Result<()> {
     validate_attributes(device)
 }
 
+/// Check that `value` matches the shape declared by `schema`.
+/// Returns `Ok(())` on success or a static error message on failure.
 pub fn validate_capability_attribute_value(
     schema: CapabilitySchema,
     value: &AttributeValue,

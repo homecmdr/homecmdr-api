@@ -12,6 +12,7 @@ use crate::types::{Scene, SceneExecutionResult, SceneRunOutcome};
 
 // ── per-scene concurrency tracking ───────────────────────────────────────────
 
+/// Per-scene bookkeeping used to enforce execution modes.
 #[derive(Debug, Default)]
 struct PerSceneConcurrency {
     active: usize,
@@ -21,6 +22,7 @@ struct PerSceneConcurrency {
     queue: VecDeque<PendingScene>,
 }
 
+/// A scene invocation that is waiting in the queue (Queued mode).
 struct PendingScene {
     runtime: Arc<Runtime>,
 }
@@ -33,9 +35,13 @@ impl std::fmt::Debug for PendingScene {
 
 type SceneConcurrencyMap = Arc<std::sync::Mutex<HashMap<String, PerSceneConcurrency>>>;
 
+/// What the dispatcher decided to do with an incoming execute request.
 enum SceneDispatch {
+    /// Go ahead and run; use this cancel token to abort early if needed.
     Run { cancel: Arc<AtomicBool> },
+    /// The scene is busy and its mode says to silently discard the request.
     Drop,
+    /// The scene is busy but the request was accepted into the back-log.
     Queued,
 }
 
@@ -49,6 +55,7 @@ pub struct SceneRunner {
 }
 
 impl SceneRunner {
+    /// Wraps a catalog and creates empty per-scene concurrency state.
     pub fn new(catalog: SceneCatalog) -> Self {
         Self {
             catalog: Arc::new(catalog),
@@ -56,6 +63,8 @@ impl SceneRunner {
         }
     }
 
+    /// Runs scene `id` against `runtime`, respecting its execution mode.
+    /// Returns `SceneRunOutcome::NotFound` if the id is unknown.
     pub async fn execute(&self, id: &str, runtime: Arc<Runtime>) -> Result<SceneRunOutcome> {
         let scene = match self.catalog.scenes.get(id) {
             Some(s) => s.clone(),
@@ -91,6 +100,8 @@ impl SceneRunner {
     }
 }
 
+/// Looks at the scene's `ExecutionMode` and the current concurrency state to
+/// decide whether to run, drop, or queue the incoming invocation.
 fn decide_scene_dispatch(
     scene: &Scene,
     state: &mut PerSceneConcurrency,
@@ -142,6 +153,8 @@ fn decide_scene_dispatch(
     }
 }
 
+/// Runs a scene on the tokio thread pool, then decrements the active counter
+/// and kicks off the next queued invocation (if any).
 async fn run_and_finalize(
     scene: Scene,
     runtime: Arc<Runtime>,

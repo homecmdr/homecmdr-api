@@ -1,3 +1,15 @@
+//! PostgreSQL-backed implementation of the HomeCmdr persistence stores.
+//!
+//! Mirrors `store-sql/sqlite.rs` but uses `sqlx::PgPool`, native `JSONB`
+//! columns for attributes/metadata, and `TIMESTAMPTZ` for timestamps.
+//! Schema is applied on startup via `CREATE TABLE IF NOT EXISTS` — no
+//! migration files exist.
+//!
+//! `PostgresDeviceStore` implements:
+//! - `DeviceStore`  — devices, rooms, groups, command audit, history
+//! - `ApiKeyStore`  — API key CRUD and lookup
+//! - `PersonStore`  — persons, trackers, zones, person history
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -235,6 +247,7 @@ const SCHEMA_VERSION_V5: i64 = 5;
 
 // ── History config ─────────────────────────────────────────────────────────────
 
+/// Controls whether history recording is active and for how long rows are kept.
 #[derive(Debug, Clone)]
 pub struct PostgresHistoryConfig {
     pub enabled: bool,
@@ -254,6 +267,8 @@ impl Default for PostgresHistoryConfig {
 
 // ── Store struct ───────────────────────────────────────────────────────────────
 
+/// The main Postgres store — holds a connection pool and the history config.
+/// Cheaply cloneable (the pool is `Arc`-backed internally by sqlx).
 #[derive(Clone)]
 pub struct PostgresDeviceStore {
     pool: PgPool,

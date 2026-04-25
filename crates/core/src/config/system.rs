@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+/// Location and timezone settings used for presence detection and scheduling.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocaleConfig {
     #[serde(default = "default_timezone")]
@@ -11,6 +12,7 @@ pub struct LocaleConfig {
     pub home_zone_radius_meters: f64,
 }
 
+/// Controls which device/attribute changes are forwarded to the telemetry sink.
 #[derive(Debug, Default, Deserialize)]
 pub struct TelemetryConfig {
     pub enabled: bool,
@@ -18,6 +20,8 @@ pub struct TelemetryConfig {
     pub selection: TelemetrySelectionConfig,
 }
 
+/// Filters which devices, capabilities, and adapters contribute telemetry.
+/// Empty lists mean "forward everything".
 #[derive(Debug, Default, Deserialize)]
 pub struct TelemetrySelectionConfig {
     #[serde(default)]
@@ -28,6 +32,8 @@ pub struct TelemetrySelectionConfig {
     pub adapter_names: Vec<String>,
 }
 
+/// Bearer-token authentication settings.
+/// The master key is SHA-256-hashed internally; never log or expose it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
     #[serde(default = "default_master_key")]
