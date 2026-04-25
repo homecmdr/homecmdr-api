@@ -5,12 +5,14 @@
 //!
 //! - `GET /adapters` — list all registered adapters with their health status.
 //! - `GET /adapters/{id}` — detailed view of a single adapter.
+//! - `GET /adapters/{id}/devices` — all devices belonging to a single adapter.
 //! - `GET /capabilities` — the full capability catalog: every capability key,
 //!   its value schema, whether it is read-only, and the allowed action names.
 
 use axum::extract::{Path, State};
 use axum::Json;
 use homecmdr_core::capability::{ALL_CAPABILITIES, CAPABILITY_OWNERSHIP};
+use homecmdr_core::model::Device;
 
 use crate::dto::{
     AdapterDetailResponse, AdapterSummary, ApiError, CapabilityCatalogResponse, CapabilityResponse,
@@ -34,6 +36,20 @@ pub async fn get_adapter(
         .adapter_detail(&id)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("adapter '{id}' not found")))
+}
+
+/// Returns all devices that belong to the given adapter.
+///
+/// Devices are matched by the `"{adapter}:"` prefix in their ID.
+/// Returns 404 if no adapter with that name is registered.
+pub async fn list_adapter_devices(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<Device>>, ApiError> {
+    if state.health.adapter_detail(&id).is_none() {
+        return Err(ApiError::not_found(format!("adapter '{id}' not found")));
+    }
+    Ok(Json(state.runtime.registry().list_devices_for_adapter(&id)))
 }
 
 /// Returns every capability definition known to the system, sorted by key.

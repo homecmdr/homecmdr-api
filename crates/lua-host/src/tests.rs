@@ -21,6 +21,8 @@ mod tests {
     use crate::loader::resolve_script_module_path;
     use crate::runtime::{install_execution_hook, DEFAULT_MAX_INSTRUCTIONS};
 
+    // Creates a fresh temporary directory with a unique name for each test.
+    // Using nanoseconds avoids collisions when tests run in parallel.
     fn temp_dir() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -31,6 +33,8 @@ mod tests {
         path
     }
 
+    // Verifies that a dotted module name like "vision.ollama" is correctly
+    // mapped to a nested file path like `<root>/vision/ollama.lua`.
     #[test]
     fn resolves_namespaced_script_module_paths() {
         let root = temp_dir();
@@ -41,6 +45,8 @@ mod tests {
         assert!(resolved.ends_with("vision/ollama.lua"));
     }
 
+    // Checks that a Lua script can read device and room data from the registry
+    // via ctx:get_device, ctx:list_rooms, and ctx:list_room_devices.
     #[tokio::test(flavor = "multi_thread")]
     async fn context_can_read_devices_and_rooms_from_registry() {
         let runtime = Arc::new(Runtime::new(
@@ -119,6 +125,8 @@ mod tests {
         );
     }
 
+    // Makes sure ctx:log doesn't blow up when called with a structured fields
+    // table (which is optional but common in practice).
     #[tokio::test(flavor = "multi_thread")]
     async fn context_log_accepts_structured_fields() {
         let runtime = Arc::new(Runtime::new(
@@ -144,6 +152,8 @@ mod tests {
         .expect("structured log call succeeds");
     }
 
+    // A minimal test adapter that records commands by writing them back into
+    // the device's attributes so tests can inspect what was sent.
     struct AnyTestAdapter;
 
     #[async_trait::async_trait]
@@ -177,6 +187,8 @@ mod tests {
         }
     }
 
+    // Returns a minimal device with a single "power: on" attribute for use
+    // in tests that only care about command dispatch.
     fn bare_device(id: &str) -> Device {
         Device {
             id: DeviceId(id.to_string()),
@@ -196,6 +208,8 @@ mod tests {
         }
     }
 
+    // Verifies that ctx:command_group sends the command to every device in the
+    // group and that all of them report a successful result.
     #[tokio::test(flavor = "multi_thread")]
     async fn command_group_fans_out_to_all_members() {
         let runtime = Arc::new(Runtime::new(
@@ -274,6 +288,8 @@ mod tests {
         }
     }
 
+    // Verifies that ctx:command_group raises a Lua error (and names the group)
+    // when the group id doesn't exist in the registry.
     #[tokio::test(flavor = "multi_thread")]
     async fn command_group_errors_on_missing_group() {
         let runtime = Arc::new(Runtime::new(
@@ -310,6 +326,8 @@ mod tests {
 
     // ── hook / sleep tests ────────────────────────────────────────────────
 
+    // Confirms that ctx:sleep actually pauses execution for roughly the
+    // requested duration without consuming any instruction budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn sleep_pauses_execution_without_consuming_instruction_budget() {
         // Use a very low instruction budget so that if sleep were to count
@@ -341,6 +359,8 @@ mod tests {
         );
     }
 
+    // Checks that a script stuck in an infinite loop is killed once it
+    // exceeds the instruction budget.
     #[test]
     fn compute_limit_fires_on_infinite_loop() {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -356,6 +376,7 @@ mod tests {
         );
     }
 
+    // Checks that a pre-cancelled token immediately stops any running script.
     #[test]
     fn cancellation_token_kills_execution() {
         let cancel = Arc::new(AtomicBool::new(true)); // pre-cancelled
@@ -371,6 +392,7 @@ mod tests {
         );
     }
 
+    // Confirms that ctx:sleep rejects negative durations and values over an hour.
     #[tokio::test(flavor = "multi_thread")]
     async fn sleep_validates_negative_and_over_limit() {
         let runtime = Arc::new(Runtime::new(

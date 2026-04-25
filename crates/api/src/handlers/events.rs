@@ -106,7 +106,7 @@ pub fn event_to_frame(event: Event) -> serde_json::Value {
             json!({ "type": "device.state_changed", "id": id.0, "state": attributes })
         }
         Event::DeviceAdded { device } => {
-            json!({ "type": "device.state_changed", "id": device.id.0, "state": device.attributes })
+            json!({ "type": "device.added", "device": device })
         }
         Event::DeviceRemoved { id } => json!({ "type": "device.removed", "id": id.0 }),
         Event::DeviceSeen { .. } => json!({ "type": "internal.device_seen" }),

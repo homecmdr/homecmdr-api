@@ -167,6 +167,21 @@ impl DeviceRegistry {
         devices.values().cloned().collect()
     }
 
+    /// Returns all devices whose ID is prefixed with `"{adapter}:"`.
+    ///
+    /// This is the efficient way to fetch all entities from a single adapter
+    /// (e.g. every `open_meteo:*` device for a weather card) without a
+    /// client-side filter pass over the full device list.
+    pub fn list_devices_for_adapter(&self, adapter: &str) -> Vec<Device> {
+        let prefix = format!("{}:", adapter);
+        let devices = read_guard(&self.devices);
+        devices
+            .values()
+            .filter(|d| d.id.0.starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
     pub async fn upsert_room(&self, room: Room) {
         let event = {
             let mut rooms = write_guard(&self.rooms);

@@ -243,25 +243,37 @@ pub async fn list_group_devices(
     ))
 }
 
-/// Returns all devices, or a filtered subset when `?ids=` query parameters
-/// are provided.  Duplicate IDs in the query string are deduplicated.
+/// Returns all devices, or a filtered subset when query parameters are provided.
+///
+/// Supported filters (mutually exclusive; `ids` takes precedence if both are given):
+///
+/// - `?ids=open_meteo:humidity&ids=open_meteo:temperature_outdoor` — returns
+///   exactly the listed devices in the order requested, deduplicating any
+///   repeated IDs.  Unknown IDs are silently omitted.
+/// - `?adapter=open_meteo` — returns every device whose ID starts with
+///   `"open_meteo:"`.  Returns an empty array for an unknown adapter name
+///   (use `GET /adapters/{id}/devices` if you want a 404 for missing adapters).
 pub async fn list_devices(
     State(state): State<AppState>,
     RawQuery(raw_query): RawQuery,
 ) -> Json<Vec<homecmdr_core::model::Device>> {
     let ids = requested_device_ids(raw_query.as_deref());
-    if ids.is_empty() {
-        return Json(state.runtime.registry().list());
+    if !ids.is_empty() {
+        // ?ids= filter — deduplicate while preserving order.
+        let mut seen = std::collections::HashSet::new();
+        let devices = ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .filter_map(|id| state.runtime.registry().get(&DeviceId(id)))
+            .collect();
+        return Json(devices);
     }
 
-    let mut seen = std::collections::HashSet::new();
-    let devices = ids
-        .into_iter()
-        .filter(|id| seen.insert(id.clone()))
-        .filter_map(|id| state.runtime.registry().get(&DeviceId(id)))
-        .collect();
+    if let Some(adapter) = requested_adapter(raw_query.as_deref()) {
+        return Json(state.runtime.registry().list_devices_for_adapter(&adapter));
+    }
 
-    Json(devices)
+    Json(state.runtime.registry().list())
 }
 
 /// Parses `?ids=value` query parameters from the raw query string.
@@ -274,6 +286,19 @@ fn requested_device_ids(raw_query: Option<&str>) -> Vec<String> {
         .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
         .filter_map(|(key, value)| (key == "ids").then(|| value.into_owned()))
         .collect()
+}
+
+/// Parses a single `?adapter=value` query parameter from the raw query string.
+///
+/// Returns the first adapter name found, or `None` when the parameter is absent
+/// or its value is blank.
+fn requested_adapter(raw_query: Option<&str>) -> Option<String> {
+    raw_query
+        .into_iter()
+        .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+        .find_map(|(key, value)| {
+            (key == "adapter" && !value.is_empty()).then(|| value.into_owned())
+        })
 }
 
 /// Returns a single device by its full ID (e.g. `"elgato-lights:Key Light"`).

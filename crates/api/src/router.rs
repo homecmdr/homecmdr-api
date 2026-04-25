@@ -24,6 +24,7 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use homecmdr_core::config::Config;
 use homecmdr_core::store::ApiKeyRole;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -47,6 +48,7 @@ pub fn app(state: AppState, config: &Config) -> Router {
     let read_routes = Router::new()
         .route("/adapters", get(adapters::adapters))
         .route("/adapters/{id}", get(adapters::get_adapter))
+        .route("/adapters/{id}/devices", get(adapters::list_adapter_devices))
         .route("/capabilities", get(adapters::list_capabilities))
         .route("/scenes", get(scenes::list_scenes))
         .route("/scenes/{id}/history", get(scenes::get_scene_history))
@@ -241,7 +243,7 @@ pub fn cors_layer(config: &Config) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed_origins))
         .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
 }
 
 /// Resolves when `Ctrl+C` is pressed or a `SIGTERM` signal is received.

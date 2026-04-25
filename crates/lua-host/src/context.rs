@@ -1,3 +1,8 @@
+// This module defines the `ctx` object that every Lua script receives.
+// When you write `ctx:command(...)` or `ctx:get_device(...)` in a scene or
+// automation, those calls land here.  Think of it as the control panel that
+// bridges your Lua code and the rest of HomeCmdr.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,6 +21,9 @@ use crate::convert::{
     room_to_attribute_value,
 };
 
+// The outcome of a single `ctx:command(...)` or `ctx:command_group(...)`
+// call — which device was targeted, whether it worked, and an optional
+// human-readable message when something went wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandExecutionResult {
     pub target: String,
@@ -23,6 +31,9 @@ pub struct CommandExecutionResult {
     pub message: Option<String>,
 }
 
+// A small interior-mutable list that collects every command result while the
+// script is running.  Using Rc<RefCell<…>> keeps it cheap to clone alongside
+// the context (Lua needs the context to be Clone).
 #[derive(Clone, Default)]
 struct ExecutionResults(Rc<RefCell<Vec<CommandExecutionResult>>>);
 
@@ -36,6 +47,9 @@ impl ExecutionResults {
     }
 }
 
+// The context object handed to Lua scripts.  It holds a reference to the
+// live HomeCmdr runtime (for devices, commands, plugins) and an optional
+// reference to the person registry (for presence-based automations).
 #[derive(Clone)]
 pub struct LuaExecutionContext {
     runtime: Arc<Runtime>,
@@ -52,18 +66,24 @@ impl LuaExecutionContext {
         }
     }
 
+    // Attach person-tracking so scripts can call ctx:get_person / ctx:any_person_home etc.
     pub fn with_person_registry(mut self, person_registry: Arc<PersonRegistry>) -> Self {
         self.person_registry = Some(person_registry);
         self
     }
 
+    // Called after the script finishes to collect all the command outcomes.
     pub fn into_results(self) -> Vec<CommandExecutionResult> {
         self.execution_results.take()
     }
 }
 
+// Everything below is what Lua scripts can actually call on `ctx`.
+// Each `add_method` registers one method by name.
 impl UserData for LuaExecutionContext {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // ctx:command("device:id", { capability = "power", action = "on" })
+        // Sends a single command to one device and records whether it worked.
         methods.add_method(
             "command",
             |_, this, (device_id, command): (String, Table)| {
@@ -98,6 +118,9 @@ impl UserData for LuaExecutionContext {
             },
         );
 
+        // ctx:invoke("plugin:action", { ... })
+        // Calls a plugin and returns its response as a Lua value.
+        // Used for things like asking an LLM a question or querying a web API.
         methods.add_method("invoke", |lua, this, (target, payload): (String, Value)| {
             let payload = lua_value_to_attribute(payload)?;
             let response = block_in_place(|| {
@@ -114,6 +137,9 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, response.value)
         });
 
+        // ctx:get_device("device:id")
+        // Returns a table with the device's id, kind, room, attributes, etc.
+        // Returns nil if the device isn't registered.
         methods.add_method("get_device", |lua, this, device_id: String| {
             let Some(device) = this.runtime.registry().get(&DeviceId(device_id)) else {
                 return Ok(Value::Nil);
@@ -122,6 +148,8 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, device_to_attribute_value(&device))
         });
 
+        // ctx:list_devices()
+        // Returns an array of all known devices.
         methods.add_method("list_devices", |lua, this, (): ()| {
             let devices = this
                 .runtime
@@ -134,6 +162,8 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(devices))
         });
 
+        // ctx:get_room("room_id")
+        // Returns a table with the room's id and name, or nil if not found.
         methods.add_method("get_room", |lua, this, room_id: String| {
             let Some(room) = this
                 .runtime
@@ -146,6 +176,8 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, room_to_attribute_value(&room))
         });
 
+        // ctx:list_rooms()
+        // Returns an array of all rooms.
         methods.add_method("list_rooms", |lua, this, (): ()| {
             let rooms = this
                 .runtime
@@ -158,6 +190,8 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(rooms))
         });
 
+        // ctx:list_room_devices("room_id")
+        // Returns an array of every device that belongs to the given room.
         methods.add_method("list_room_devices", |lua, this, room_id: String| {
             let devices = this
                 .runtime
@@ -170,6 +204,9 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(devices))
         });
 
+        // ctx:get_group("group_id")
+        // Returns a table with the group's id, name, and member device ids.
+        // Returns nil if the group doesn't exist.
         methods.add_method("get_group", |lua, this, group_id: String| {
             let Some(group) = this
                 .runtime
@@ -182,6 +219,45 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, group_to_attribute_value(&group))
         });
 
+        // ctx:list_adapter_devices("open_meteo")
+        // Returns every device whose id starts with "<adapter>:" — the same
+        // as GET /devices?adapter=open_meteo in the HTTP API.  Useful for
+        // reading all sensor values from one adapter in a single call.
+        // Returns an empty array if no devices match (no error for unknown names).
+        methods.add_method("list_adapter_devices", |lua, this, adapter: String| {
+            let devices = this
+                .runtime
+                .registry()
+                .list_devices_for_adapter(&adapter)
+                .into_iter()
+                .map(|device| device_to_attribute_value(&device))
+                .collect();
+
+            attribute_to_lua_value(&lua, AttributeValue::Array(devices))
+        });
+
+        // ctx:get_devices({ "open_meteo:humidity", "open_meteo:temperature" })
+        // Fetches a specific set of devices by id in one call, preserving the
+        // order you requested.  Duplicate ids are silently collapsed and unknown
+        // ids are omitted — the same behaviour as GET /devices?ids=...&ids=...
+        methods.add_method("get_devices", |lua, this, ids: Vec<String>| {
+            let mut seen = std::collections::HashSet::new();
+            let devices: Vec<AttributeValue> = ids
+                .into_iter()
+                .filter(|id| seen.insert(id.clone()))
+                .filter_map(|id| {
+                    this.runtime
+                        .registry()
+                        .get(&DeviceId(id))
+                        .map(|d| device_to_attribute_value(&d))
+                })
+                .collect();
+
+            attribute_to_lua_value(&lua, AttributeValue::Array(devices))
+        });
+
+        // ctx:list_groups()
+        // Returns an array of all device groups.
         methods.add_method("list_groups", |lua, this, (): ()| {
             let groups = this
                 .runtime
@@ -194,6 +270,8 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(groups))
         });
 
+        // ctx:list_group_devices("group_id")
+        // Returns an array of every device that belongs to the given group.
         methods.add_method("list_group_devices", |lua, this, group_id: String| {
             let devices = this
                 .runtime
@@ -206,6 +284,9 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(devices))
         });
 
+        // ctx:command_group("group_id", { capability = "power", action = "off" })
+        // Sends the same command to every device in a group in one call.
+        // Errors immediately if the group doesn't exist.
         methods.add_method(
             "command_group",
             |_, this, (group_id, command): (String, Table)| {
@@ -229,6 +310,7 @@ impl UserData for LuaExecutionContext {
                     .registry()
                     .list_devices_in_group(&registry_group_id);
 
+                // Fan the command out to every member and record each result.
                 for device in devices {
                     let device_id_str = device.id.0.clone();
                     let result = match block_in_place(|| {
@@ -258,6 +340,9 @@ impl UserData for LuaExecutionContext {
             },
         );
 
+        // ctx:log("info", "message", { optional = "fields" })
+        // Writes a structured log entry from inside a script.
+        // Level must be one of: trace, debug, info, warn, error.
         methods.add_method(
             "log",
             |_, _, (level, message, fields): (String, String, Option<Value>)| {
@@ -283,6 +368,9 @@ impl UserData for LuaExecutionContext {
             },
         );
 
+        // ctx:sleep(seconds)
+        // Pauses the script for the given number of seconds (max 3600).
+        // Useful for adding a delay between two actions in the same script.
         methods.add_method("sleep", |_, _, secs: f64| {
             if !(0.0..=3600.0).contains(&secs) {
                 return Err(mlua::Error::external(
@@ -296,6 +384,9 @@ impl UserData for LuaExecutionContext {
             Ok(())
         });
 
+        // ctx:get_person("person_id")
+        // Returns a table with the person's id, name, presence state, and location.
+        // Returns nil if no person registry is configured or the id isn't found.
         methods.add_method("get_person", |lua, this, person_id: String| {
             let Some(registry) = &this.person_registry else {
                 return Ok(Value::Nil);
@@ -309,6 +400,8 @@ impl UserData for LuaExecutionContext {
             }
         });
 
+        // ctx:list_persons()
+        // Returns an array of all tracked people.  Empty array if no registry.
         methods.add_method("list_persons", |lua, this, (): ()| {
             let Some(registry) = &this.person_registry else {
                 return attribute_to_lua_value(&lua, AttributeValue::Array(Vec::new()));
@@ -321,6 +414,9 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(values))
         });
 
+        // ctx:all_persons_away()
+        // Returns true only when every tracked person is marked away.
+        // Handy for "nobody is home" automations.
         methods.add_method("all_persons_away", |_, this, (): ()| {
             let Some(registry) = &this.person_registry else {
                 return Ok(false);
@@ -330,6 +426,8 @@ impl UserData for LuaExecutionContext {
             }))
         });
 
+        // ctx:any_person_home()
+        // Returns true when at least one tracked person is home.
         methods.add_method("any_person_home", |_, this, (): ()| {
             let Some(registry) = &this.person_registry else {
                 return Ok(false);
