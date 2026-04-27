@@ -187,7 +187,7 @@ mod tests {
         }
     }
 
-    // Returns a minimal device with a single "power: on" attribute for use
+    // Returns a minimal device with a single "state: on" attribute for use
     // in tests that only care about command dispatch.
     fn bare_device(id: &str) -> Device {
         Device {
@@ -195,7 +195,7 @@ mod tests {
             room_id: None,
             kind: DeviceKind::Light,
             attributes: HashMap::from([(
-                "power".to_string(),
+                "state".to_string(),
                 AttributeValue::Text("on".to_string()),
             )]),
             metadata: Metadata {
@@ -251,7 +251,7 @@ mod tests {
         lua.load(
             r#"
             ctx:command_group("bedroom_lamps", {
-                capability = "power",
+                capability = "state",
                 action = "off",
             })
             "#,
@@ -281,9 +281,9 @@ mod tests {
                 .get(&DeviceId(id.to_string()))
                 .expect("device exists after command");
             assert_eq!(
-                device.attributes.get("power"),
+                device.attributes.get("state"),
                 Some(&AttributeValue::Text("off".to_string())),
-                "{id} power attribute should be off"
+                "{id} state attribute should be off"
             );
         }
     }
@@ -307,7 +307,7 @@ mod tests {
             .load(
                 r#"
                 ctx:command_group("nonexistent_group", {
-                    capability = "power",
+                    capability = "state",
                     action = "off",
                 })
                 "#,

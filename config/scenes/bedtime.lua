@@ -14,9 +14,9 @@ return {
 
     -- wait for the transition to finish, then cut power
     ctx:sleep(10)
-    ctx:command_group("bedroom_lamps", { capability = "power", action = "off" })
+    ctx:command_group("bedroom_lamps", { capability = "state", action = "off" })
 
     ctx:sleep(5)
-    ctx:command("roku_tv:tv", { capability = "power", action = "off" })
+    ctx:command("roku_tv:tv", { capability = "state", action = "off" })
   end
 }

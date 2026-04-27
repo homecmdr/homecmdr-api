@@ -17,6 +17,6 @@ return {
 
     -- wait for the transition to finish, then turn on the TV
     ctx:sleep(30)
-    ctx:command("roku_tv:tv", { capability = "power", action = "on" })
+    ctx:command("roku_tv:tv", { capability = "state", action = "on" })
   end
 }

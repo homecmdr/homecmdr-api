@@ -15,7 +15,7 @@ use homecmdr_core::model::{
 };
 use mlua::{Table, Value};
 
-// Turns a Lua table like `{ capability = "power", action = "on" }` into a
+// Turns a Lua table like `{ capability = "state", action = "on" }` into a
 // typed `DeviceCommand` that the runtime understands.
 pub fn lua_table_to_command(table: &Table) -> mlua::Result<DeviceCommand> {
     Ok(DeviceCommand {

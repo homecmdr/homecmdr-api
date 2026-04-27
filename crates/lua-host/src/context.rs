@@ -82,7 +82,7 @@ impl LuaExecutionContext {
 // Each `add_method` registers one method by name.
 impl UserData for LuaExecutionContext {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // ctx:command("device:id", { capability = "power", action = "on" })
+        // ctx:command("device:id", { capability = "state", action = "on" })
         // Sends a single command to one device and records whether it worked.
         methods.add_method(
             "command",
@@ -284,7 +284,7 @@ impl UserData for LuaExecutionContext {
             attribute_to_lua_value(&lua, AttributeValue::Array(devices))
         });
 
-        // ctx:command_group("group_id", { capability = "power", action = "off" })
+        // ctx:command_group("group_id", { capability = "state", action = "off" })
         // Sends the same command to every device in a group in one call.
         // Errors immediately if the group doesn't exist.
         methods.add_method(
