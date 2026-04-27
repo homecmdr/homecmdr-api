@@ -399,7 +399,7 @@ Example:
 ```bash
 curl -X POST http://127.0.0.1:3000/devices/roku_tv:tv/command \
   -H 'Content-Type: application/json' \
-  -d '{"capability":"power","action":"toggle"}'
+  -d '{"capability":"state","action":"toggle"}'
 ```
 
 Example with value:
@@ -484,7 +484,7 @@ Example:
 ```bash
 curl -X POST http://127.0.0.1:3000/rooms/living_room/command \
   -H 'Content-Type: application/json' \
-  -d '{"capability":"power","action":"off"}'
+  -d '{"capability":"state","action":"off"}'
 ```
 
 Response shape:
@@ -588,7 +588,7 @@ Example:
 ```bash
 curl -X POST http://127.0.0.1:3000/groups/bedroom_lamps/command \
   -H 'Content-Type: application/json' \
-  -d '{"capability":"power","action":"off"}'
+  -d '{"capability":"state","action":"off"}'
 ```
 
 Response shape:
@@ -640,7 +640,7 @@ Example frames:
 ```
 
 ```json
-{ "type": "device.state_changed", "id": "roku_tv:tv", "state": { "power": "off", "state": "online" } }
+{ "type": "device.state_changed", "id": "roku_tv:tv", "state": { "state": "off", "availability": "online" } }
 ```
 
 ```json
@@ -691,7 +691,7 @@ Commands always use:
 Examples:
 
 ```json
-{ "capability": "power", "action": "on" }
+{ "capability": "state", "action": "on" }
 ```
 
 ```json
@@ -737,12 +737,12 @@ return {
   description = "Prepare devices for a video call",
   execute = function(ctx)
     ctx:command("roku_tv:tv", {
-      capability = "power",
+      capability = "state",
       action = "off",
     })
 
     ctx:command("elgato_lights:light:0", {
-      capability = "power",
+      capability = "state",
       action = "on",
     })
   end
@@ -791,7 +791,7 @@ return {
 
     if result.boolean == true then
       ctx:command("elgato_lights:light:0", {
-        capability = "power",
+        capability = "state",
         action = "on",
       })
     end

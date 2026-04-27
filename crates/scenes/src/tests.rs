@@ -77,7 +77,7 @@ mod tests {
             room_id: None,
             kind: DeviceKind::Light,
             attributes: HashMap::from([(
-                "power".to_string(),
+                "state".to_string(),
                 AttributeValue::Text("off".to_string()),
             )]),
             metadata: Metadata {

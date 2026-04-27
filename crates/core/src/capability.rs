@@ -70,8 +70,8 @@ pub const EFFECT: &str = "effect";
 pub const TRANSITION: &str = "transition";
 pub const ILLUMINANCE: &str = "illuminance";
 pub const LED_INDICATION: &str = "led_indication";
-pub const POWER: &str = "power";
 pub const STATE: &str = "state";
+pub const AVAILABILITY: &str = "availability";
 pub const BATTERY: &str = "battery";
 pub const TEMPERATURE: &str = "temperature";
 pub const HUMIDITY: &str = "humidity";
@@ -118,7 +118,7 @@ pub const CUSTOM_ATTRIBUTE_PREFIX: &str = "custom.";
 
 pub const COLOR_MODE_VALUES: [&str; 5] = ["color_temp", "rgb", "xy", "hs", "white"];
 pub const LIGHT_EFFECT_VALUES: [&str; 5] = ["none", "flash", "strobe", "colorloop", "random"];
-pub const POWER_VALUES: [&str; 2] = ["on", "off"];
+pub const STATE_VALUES: [&str; 2] = ["on", "off"];
 pub const AVAILABILITY_VALUES: [&str; 4] = ["online", "offline", "unavailable", "unknown"];
 pub const AIR_QUALITY_VALUES: [&str; 7] = [
     "unknown",
@@ -149,7 +149,7 @@ pub const ENTRY_STATE_VALUES: [&str; 6] =
 
 pub const ACTION_GET: [&str; 1] = ["get"];
 pub const ACTION_SET: [&str; 1] = ["set"];
-pub const ACTION_POWER: [&str; 3] = ["on", "off", "toggle"];
+pub const ACTION_STATE: [&str; 3] = ["on", "off", "toggle"];
 pub const ACTION_BRIGHTNESS: [&str; 3] = ["set", "increase", "decrease"];
 pub const ACTION_COLOR_TEMPERATURE: [&str; 3] = ["set", "increase", "decrease"];
 pub const ACTION_EFFECT: [&str; 2] = ["set", "stop"];
@@ -282,15 +282,15 @@ pub const WEATHER_CAPABILITIES: [CapabilityDefinition; 12] = [
 pub const LIGHT_CAPABILITIES: [CapabilityDefinition; 13] = [
     CapabilityDefinition {
         domain: "lighting",
-        key: POWER,
-        schema: CapabilitySchema::Enum(&POWER_VALUES),
+        key: STATE,
+        schema: CapabilitySchema::Enum(&STATE_VALUES),
         read_only: false,
-        actions: &ACTION_POWER,
-        description: "On/off power control.",
+        actions: &ACTION_STATE,
+        description: "On/off power state.",
     },
     CapabilityDefinition {
         domain: "lighting",
-        key: STATE,
+        key: AVAILABILITY,
         schema: CapabilitySchema::Enum(&AVAILABILITY_VALUES),
         read_only: true,
         actions: &ACTION_GET,

@@ -84,7 +84,7 @@ Example:
 
 ```lua
 ctx:command_group("bedroom_lamps", {
-  capability = "power",
+  capability = "state",
   action = "off",
 })
 ```
@@ -170,9 +170,9 @@ Parameters:
 Example:
 
 ```lua
-ctx:command_group("bedroom_lamps", { capability = "power", action = "off" })
+ctx:command_group("bedroom_lamps", { capability = "state", action = "off" })
 ctx:sleep(5)
-ctx:command("roku_tv:tv", { capability = "power", action = "off" })
+ctx:command("roku_tv:tv", { capability = "state", action = "off" })
 ```
 
 Notes:
@@ -215,7 +215,7 @@ local ollama = require("ollama")
 
 if ollama.vision_bool(ctx, "Reply only true or false. Are clothes on the line?", snapshot_base64) then
   ctx:command("elgato_lights:light:0", {
-    capability = "power",
+    capability = "state",
     action = "on",
   })
 end
@@ -299,12 +299,12 @@ return {
   description = "Prepare devices for a video call",
   execute = function(ctx)
     ctx:command("roku_tv:tv", {
-      capability = "power",
+      capability = "state",
       action = "off",
     })
 
     ctx:command("elgato_lights:light:0", {
-      capability = "power",
+      capability = "state",
       action = "on",
     })
   end
@@ -354,7 +354,7 @@ return {
 
     if result.boolean == true then
       ctx:command("elgato_lights:light:0", {
-        capability = "power",
+  capability = "state",
         action = "on",
       })
     end
@@ -630,13 +630,13 @@ return {
     {
       type = "device_state",
       device_id = "roku_tv:tv",
-      attribute = "power",
+      attribute = "state",
       equals = false,
     },
   },
   execute = function(ctx, event)
     ctx:command("elgato_lights:light:0", {
-      capability = "power",
+      capability = "state",
       action = "on",
     })
   end,

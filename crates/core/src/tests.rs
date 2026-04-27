@@ -23,7 +23,7 @@ use crate::capability::{
     HVAC_MODE_VALUES, HVAC_STATE, HVAC_STATE_VALUES, ILLUMINANCE, LED_INDICATION,
     LIGHT_CAPABILITIES, LIGHT_EFFECT_VALUES, LOCK, LOCK_VALUES, MEDIA_APP, MEDIA_PLAYBACK,
     MEDIA_PLAYBACK_VALUES, MEDIA_SOURCE, MEDIA_TITLE, MOTION, MOTION_VALUES, MUTED, OCCUPANCY,
-    OCCUPANCY_VALUES, POWER, POWER_CONSUMPTION, POWER_VALUES, PRESET_MODE, PRESSURE,
+    OCCUPANCY_VALUES, AVAILABILITY, POWER_CONSUMPTION, STATE_VALUES, PRESET_MODE, PRESSURE,
     SENSOR_CAPABILITIES, SMOKE, STATE, SWING_MODE, TARGET_TEMPERATURE, TEMPERATURE,
     TEMPERATURE_OUTDOOR, TRANSITION, VOLTAGE, VOLUME, WATER_LEAK, WEATHER_CAPABILITIES,
     WIND_DIRECTION, WIND_SPEED,
@@ -140,7 +140,7 @@ fn device_round_trips_through_json() {
         measurement_value(21.5, "celsius"),
     );
     attributes.insert(
-        STATE.to_string(),
+        AVAILABILITY.to_string(),
         AttributeValue::Text("online".to_string()),
     );
     attributes.insert(
@@ -741,11 +741,11 @@ fn light_capabilities_are_unique_and_typed() {
         Some(CapabilitySchema::Enum(&LIGHT_EFFECT_VALUES))
     );
     assert_eq!(
-        capability_definition(POWER).map(|capability| capability.schema),
-        Some(CapabilitySchema::Enum(&POWER_VALUES))
+        capability_definition(STATE).map(|capability| capability.schema),
+        Some(CapabilitySchema::Enum(&STATE_VALUES))
     );
     assert_eq!(
-        capability_definition(STATE).map(|capability| capability.schema),
+        capability_definition(AVAILABILITY).map(|capability| capability.schema),
         Some(CapabilitySchema::Enum(&AVAILABILITY_VALUES))
     );
 }
@@ -1088,9 +1088,9 @@ async fn registry_accepts_valid_light_capabilities() {
                     ),
                 ])),
             ),
-            (POWER.to_string(), AttributeValue::Text("on".to_string())),
+            (STATE.to_string(), AttributeValue::Text("on".to_string())),
             (
-                STATE.to_string(),
+                AVAILABILITY.to_string(),
                 AttributeValue::Text("online".to_string()),
             ),
             (
@@ -1284,15 +1284,15 @@ async fn registry_rejects_unknown_non_custom_attribute_keys() {
 }
 
 #[test]
-fn device_command_validates_power_toggle_without_value() {
+fn device_command_validates_state_toggle_without_value() {
     DeviceCommand {
-        capability: POWER.to_string(),
+        capability: STATE.to_string(),
         action: "toggle".to_string(),
         value: None,
         transition_secs: None,
     }
     .validate()
-    .expect("power toggle command should validate");
+    .expect("state toggle command should validate");
 }
 
 #[test]
@@ -1314,20 +1314,20 @@ fn device_command_rejects_set_without_value() {
 }
 
 #[test]
-fn device_command_rejects_value_for_power_on() {
+fn device_command_rejects_value_for_state_on() {
     let error = DeviceCommand {
-        capability: POWER.to_string(),
+        capability: STATE.to_string(),
         action: "on".to_string(),
         value: Some(AttributeValue::Text("on".to_string())),
         transition_secs: None,
     }
     .validate()
     .err()
-    .expect("power on should not accept a value");
+    .expect("state on should not accept a value");
 
     assert_eq!(
         error.to_string(),
-        "command action 'on' for capability 'power' does not accept a value"
+        "command action 'on' for capability 'state' does not accept a value"
     );
 }
 

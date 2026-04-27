@@ -185,10 +185,10 @@ pub fn bool_attributes(key: &str, value: bool) -> String {
 ///
 /// ```
 /// let json = homecmdr_plugin_sdk::multi_attributes(&[
-///     ("power", "true"),
+///     ("state", "\"on\""),
 ///     ("brightness", "80"),
 /// ]);
-/// assert!(json.contains("\"power\":true"));
+/// assert!(json.contains("\"state\":\"on\""));
 /// assert!(json.contains("\"brightness\":80"));
 /// ```
 pub fn multi_attributes(pairs: &[(&str, &str)]) -> String {
@@ -295,9 +295,9 @@ mod tests {
 
     #[test]
     fn multi_attributes_shape() {
-        let j = multi_attributes(&[("power", "true"), ("brightness", "80")]);
+        let j = multi_attributes(&[("state", "\"on\""), ("brightness", "80")]);
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
-        assert_eq!(v["power"], true);
+        assert_eq!(v["state"], "on");
         assert_eq!(v["brightness"], 80);
     }
 

@@ -25,7 +25,7 @@ return {
     if result.message and result.message.content then
       -- Replace this with a real notifier device when available.
       ctx:command("roku_tv:tv", {
-        capability = "power",
+        capability = "state",
         action = "off",
       })
     end

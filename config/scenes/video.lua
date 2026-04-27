@@ -4,12 +4,12 @@ return {
   description = "Prepare devices for a video call",
   execute = function(ctx)
     ctx:command("roku_tv:tv", {
-      capability = "power",
+      capability = "state",
       action = "off",
     })
 
     ctx:command("elgato_lights:light:0", {
-      capability = "power",
+      capability = "state",
       action = "on",
     })
   end
