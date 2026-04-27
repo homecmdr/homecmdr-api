@@ -8,6 +8,11 @@ plugins/*/target/
 *.db-shm
 *.db-wal
 
+#Person pictures
+*.jpg
+*.jpeg
+*.png
+
 # SQLx offline metadata
 .sqlx/
 

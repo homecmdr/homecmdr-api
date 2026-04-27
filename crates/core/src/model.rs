@@ -68,6 +68,12 @@ pub struct Person {
     pub longitude: Option<f64>,
     /// Timestamp of the most recent state derivation.
     pub updated_at: DateTime<Utc>,
+    /// Timestamp of the most recent state *transition* (i.e. when `state` last changed).
+    ///
+    /// Set to `now()` whenever the computed state transitions to a different value.
+    /// Subsequent pings that confirm the same state leave this field untouched.
+    /// `None` for persons created before this field was introduced (legacy records).
+    pub state_changed_at: Option<DateTime<Utc>>,
 }
 
 /// A named geographic zone used for presence detection.

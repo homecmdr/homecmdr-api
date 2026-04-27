@@ -244,6 +244,7 @@ const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
 const SCHEMA_VERSION_V4: i64 = 4;
 const SCHEMA_VERSION_V5: i64 = 5;
+const SCHEMA_VERSION_V6: i64 = 6;
 
 // ── History config ─────────────────────────────────────────────────────────────
 
@@ -336,6 +337,9 @@ impl PostgresDeviceStore {
         }
         if schema_version < 5 {
             self.migrate_to_v5().await?;
+        }
+        if schema_version < 6 {
+            self.migrate_to_v6().await?;
         }
 
         Ok(())
@@ -495,6 +499,18 @@ impl PostgresDeviceStore {
             .context("failed to create person_history index")?;
 
         self.set_schema_version(SCHEMA_VERSION_V5).await
+    }
+
+    async fn migrate_to_v6(&self) -> Result<()> {
+        // Add state_changed_at column to existing persons table.
+        sqlx::query(
+            "ALTER TABLE persons ADD COLUMN IF NOT EXISTS state_changed_at TIMESTAMPTZ",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to add state_changed_at column to persons table")?;
+
+        self.set_schema_version(SCHEMA_VERSION_V6).await
     }
 
     // ── History helpers ────────────────────────────────────────────────────────
@@ -1466,8 +1482,8 @@ impl PersonStore for PostgresDeviceStore {
             .context("failed to serialize PersonState")?;
         sqlx::query(
             r#"
-            INSERT INTO persons (id, name, picture, state_json, state_source, latitude, longitude, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO persons (id, name, picture, state_json, state_source, latitude, longitude, updated_at, state_changed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
                 name         = EXCLUDED.name,
                 picture      = EXCLUDED.picture,
@@ -1475,7 +1491,8 @@ impl PersonStore for PostgresDeviceStore {
                 state_source = EXCLUDED.state_source,
                 latitude     = EXCLUDED.latitude,
                 longitude    = EXCLUDED.longitude,
-                updated_at   = EXCLUDED.updated_at
+                updated_at   = EXCLUDED.updated_at,
+                state_changed_at = EXCLUDED.state_changed_at
             "#,
         )
         .bind(&person.id.0)
@@ -1486,6 +1503,7 @@ impl PersonStore for PostgresDeviceStore {
         .bind(person.latitude)
         .bind(person.longitude)
         .bind(person.updated_at)
+        .bind(person.state_changed_at)
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to upsert person '{}'", person.id.0))?;
@@ -1495,7 +1513,7 @@ impl PersonStore for PostgresDeviceStore {
 
     async fn load_person(&self, id: &PersonId) -> anyhow::Result<Option<Person>> {
         let row = sqlx::query(
-            "SELECT id, name, picture, state_json::text AS state_json, state_source, latitude, longitude, updated_at FROM persons WHERE id = $1",
+            "SELECT id, name, picture, state_json::text AS state_json, state_source, latitude, longitude, updated_at, state_changed_at FROM persons WHERE id = $1",
         )
         .bind(&id.0)
         .fetch_optional(&self.pool)
@@ -1509,7 +1527,7 @@ impl PersonStore for PostgresDeviceStore {
 
     async fn load_all_persons(&self) -> anyhow::Result<Vec<Person>> {
         let rows = sqlx::query(
-            "SELECT id, name, picture, state_json::text AS state_json, state_source, latitude, longitude, updated_at FROM persons ORDER BY id ASC",
+            "SELECT id, name, picture, state_json::text AS state_json, state_source, latitude, longitude, updated_at, state_changed_at FROM persons ORDER BY id ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -1721,6 +1739,7 @@ fn person_from_row(row: sqlx::postgres::PgRow, trackers: Vec<DeviceId>) -> Resul
     let latitude: Option<f64> = row.get("latitude");
     let longitude: Option<f64> = row.get("longitude");
     let updated_at: DateTime<Utc> = row.get("updated_at");
+    let state_changed_at: Option<DateTime<Utc>> = row.get("state_changed_at");
 
     Ok(Person {
         id: PersonId(id),
@@ -1732,6 +1751,7 @@ fn person_from_row(row: sqlx::postgres::PgRow, trackers: Vec<DeviceId>) -> Resul
         latitude,
         longitude,
         updated_at,
+        state_changed_at,
     })
 }
 

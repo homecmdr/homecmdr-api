@@ -174,6 +174,7 @@ const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
 const SCHEMA_VERSION_V4: i64 = 4;
 const SCHEMA_VERSION_V5: i64 = 5;
+const SCHEMA_VERSION_V6: i64 = 6;
 
 const CREATE_API_KEYS_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -336,6 +337,9 @@ impl SqliteDeviceStore {
         }
         if schema_version < 5 {
             self.migrate_to_v5().await?;
+        }
+        if schema_version < 6 {
+            self.migrate_to_v6().await?;
         }
 
         Ok(())
@@ -540,6 +544,31 @@ impl SqliteDeviceStore {
         )
         .bind(SCHEMA_VERSION_KEY)
         .bind(SCHEMA_VERSION_V5.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to write SQLite schema version")?;
+
+        Ok(())
+    }
+
+    async fn migrate_to_v6(&self) -> Result<()> {
+        // Add state_changed_at column to existing persons table.
+        // SQLite does not support ALTER TABLE ... ADD COLUMN IF NOT EXISTS before 3.37.0,
+        // but this migration only runs once (version-gated), so it is safe without it.
+        sqlx::query("ALTER TABLE persons ADD COLUMN state_changed_at TEXT")
+            .execute(&self.pool)
+            .await
+            .context("failed to add state_changed_at column to SQLite persons table")?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO schema_metadata (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+        )
+        .bind(SCHEMA_VERSION_KEY)
+        .bind(SCHEMA_VERSION_V6.to_string())
         .execute(&self.pool)
         .await
         .context("failed to write SQLite schema version")?;
@@ -1578,8 +1607,8 @@ impl PersonStore for SqliteDeviceStore {
             .context("failed to serialize PersonState")?;
         sqlx::query(
             r#"
-            INSERT INTO persons (id, name, picture, state_json, state_source, latitude, longitude, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO persons (id, name, picture, state_json, state_source, latitude, longitude, updated_at, state_changed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 name        = excluded.name,
                 picture     = excluded.picture,
@@ -1587,7 +1616,8 @@ impl PersonStore for SqliteDeviceStore {
                 state_source = excluded.state_source,
                 latitude    = excluded.latitude,
                 longitude   = excluded.longitude,
-                updated_at  = excluded.updated_at
+                updated_at  = excluded.updated_at,
+                state_changed_at = excluded.state_changed_at
             "#,
         )
         .bind(&person.id.0)
@@ -1598,6 +1628,7 @@ impl PersonStore for SqliteDeviceStore {
         .bind(person.latitude)
         .bind(person.longitude)
         .bind(person.updated_at.to_rfc3339())
+        .bind(person.state_changed_at.map(|t| t.to_rfc3339()))
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to upsert person '{}'", person.id.0))?;
@@ -1607,7 +1638,7 @@ impl PersonStore for SqliteDeviceStore {
 
     async fn load_person(&self, id: &PersonId) -> anyhow::Result<Option<Person>> {
         let row = sqlx::query(
-            "SELECT id, name, picture, state_json, state_source, latitude, longitude, updated_at FROM persons WHERE id = ?1",
+            "SELECT id, name, picture, state_json, state_source, latitude, longitude, updated_at, state_changed_at FROM persons WHERE id = ?1",
         )
         .bind(&id.0)
         .fetch_optional(&self.pool)
@@ -1622,7 +1653,7 @@ impl PersonStore for SqliteDeviceStore {
 
     async fn load_all_persons(&self) -> anyhow::Result<Vec<Person>> {
         let rows = sqlx::query(
-            "SELECT id, name, picture, state_json, state_source, latitude, longitude, updated_at FROM persons ORDER BY id ASC",
+            "SELECT id, name, picture, state_json, state_source, latitude, longitude, updated_at, state_changed_at FROM persons ORDER BY id ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -1839,6 +1870,14 @@ fn person_from_row(row: sqlx::sqlite::SqliteRow, trackers: Vec<DeviceId>) -> Res
     let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
         .with_context(|| format!("invalid updated_at '{updated_at_str}' for person '{id}'"))?
         .with_timezone(&Utc);
+    let state_changed_at: Option<String> = row.get("state_changed_at");
+    let state_changed_at = state_changed_at
+        .map(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .with_context(|| format!("invalid state_changed_at '{s}' for person '{id}'"))
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .transpose()?;
 
     Ok(Person {
         id: PersonId(id),
@@ -1850,6 +1889,7 @@ fn person_from_row(row: sqlx::sqlite::SqliteRow, trackers: Vec<DeviceId>) -> Res
         latitude,
         longitude,
         updated_at,
+        state_changed_at,
     })
 }
 

@@ -116,6 +116,7 @@ pub async fn create_person(
         latitude: None,
         longitude: None,
         updated_at: chrono::Utc::now(),
+        state_changed_at: None,
     };
 
     registry

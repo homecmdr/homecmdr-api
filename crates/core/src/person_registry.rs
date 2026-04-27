@@ -850,6 +850,7 @@ impl PersonRegistry {
                 p.latitude = lat;
                 p.longitude = lon;
                 p.updated_at = now;
+                p.state_changed_at = Some(now);
             }
         }
 
