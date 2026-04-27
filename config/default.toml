@@ -99,3 +99,40 @@ poll_interval_secs = 90
 [plugins]
 enabled   = true
 directory = "config/plugins"
+
+# ── Generic MQTT adapter ──────────────────────────────────────────────────────
+# Bridges ESP32, Tasmota, ESPHome, and any other MQTT-capable device.
+# Install the binary first:  homecmdr plugin add plugin-mqtt
+# Then uncomment and fill in this block in config/local.toml.
+#
+# [adapters.mqtt]
+# enabled    = true
+# mqtt_host  = "192.168.1.10"   # MQTT broker IP or hostname
+# mqtt_port  = 1883              # default 1883
+# # mqtt_username = ""
+# # mqtt_password = ""
+#
+# # ── JSON-payload device (full state published as a JSON object) ────────────
+# # Typical for ESPHome and custom ESP32 firmware.
+# [[adapters.mqtt.devices]]
+# vendor_id      = "esp32_desk_lamp"          # becomes HomeCmdr ID mqtt:esp32_desk_lamp
+# kind           = "light"                    # "light" | "switch" | "sensor" | "virtual"
+# state_topic    = "home/desk_lamp/state"     # subscribe for JSON state
+# command_topic  = "home/desk_lamp/set"       # publish commands here
+# command_format = "json"                     # {"state":"ON"} style
+#
+# # ── Per-attribute device (one MQTT topic per attribute) ───────────────────
+# # Typical for Tasmota sensors or simple ESP32 firmware.
+# [[adapters.mqtt.devices]]
+# vendor_id = "esp32_bedroom_sensor"
+# kind      = "sensor"
+# command_topic  = "home/bedroom/set"
+# command_format = "plain"                    # publishes raw "ON"/"OFF"
+#
+# [[adapters.mqtt.devices.attribute_topics]]
+# topic     = "home/bedroom/temperature"      # MQTT topic
+# attribute = "temperature"                   # HomeCmdr canonical attribute
+#
+# [[adapters.mqtt.devices.attribute_topics]]
+# topic     = "home/bedroom/humidity"
+# attribute = "humidity"
